@@ -190,6 +190,85 @@ def _post_openai(base: str, key: str, payload: dict, timeout: int) -> dict:
         return json.loads(r.read().decode()), (time.time() - t0) * 1000
 
 
+def _post_openai_stream(base: str, key: str, payload: dict, timeout: int):
+    """Yield raw SSE `data:` lines from an OpenAI-compat upstream. Raises before first byte on failure."""
+    import urllib.request as _u
+    payload = dict(payload)
+    payload["stream"] = True
+    data = json.dumps(payload).encode()
+    req = _u.Request(base + "/chat/completions", data=data, headers={
+        "Content-Type": "application/json", "Authorization": f"Bearer {key}",
+        "HTTP-Referer": "https://localhost/harness", "X-Title": "harness", "Accept": "text/event-stream",
+    })
+    resp = _u.urlopen(req, timeout=timeout)
+    buf = b""
+    try:
+        while True:
+            chunk = resp.read(4096)
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
+                if line:
+                    yield line.decode(errors="replace")
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+
+def chat_stream(messages: list[dict], model: str = "auto-fastest", cfg: dict | None = None,
+                extra: dict | None = None, tools: list | None = None):
+    """Yield SSE lines, failing over to the next candidate if upstream dies before first byte."""
+    from .reasoning import provider_params
+    cfg = cfg or {}
+    timeout = (cfg.get("router", {}) or {}).get("timeout_s", 60)
+    retries = (cfg.get("router", {}) or {}).get("max_retries", 2)
+    parsed = parse_model(model)
+    ordered = rank(candidates(parsed, cfg), cfg)
+    if os.environ.get("HARNESS_MOCK") == "1" or not ordered:
+        last = messages[-1].get("content", "") if messages else ""
+        yield f'data: {json.dumps({"choices": [{"delta": {"content": f"[mock:{model}] echo: {str(last)[:200]}"}}]})}'
+        yield "data: [DONE]"
+        return
+    last_err: Exception | None = None
+    for cand in ordered[: max(1, retries + 1)]:
+        pname, mid = cand["provider"], cand["model"]
+        meta = PROVIDERS.get(pname)
+        if not meta or meta.get("native"):
+            continue
+        key = os.environ.get(meta.get("env", ""), "") if meta.get("env") else "ollama"
+        if meta.get("env") and not key:
+            continue
+        payload = {"model": mid, "messages": messages, "stream": True}
+        if tools:
+            payload["tools"] = tools
+        if extra:
+            payload.update(provider_params(pname, (extra.get("reasoning") or "medium"), mid))
+        t0 = time.time()
+        try:
+            gen = _post_openai_stream(meta["base"], key, payload, timeout)
+            first = next(gen)  # failover point: nothing sent to client yet
+            _record(pname, mid, (time.time() - t0) * 1000, True)
+            yield first
+            for line in gen:
+                yield line
+            return
+        except StopIteration:
+            _record(pname, mid, (time.time() - t0) * 1000, True)
+            yield "data: [DONE]"
+            return
+        except Exception as e:  # noqa: BLE001 - failover path
+            _record(pname, mid, 5000, False)
+            last_err = e
+            continue
+    yield f'data: {json.dumps({"error": f"all providers failed for {model!r}: {last_err}"})}'
+    yield "data: [DONE]"
+
+
 def chat(messages: list[dict], model: str = "auto-fastest", cfg: dict | None = None,
          extra: dict | None = None, tools: list | None = None) -> dict:
     """Synchronous chat with failover. Returns OpenAI-style message dict + _route meta.

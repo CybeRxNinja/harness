@@ -157,8 +157,29 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/stop":
             return self._send(200, {"ok": True})
         if self.path == "/v1/chat/completions":
+            from .router import chat_stream
             msgs = body.get("messages", [])
             model = body.get("model", "auto-fastest")
+            if body.get("stream"):
+                lines = []
+                try:
+                    for line in chat_stream(msgs, model=model, cfg=cfg,
+                                            tools=body.get("tools")):
+                        lines.append(line)
+                except Exception as e:
+                    lines.append(f'data: {json.dumps({"error": str(e)[:300]})}')
+                lines.append("data: [DONE]")
+                payload = ("\n".join(lines) + "\n").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                try:
+                    self.wfile.write(payload)
+                except Exception:
+                    pass
+                return
             try:
                 m = chat(msgs, model=model, cfg=cfg)
                 return self._send(200, {"id": "chatcmpl-harness", "object": "chat.completion",
