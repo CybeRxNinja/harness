@@ -37,8 +37,9 @@ jobs:
       - name: Collect binary
         working-directory: upstream/packages/opencode
         run: |
-          ls -la dist/
-          f=$(ls dist/* | head -1)
+          find dist -maxdepth 3 | head -20
+          f=$(find dist -type f -executable | head -1)
+          test -n "$f" || { echo "no executable in dist/"; exit 1; }
           cp "$f" "$GITHUB_WORKSPACE/harness-tui-linux-x64"
           chmod +x "$GITHUB_WORKSPACE/harness-tui-linux-x64"
       - uses: actions/upload-artifact@v4
