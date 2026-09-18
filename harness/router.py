@@ -323,6 +323,16 @@ def list_models(cfg: dict | None = None) -> list[dict]:
     return list(seen.values())
 
 
+def reasoning_from_body(body: dict) -> dict:
+    """Map upstream reasoning controls to harness canonical levels. {} if none."""
+    lvl = body.get("reasoning_effort") or body.get("reasoningEffort")
+    if isinstance(lvl, dict):
+        lvl = lvl.get("effort")
+    if isinstance(lvl, str) and lvl.lower() in ("off", "low", "medium", "high", "max", "xhigh"):
+        return {"reasoning": lvl.lower()}
+    return {}
+
+
 def did_you_mean(s: str) -> list[str]:
     keys = list(GROUPS) + ["auto-fastest", "tag:coding", "tag:reasoning", "tag:general", "tag:fast"]
     return [k for k in keys if s[:3].lower() in k.lower()][:3]

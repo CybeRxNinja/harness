@@ -10,11 +10,11 @@
         "apiKey": "{env:HARNESS_TOKEN}"
       },
       "models": {
-        "auto-fastest": { "name": "Auto Fastest" },
-        "tag:coding": { "name": "Coding" },
-        "tag:reasoning": { "name": "Reasoning" },
-        "tag:general": { "name": "General" },
-        "tag:fast": { "name": "Fast" }
+        "auto-fastest": { "name": "Auto Fastest", "reasoning": true },
+        "tag:coding": { "name": "Coding", "reasoning": true },
+        "tag:reasoning": { "name": "Reasoning", "reasoning": true },
+        "tag:general": { "name": "General", "reasoning": true },
+        "tag:fast": { "name": "Fast", "reasoning": true }
       }
     }
   },

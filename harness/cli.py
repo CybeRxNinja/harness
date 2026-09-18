@@ -188,6 +188,13 @@ def ensure_opencode_config() -> str:
     prov = cur.setdefault("provider", {})
     if "harness" not in prov:
         prov["harness"] = want["provider"]["harness"]
+    else:
+        # backfill new keys (e.g. reasoning capability) without clobbering user edits
+        existing_models = prov["harness"].setdefault("models", {})
+        for mid, spec in want["provider"]["harness"].get("models", {}).items():
+            node = existing_models.setdefault(mid, {})
+            for k, v in spec.items():
+                node.setdefault(k, v)
     agents = cur.setdefault("agent", {})
     for name, spec in want["agent"].items():
         agents.setdefault(name, spec)

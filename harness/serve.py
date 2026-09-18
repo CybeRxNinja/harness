@@ -157,13 +157,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/stop":
             return self._send(200, {"ok": True})
         if self.path == "/v1/chat/completions":
-            from .router import chat_stream
+            from .router import chat_stream, reasoning_from_body
             msgs = body.get("messages", [])
             model = body.get("model", "auto-fastest")
+            extra = reasoning_from_body(body) or None
             if body.get("stream"):
                 lines = []
                 try:
-                    for line in chat_stream(msgs, model=model, cfg=cfg,
+                    for line in chat_stream(msgs, model=model, cfg=cfg, extra=extra,
                                             tools=body.get("tools")):
                         lines.append(line)
                 except Exception as e:
@@ -181,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return
             try:
-                m = chat(msgs, model=model, cfg=cfg)
+                m = chat(msgs, model=model, cfg=cfg, extra=extra)
                 return self._send(200, {"id": "chatcmpl-harness", "object": "chat.completion",
                                         "choices": [{"index": 0, "message": {k: v for k, v in m.items() if not k.startswith("_")}, "finish_reason": "stop"}]})
             except Exception as e:
