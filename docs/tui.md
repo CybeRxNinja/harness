@@ -1,0 +1,2 @@
+# TUI (TUI-B only + CLI fallback)
+Binary `harness-tui` built by `.github/workflows/build-tui.yml` from `sst/opencode` fork + `tui/patches/`. Sidebar: Sessions|Tasks|Agents|Memory|Skills|Models|MCP. Center: Chat|Diff|Plan|Logs. Palette `/spec/plan/build/test/review/ship/sec/...`. Models tab edits category chains via config_set diff. All calls hit `serve :8787` SSE. No binary/SSH/scripts: `harness chat --mode ...` fallback (same loop). See `tui/README.md`.

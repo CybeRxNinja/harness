@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.harness/sessions.db*
+.harness/kernel/
+.harness/runs/
+.harness/shadow/
+.harness/workers/
+.harness/backups/
+.harness/boulder.json
+.harness/ledger.jsonl
+.harness/plans/
+.harness/*.log
+.venv/

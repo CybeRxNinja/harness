@@ -1,0 +1,2 @@
+# RLM kernel
+`py` executes in persistent per-session namespace (pickled vars only). `bash` 10s fg then background handle (`poll/output/tail`, logs in `.harness/runs/`). `rlm.spawn` admission handle `{id,name,session_dir,model}`; results via mailbox/files. Skills importable when `scripts/*.py` exists. Host (keys/DB/routing) never in `py` globals. Trust: user perms, jailed paths, socket blocked unless allow_net, allowlisted shell.
