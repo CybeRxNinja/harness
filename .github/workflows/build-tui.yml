@@ -4,13 +4,10 @@ on:
     tags: ["tui-v*"]
   workflow_dispatch:
 env:
-  TUI_REF: v0.0.0  # pin sst/opencode tag here on each rebase
+  TUI_REF: v1.18.31  # pinned sst/opencode tag; bump on rebase
 jobs:
   build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Checkout upstream opencode
@@ -22,20 +19,34 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - name: Copy fork patches manifest
-        run: ls tui/README.md && echo "apply tui/patches/*.patch to upstream/ here"
+      - name: Apply harness fork patches
+        working-directory: upstream
+        run: |
+          shopt -s nullglob
+          for p in ../tui/patches/*.patch; do
+            echo "applying $p"
+            git apply "$p"
+          done
+          echo "patches done"
       - name: Install (CI machine, not user PC)
         working-directory: upstream
         run: bun install
-      - name: Compile harness-tui
-        working-directory: upstream
-        run: bun build --compile packages/opencode/src/index.ts --outfile harness-tui-linux-x64
+      - name: Compile harness-tui (single native target, no embedded web UI)
+        working-directory: upstream/packages/opencode
+        run: bun run script/build.ts --single --skip-embed-web-ui --skip-install
+      - name: Collect binary
+        working-directory: upstream/packages/opencode
+        run: |
+          ls -la dist/
+          f=$(ls dist/* | head -1)
+          cp "$f" "$GITHUB_WORKSPACE/harness-tui-linux-x64"
+          chmod +x "$GITHUB_WORKSPACE/harness-tui-linux-x64"
       - uses: actions/upload-artifact@v4
         with:
           name: harness-tui-linux-x64
-          path: upstream/harness-tui-linux-x64
+          path: harness-tui-linux-x64
       - name: Release
         if: startsWith(github.ref, 'refs/tags/tui-v')
         uses: softprops/action-gh-release@v2
         with:
-          files: upstream/harness-tui-linux-x64
+          files: harness-tui-linux-x64
