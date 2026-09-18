@@ -1,17 +1,18 @@
 # TUI-B fork (opencode -> harness-tui)
 
-Upstream: `sst/opencode` (pinned — see workflow `TUI_REF`). Only these paths are kept:
-`packages/opencode/src/cli`, `packages/opencode/src/tui` (opentui), provider loader.
-Deleted in fork patch: `packages/web`, `packages/console`, `desktop`, `sdks/*`.
+Upstream: `sst/opencode` pinned (`TUI_REF` in workflow, currently `v1.18.31`).
+Only `packages/opencode` + `packages/tui` are built; web UI embed skipped.
 
-## Reskin deltas (`tui/patches/`)
-1. `provider-harness.patch` — add `provider.harness {baseURL:http://127.0.0.1:8787/v1, apiKey:$HARNESS_TOKEN}`; all completions go through harness relay (`auto-fastest/tag:*`). Hide native model keys UI.
-2. `sidebar-tabs.patch` — tabs Sessions|Tasks|Agents|Memory|Skills|Models|MCP hitting `GET /api/*`; center Chat|Diff|Plan|Logs; palette adds `/spec/plan/build/test/review/ship/sec/skills/memory/compress/refine/usage/checkpoint/model/goal/stop`.
-3. `agents-modes.patch` — Tab cycles Code/Plan/Ask/Debug/Review/Orchestrator with tool allowlists from `docs/agents.md`; `@general` calls `POST /api/spawn`.
-4. `slim.patch` — remove web preview, built-in LSP, auto-update check.
+## Reskin = plugin + config, not a rewrite
+1. `plugins/harness-panels.tsx` — builtin sidebar plugin (Tasks|Agents|Skills|Memory|Models tabs via the `sidebar_content` slot, reads `HARNESS_URL`/`HARNESS_TOKEN`). CI copies it to `packages/tui/src/feature-plugins/sidebar/harness.tsx`.
+2. `patches/sidebar-builtins.patch` — 2-line registry entry (generated via `git diff` against the pinned tag, verified with `git apply --check`).
+3. `harness-opencode.json` — drop-in user config: `provider.harness` (openai-compat → `http://127.0.0.1:8787/v1`, key `{env:HARNESS_TOKEN}`, models auto-fastest + tag:*), agents `orchestrator/ask/debug/review`, default model `harness/auto-fastest`.
+
+## Scope note (honest)
+Via the provider shim the TUI drives the harness **relay** (routing/QoS/failover) with opencode-native sessions/tools. The harness brain (orchestrator spawn, RLM kernel, skills, memory writes) runs in `harness serve` and is operated via CLI + `POST /api/chat`, observed from the sidebar panels. Unifying both loops over the OpenAI protocol is future work, not v0.
 
 ## Build (CI only — never on potato PC)
-`.github/workflows/build-tui.yml` runs `bun install` + `bun build --compile` for linux-x64 (arm64 next), uploads `harness-tui-<arch>` to Releases. Installer verifies sha256.
+`.github/workflows/build-tui.yml`: checkout upstream → apply `tui/patches/*.patch` → copy plugin → `bun install` → `script/build.ts --single --skip-embed-web-ui` → `harness-tui-linux-x64` artifact/Release. Installer verifies sha256.
 
 ## Dev loop without building
 Run core + CLI fallback: `harness serve &` then `harness chat`. TUI contract tests hit the same SSE endpoints.

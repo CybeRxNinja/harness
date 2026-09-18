@@ -1,0 +1,20 @@
+diff --git a/packages/tui/src/feature-plugins/builtins.ts b/packages/tui/src/feature-plugins/builtins.ts
+index b67923f..34de7ed 100644
+--- a/packages/tui/src/feature-plugins/builtins.ts
++++ b/packages/tui/src/feature-plugins/builtins.ts
+@@ -4,6 +4,7 @@ import HomeTips from "./home/tips"
+ import SidebarContext from "./sidebar/context"
+ import SidebarFiles from "./sidebar/files"
+ import SidebarFooter from "./sidebar/footer"
++import SidebarHarness from "./sidebar/harness"
+ import SidebarLsp from "./sidebar/lsp"
+ import SidebarMcp from "./sidebar/mcp"
+ import SidebarTodo from "./sidebar/todo"
+@@ -27,6 +28,7 @@ export function createBuiltinPlugins(options: { experimentalEventSystem: boolean
+     SidebarLsp,
+     SidebarTodo,
+     SidebarFiles,
++    SidebarHarness,
+     SidebarFooter,
+     Notifications,
+     PluginManager,

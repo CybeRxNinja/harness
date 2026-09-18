@@ -27,6 +27,8 @@ jobs:
             echo "applying $p"
             git apply "$p"
           done
+          echo "installing harness sidebar plugin"
+          cp ../tui/plugins/harness-panels.tsx packages/tui/src/feature-plugins/sidebar/harness.tsx
           echo "patches done"
       - name: Install (CI machine, not user PC)
         working-directory: upstream

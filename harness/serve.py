@@ -105,6 +105,17 @@ class Handler(BaseHTTPRequestHandler):
             inbox = R.inbox(con) if sess else []
             con.close()
             return self._send(200, {"todos": todos, "inbox": inbox})
+        if parsed.path == "/api/skills":
+            from . import skills as S
+            return self._send(200, S.scan(self.root, cfg))
+        if parsed.path == "/api/memory":
+            from . import memory as M
+            qs = urllib.parse.parse_qs(parsed.query)
+            q = (qs.get("q") or [""])[0]
+            con = connect(self.root)
+            out = M.recall(con, q) if q else []
+            con.close()
+            return self._send(200, out)
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
