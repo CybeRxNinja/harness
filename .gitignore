@@ -11,3 +11,4 @@ __pycache__/
 .harness/plans/
 .harness/*.log
 .venv/
+*.egg-info/
