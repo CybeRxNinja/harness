@@ -3,7 +3,7 @@ set -euo pipefail
 # Installer: core via pip + TUI binary from Releases (sha256 verified). No Bun on user machine.
 REPO="${HARNESS_REPO:-CybeRxNinja/harness}"
 VER="${HARNESS_VER:-latest}"
-pip install -e . 2>/dev/null || pip install .
+pip install -e . --break-system-packages 2>/dev/null || pip install -e . 2>/dev/null || pip install .
 mkdir -p ~/.harness ~/.local/bin
 if command -v harness-tui >/dev/null; then echo "harness-tui present: $(command -v harness-tui)"; exit 0; fi
 ARCH=x64

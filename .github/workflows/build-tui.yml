@@ -3,6 +3,8 @@ on:
   push:
     tags: ["tui-v*"]
   workflow_dispatch:
+permissions:
+  contents: write  # lets the Release step publish (repo default is read-only)
 env:
   TUI_REF: v1.18.31  # pinned sst/opencode tag; bump on rebase
 jobs:
