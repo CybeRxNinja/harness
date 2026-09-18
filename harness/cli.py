@@ -165,6 +165,92 @@ def cmd_setup(args) -> int:
     return 0
 
 
+def _opencode_config_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+    return Path(base) / "opencode" / "opencode.json"
+
+
+def ensure_opencode_config() -> str:
+    """Merge provider.harness + harness agents into opencode.json. Never clobbers user keys."""
+    import json as _j
+    import shutil as _sh
+    import time as _t
+    dest = _opencode_config_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cur = _j.loads(dest.read_text()) if dest.exists() else {}
+    except Exception:
+        cur = {}
+    if dest.exists():
+        _sh.copy2(dest, dest.with_suffix(f".bak-{int(_t.time())}.json"))
+    src = Path(__file__).resolve().parent.parent / "tui" / "harness-opencode.json"
+    want = _j.loads(src.read_text())
+    prov = cur.setdefault("provider", {})
+    if "harness" not in prov:
+        prov["harness"] = want["provider"]["harness"]
+    agents = cur.setdefault("agent", {})
+    for name, spec in want["agent"].items():
+        agents.setdefault(name, spec)
+    cur.setdefault("model", "harness/auto-fastest")
+    dest.write_text(_j.dumps(cur, indent=2) + "\n")
+    return str(dest)
+
+
+def _serve_healthy(port: int) -> bool:
+    import urllib.request as _u
+    try:
+        with _u.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _ensure_serve(root: Path, port: int) -> None:
+    import subprocess as _sp
+    import time as _t
+    if _serve_healthy(port):
+        return
+    log = root / ".harness" / "serve.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    _sp.Popen([sys.executable, "-m", "harness", "--root", str(root),
+               "serve", "--port", str(port)],
+              stdout=open(log, "a"), stderr=_sp.STDOUT, start_new_session=True)
+    for _ in range(25):
+        if _serve_healthy(port):
+            return
+        _t.sleep(0.4)
+    raise RuntimeError(f"serve did not come up on :{port} (see {log})")
+
+
+def _find_tui() -> str | None:
+    import shutil as _sh
+    for cand in (_sh.which("harness-tui"), str(Path.home() / ".local" / "bin" / "harness-tui"),
+                 str(Path("harness-tui-linux-x64").resolve())):
+        if cand and Path(cand).exists():
+            return cand
+    return None
+
+
+def cmd_tui(args) -> int:
+    from .serve import ensure_token
+    root = _root(args)
+    if args.dry_run:
+        print(f"would: ensure serve :{args.port}, merge {_opencode_config_path()}, exec harness-tui")
+        return 0
+    _ensure_serve(root, args.port)
+    os.environ["HARNESS_TOKEN"] = ensure_token()
+    os.environ.setdefault("HARNESS_URL", f"http://127.0.0.1:{args.port}")
+    cfg_path = ensure_opencode_config()
+    binary = _find_tui()
+    if not binary:
+        print("harness-tui binary not found. Get it via:")
+        print("  curl -fsSL https://raw.githubusercontent.com/CybeRxNinja/harness/main/install.sh | bash")
+        print(f"(opencode.json already wired at {cfg_path}; CLI fallback: harness chat)")
+        return 1
+    print(f"launching {binary} (serve :{args.port}, config {cfg_path})")
+    os.execvp(binary, [binary])
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="harness", description="All-in-one coding harness (CLI fallback)")
     p.add_argument("--root", default=".", help="project root")
@@ -215,6 +301,10 @@ def build_parser() -> argparse.ArgumentParser:
     pl.set_defaults(fn=cmd_plan)
     su = sub.add_parser("setup")
     su.set_defaults(fn=cmd_setup)
+    t = sub.add_parser("tui", help="one command: serve + config + launch harness-tui")
+    t.add_argument("--port", type=int, default=8787)
+    t.add_argument("--dry-run", action="store_true")
+    t.set_defaults(fn=cmd_tui)
     return p
 
 
@@ -223,7 +313,7 @@ def main(argv=None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv and not argv[0].startswith("-") and argv[0] not in (
-            "chat", "serve", "doctor", "config", "skills", "memory", "checkpoint", "plan", "setup"):
+            "chat", "serve", "doctor", "config", "skills", "memory", "checkpoint", "plan", "setup", "tui"):
         argv = ["chat", argv[0]] + argv[1:]
     args = build_parser().parse_args(argv)
     if not getattr(args, "cmd", None) and not hasattr(args, "fn"):

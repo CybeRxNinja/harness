@@ -26,12 +26,10 @@ harness chat "fix failing tests" --mode orchestrator --model tag:coding
 
 ## TUI (TUI-B, CI-built)
 
-The beautiful TUI is a fork of `sst/opencode` pointing at `harness serve`.
-Binaries are built by GitHub Actions (see `.github/workflows/build-tui.yml`), not on your PC:
+One command does everything (starts `serve`, wires `opencode.json`, launches the TUI):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOU/harness/main/install.sh | bash
-harness-tui   # talks to localhost:8787
+harness tui
 ```
 
 No binary yet / SSH / scripts: `harness chat ...` is the guaranteed fallback (same loop).
