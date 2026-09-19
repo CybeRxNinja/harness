@@ -38,18 +38,28 @@ GROUPS: dict[str, dict] = {
 # (OpenRouter :free endpoints cost $0 under the same key; Groq/Cerebras have
 # free tiers; Ollama is always free/local). IDs churn — failover covers misses.
 FREE_GROUPS: dict[str, dict] = {
-    "free-reasoner": {"quality": 0.80, "ctx": 128000, "tags": ["reasoning", "general", "free"],
+    # Verified live against the OpenRouter catalog; breadth across vendors so
+    # 429/404 on one still leaves options. Groq/Cerebras/Ollama ids activate
+    # automatically when those keys exist (verified on arrival).
+    "free-giant": {"quality": 0.85, "ctx": 128000, "tags": ["reasoning", "general", "free"],
+                   "ids": {"openrouter": "nvidia/nemotron-3-ultra-550b-a55b:free"}},
+    "free-reasoner": {"quality": 0.82, "ctx": 128000, "tags": ["reasoning", "general", "free"],
                       "ids": {"openrouter": "deepseek/deepseek-v4-flash-0731:free",
                               "groq": "deepseek-r1-distill-llama-70b",
-                              "cerebras": "llama-3.3-70b",
                               "ollama": "deepseek-r1"}},
-    "free-coder": {"quality": 0.78, "ctx": 96000, "tags": ["coding", "general", "free"],
-                   "ids": {"openrouter": "qwen/qwen3.8-27b:free",
+    "free-glm": {"quality": 0.83, "ctx": 128000, "tags": ["coding", "reasoning", "general", "free"],
+                 "ids": {"openrouter": "z-ai/glm-5.2:free"}},
+    "free-coder": {"quality": 0.78, "ctx": 32000, "tags": ["coding", "general", "free"],
+                   "ids": {"openrouter": "cohere/north-mini-code:free",
                            "groq": "qwen-qwq-32b",
-                           "cerebras": "qwen-3-coder-480b",
                            "ollama": "qwen2.5-coder"}},
+    "free-coder-qwen": {"quality": 0.76, "ctx": 96000, "tags": ["coding", "general", "free"],
+                        "ids": {"openrouter": "qwen/qwen3.8-27b:free"}},
+    "free-swift": {"quality": 0.72, "ctx": 128000, "tags": ["general", "fast", "free"],
+                   "ids": {"openrouter": "nvidia/nemotron-3-super-120b-a12b:free",
+                           "groq": "llama-3.3-70b-versatile"}},
     "free-general": {"quality": 0.70, "ctx": 128000, "tags": ["general", "fast", "free"],
-                     "ids": {"openrouter": "z-ai/glm-5.2:free",
+                     "ids": {"openrouter": "google/gemma-4-31b-it:free",
                              "groq": "llama-3.3-70b-versatile",
                              "nvidia": "meta/llama-3.3-70b-instruct",
                              "ollama": "llama3.3"}},
@@ -126,6 +136,42 @@ def _provider_has_key(name: str) -> bool:
     return bool(os.environ.get(env))
 
 
+def _openrouter_tier() -> str:
+    """'free' if the OpenRouter key is free-tier (paid models 402), else 'full'.
+    Cached daily in stats; unknown (no key/offline) -> 'full' (no filtering)."""
+    s = _load_stats()
+    ent = s.get("_tier", {})
+    if ent.get("at", 0) > time.time() - 86400 and ent.get("tier"):
+        return ent["tier"]
+    tier = "full"
+    key = os.environ.get("OPENROUTER_API_KEY", "")
+    if key:
+        try:
+            req = urllib.request.Request("https://openrouter.ai/api/v1/auth/key",
+                                         headers={"Authorization": f"Bearer {key}"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = json.loads(r.read().decode()).get("data", {})
+                if data.get("is_free_tier"):
+                    tier = "free"
+        except Exception:
+            pass
+    s["_tier"] = {"tier": tier, "at": int(time.time())}
+    _save_stats(s)
+    return tier
+
+
+def _finalize(cands: list[dict], banned: set, parsed: dict) -> list[dict]:
+    out = [c for c in cands if f"{c['provider']}/{c['model']}" not in banned]
+    # free-tier OpenRouter keys 402 every paid model: keep :free endpoints only.
+    # (Other providers unaffected; pins bypass this filter by design.)
+    if parsed["kind"] != "pin" and _openrouter_tier() == "free":
+        free_only = [c for c in out
+                     if not (c["provider"] == "openrouter" and not c["model"].endswith(":free"))]
+        if free_only:
+            return free_only
+    return out
+
+
 def candidates(parsed: dict, cfg: dict) -> list[dict]:
     """Return ordered provider|model candidates before QoS ranking."""
     cands: list[dict] = []
@@ -145,7 +191,7 @@ def candidates(parsed: dict, cfg: dict) -> list[dict]:
         for pname in PROVIDERS:
             if _provider_has_key(pname):
                 cands.append({"provider": pname, "model": g.get("ids", {}).get(pname, parsed["group"]), "quality": g["quality"], "ctx": g["ctx"]})
-        return [c for c in cands if f"{c['provider']}/{c['model']}" not in banned]
+        return _finalize(cands, banned, parsed)
     # auto + tag
     want_tag = parsed.get("tag") if parsed["kind"] == "tag" else None
     min_ctx = parsed.get("min_ctx")
@@ -170,7 +216,7 @@ def candidates(parsed: dict, cfg: dict) -> list[dict]:
             if _provider_has_key(pname):
                 cands.append({"provider": pname, "model": "auto", "quality": 0.5, "ctx": 32000})
                 break
-    return [c for c in cands if f"{c['provider']}/{c['model']}" not in banned]
+    return _finalize(cands, banned, parsed)
 
 
 def rank(cands: list[dict], cfg: dict, need_tools: bool = False) -> list[dict]:
@@ -197,8 +243,18 @@ def rank(cands: list[dict], cfg: dict, need_tools: bool = False) -> list[dict]:
     return out
 
 
+def _retry_after_s(e: Exception) -> int:
+    """Honor upstream Retry-After on 429s (capped). 0 = none present."""
+    try:
+        headers = getattr(e, "headers", {}) or {}
+        raw = headers.get("Retry-After", headers.get("retry-after", ""))
+        return max(0, min(300, int(float(str(raw).split(",")[0].strip()))))
+    except Exception:
+        return 0
+
+
 def _record(provider: str, model: str, ms: float, ok: bool, requested: str = "",
-            tools: bool = False, not_found: bool = False) -> None:
+            tools: bool = False, not_found: bool = False, rate_limited: int = 0) -> None:
     s = _load_stats()
     key = f"{provider}|{model}"
     st = s.get(key, {"ewma_ms": 3000, "errors": 0})
@@ -206,6 +262,8 @@ def _record(provider: str, model: str, ms: float, ok: bool, requested: str = "",
     st["errors"] = 0 if ok else st.get("errors", 0) + 1
     if not ok and st["errors"] >= 2:
         st["cooldown_until"] = time.time() + 60
+    if rate_limited:
+        st["cooldown_until"] = time.time() + rate_limited  # explicit backoff wins
     if ok and tools:
         st.pop("no_tools", None)  # serves tools again: capability restored
     if not_found and tools:
@@ -307,7 +365,9 @@ def chat_stream(messages: list[dict], model: str = "auto-fastest", cfg: dict | N
             return
         except Exception as e:  # noqa: BLE001 - failover path
             nf = "404" in str(e)
-            _record(pname, mid, 5000, False, model, tools=need, not_found=nf)
+            ra = _retry_after_s(e) if "429" in str(e) else 0
+            _record(pname, mid, 5000, False, model, tools=need, not_found=nf,
+                    rate_limited=ra or (60 if "429" in str(e) or "402" in str(e) else 0))
             errs.append(f"{pname}/{mid}: {str(e)[:100]}")
             continue
     yield f'data: {json.dumps({"error": f"all providers failed for {model!r}: " + "; ".join(errs[:5])})}\n\n'.encode()
@@ -354,7 +414,9 @@ def chat(messages: list[dict], model: str = "auto-fastest", cfg: dict | None = N
             return msg
         except Exception as e:  # noqa: BLE001 - failover path
             nf = "404" in str(e)
-            _record(pname, mid, 5000, False, model, tools=need, not_found=nf)
+            ra = _retry_after_s(e) if "429" in str(e) else 0
+            _record(pname, mid, 5000, False, model, tools=need, not_found=nf,
+                    rate_limited=ra or (60 if "429" in str(e) or "402" in str(e) else 0))
             errs.append(f"{pname}/{mid}: {str(e)[:100]}")
             continue
     raise RuntimeError(f"all providers failed for {model!r}: " + "; ".join(errs[:5]))
