@@ -164,17 +164,24 @@ class Handler(BaseHTTPRequestHandler):
             from .router import chat_stream, reasoning_from_body
             msgs = body.get("messages", [])
             model = body.get("model", "auto-fastest")
+            try:
+                with open("/home/jailbreaker20/.harness/serve.log", "a") as _f:
+                    _keys = sorted(body.keys())
+                    _f.write(f"v1chat model={model} stream={bool(body.get('stream'))} "
+                             f"keys={_keys} msgs={len(msgs)} tools={len(body.get('tools') or [])}\n")
+            except Exception:
+                pass
             extra = reasoning_from_body(body) or None
             if body.get("stream"):
-                lines = []
+                payload = b""
                 try:
-                    for line in chat_stream(msgs, model=model, cfg=cfg, extra=extra,
-                                            tools=body.get("tools")):
-                        lines.append(line)
+                    for chunk in chat_stream(msgs, model=model, cfg=cfg, extra=extra,
+                                             tools=body.get("tools")):
+                        payload += chunk if isinstance(chunk, bytes) else str(chunk).encode()
                 except Exception as e:
-                    lines.append(f'data: {json.dumps({"error": str(e)[:300]})}')
-                lines.append("data: [DONE]")
-                payload = ("\n".join(lines) + "\n").encode()
+                    payload += f'data: {json.dumps({"error": str(e)[:300]})}\n\n'.encode()
+                if not payload.endswith(b"data: [DONE]\n\n"):
+                    payload += b"data: [DONE]\n\n"
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-store")

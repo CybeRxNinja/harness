@@ -191,7 +191,11 @@ def _post_openai(base: str, key: str, payload: dict, timeout: int) -> dict:
 
 
 def _post_openai_stream(base: str, key: str, payload: dict, timeout: int):
-    """Yield raw SSE `data:` lines from an OpenAI-compat upstream. Raises before first byte on failure."""
+    """Yield RAW byte chunks verbatim (preserves SSE blank-line framing).
+
+    Never re-split/re-join lines: strict clients (AI SDK) require \\n\\n
+    event separators. Raises before first byte on failure (failover point).
+    """
     import urllib.request as _u
     payload = dict(payload)
     payload["stream"] = True
@@ -201,18 +205,12 @@ def _post_openai_stream(base: str, key: str, payload: dict, timeout: int):
         "HTTP-Referer": "https://localhost/harness", "X-Title": "harness", "Accept": "text/event-stream",
     })
     resp = _u.urlopen(req, timeout=timeout)
-    buf = b""
     try:
         while True:
             chunk = resp.read(4096)
             if not chunk:
                 break
-            buf += chunk
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                line = line.strip()
-                if line:
-                    yield line.decode(errors="replace")
+            yield chunk
     finally:
         try:
             resp.close()
@@ -231,8 +229,8 @@ def chat_stream(messages: list[dict], model: str = "auto-fastest", cfg: dict | N
     ordered = rank(candidates(parsed, cfg), cfg)
     if os.environ.get("HARNESS_MOCK") == "1" or not ordered:
         last = messages[-1].get("content", "") if messages else ""
-        yield f'data: {json.dumps({"choices": [{"delta": {"content": f"[mock:{model}] echo: {str(last)[:200]}"}}]})}'
-        yield "data: [DONE]"
+        yield f'data: {json.dumps({"choices": [{"delta": {"content": f"[mock:{model}] echo: {str(last)[:200]}"}}]})}\n\n'.encode()
+        yield b"data: [DONE]\n\n"
         return
     last_err: Exception | None = None
     for cand in ordered[: max(1, retries + 1)]:
@@ -254,19 +252,19 @@ def chat_stream(messages: list[dict], model: str = "auto-fastest", cfg: dict | N
             first = next(gen)  # failover point: nothing sent to client yet
             _record(pname, mid, (time.time() - t0) * 1000, True)
             yield first
-            for line in gen:
-                yield line
+            for chunk in gen:
+                yield chunk if isinstance(chunk, bytes) else str(chunk).encode()
             return
         except StopIteration:
             _record(pname, mid, (time.time() - t0) * 1000, True)
-            yield "data: [DONE]"
+            yield b"data: [DONE]\n\n"
             return
         except Exception as e:  # noqa: BLE001 - failover path
             _record(pname, mid, 5000, False)
             last_err = e
             continue
-    yield f'data: {json.dumps({"error": f"all providers failed for {model!r}: {last_err}"})}'
-    yield "data: [DONE]"
+    yield f'data: {json.dumps({"error": f"all providers failed for {model!r}: {last_err}"})}\n\n'.encode()
+    yield b"data: [DONE]\n\n"
 
 
 def chat(messages: list[dict], model: str = "auto-fastest", cfg: dict | None = None,
