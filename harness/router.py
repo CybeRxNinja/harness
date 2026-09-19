@@ -27,7 +27,7 @@ GROUPS: dict[str, dict] = {
                     "ids": {"openrouter": "minimax/minimax-m2.5"}},
     "glm-4.7": {"quality": 0.78, "ctx": 128000, "tags": ["coding", "general", "agentic"],
                "ids": {"openrouter": "z-ai/glm-5.3"}},
-    "deepseek-v3.2": {"quality": 0.84, "ctx": 128000, "tags": ["coding", "reasoning", "general"]},
+    "deepseek-v3.2": {"quality": 0.84, "ctx": 128000, "tags": ["coding", "reasoning", "general", "fast"]},
     "qwen-coder": {"quality": 0.75, "ctx": 128000, "tags": ["coding", "fast"],
                   "ids": {"openrouter": "qwen/qwen3-coder", "groq": "qwen-qwq-32b"}},
     "llama-fast": {"quality": 0.62, "ctx": 128000, "tags": ["fast", "general"],
@@ -173,7 +173,7 @@ def candidates(parsed: dict, cfg: dict) -> list[dict]:
     return [c for c in cands if f"{c['provider']}/{c['model']}" not in banned]
 
 
-def rank(cands: list[dict], cfg: dict) -> list[dict]:
+def rank(cands: list[dict], cfg: dict, need_tools: bool = False) -> list[dict]:
     stats = _load_stats()
     target = (cfg.get("router", {}) or {}).get("target_latency_ms", TARGET_MS_DEFAULT)
     out = []
@@ -182,6 +182,8 @@ def rank(cands: list[dict], cfg: dict) -> list[dict]:
         key = f"{c['provider']}|{c['model']}"
         st = stats.get(key, {})
         if st.get("cooldown_until", 0) > now:
+            continue
+        if need_tools and st.get("no_tools"):
             continue
         ewma = st.get("ewma_ms", target)
         err = st.get("errors", 0)
@@ -195,7 +197,8 @@ def rank(cands: list[dict], cfg: dict) -> list[dict]:
     return out
 
 
-def _record(provider: str, model: str, ms: float, ok: bool, requested: str = "") -> None:
+def _record(provider: str, model: str, ms: float, ok: bool, requested: str = "",
+            tools: bool = False, not_found: bool = False) -> None:
     s = _load_stats()
     key = f"{provider}|{model}"
     st = s.get(key, {"ewma_ms": 3000, "errors": 0})
@@ -203,6 +206,10 @@ def _record(provider: str, model: str, ms: float, ok: bool, requested: str = "")
     st["errors"] = 0 if ok else st.get("errors", 0) + 1
     if not ok and st["errors"] >= 2:
         st["cooldown_until"] = time.time() + 60
+    if ok and tools:
+        st.pop("no_tools", None)  # serves tools again: capability restored
+    if not_found and tools:
+        st["no_tools"] = True  # 404 on a tool request: route lacks tool support
     s[key] = st
     if ok and requested:
         recent = s.get("_recent", [])
@@ -263,14 +270,16 @@ def chat_stream(messages: list[dict], model: str = "auto-fastest", cfg: dict | N
     timeout = (cfg.get("router", {}) or {}).get("timeout_s", 60)
     retries = (cfg.get("router", {}) or {}).get("max_retries", 2)
     parsed = parse_model(model)
-    ordered = rank(candidates(parsed, cfg), cfg)
+    need = bool(tools)
+    ordered = rank(candidates(parsed, cfg), cfg, need_tools=need)
+    max_attempts = max(1, int((cfg.get("router", {}) or {}).get("max_attempts", 5)))
     if os.environ.get("HARNESS_MOCK") == "1" or not ordered:
         last = messages[-1].get("content", "") if messages else ""
         yield f'data: {json.dumps({"choices": [{"delta": {"content": f"[mock:{model}] echo: {str(last)[:200]}"}}]})}\n\n'.encode()
         yield b"data: [DONE]\n\n"
         return
-    last_err: Exception | None = None
-    for cand in ordered[: max(1, retries + 1)]:
+    errs: list[str] = []
+    for cand in ordered[: max(1, min(len(ordered), max_attempts))]:
         pname, mid = cand["provider"], cand["model"]
         meta = PROVIDERS.get(pname)
         if not meta or meta.get("native"):
@@ -287,20 +296,21 @@ def chat_stream(messages: list[dict], model: str = "auto-fastest", cfg: dict | N
         try:
             gen = _post_openai_stream(meta["base"], key, payload, timeout)
             first = next(gen)  # failover point: nothing sent to client yet
-            _record(pname, mid, (time.time() - t0) * 1000, True, model)
+            _record(pname, mid, (time.time() - t0) * 1000, True, model, tools=need)
             yield first
             for chunk in gen:
                 yield chunk if isinstance(chunk, bytes) else str(chunk).encode()
             return
         except StopIteration:
-            _record(pname, mid, (time.time() - t0) * 1000, True, model)
+            _record(pname, mid, (time.time() - t0) * 1000, True, model, tools=need)
             yield b"data: [DONE]\n\n"
             return
         except Exception as e:  # noqa: BLE001 - failover path
-            _record(pname, mid, 5000, False)
-            last_err = e
+            nf = "404" in str(e)
+            _record(pname, mid, 5000, False, model, tools=need, not_found=nf)
+            errs.append(f"{pname}/{mid}: {str(e)[:100]}")
             continue
-    yield f'data: {json.dumps({"error": f"all providers failed for {model!r}: {last_err}"})}\n\n'.encode()
+    yield f'data: {json.dumps({"error": f"all providers failed for {model!r}: " + "; ".join(errs[:5])})}\n\n'.encode()
     yield b"data: [DONE]\n\n"
 
 
@@ -315,13 +325,15 @@ def chat(messages: list[dict], model: str = "auto-fastest", cfg: dict | None = N
     timeout = (cfg.get("router", {}) or {}).get("timeout_s", 60)
     retries = (cfg.get("router", {}) or {}).get("max_retries", 2)
     parsed = parse_model(model)
-    ordered = rank(candidates(parsed, cfg), cfg)
+    need = bool(tools)
+    ordered = rank(candidates(parsed, cfg), cfg, need_tools=need)
+    max_attempts = max(1, int((cfg.get("router", {}) or {}).get("max_attempts", 5)))
     if os.environ.get("HARNESS_MOCK") == "1" or not ordered:
         last = messages[-1].get("content", "") if messages else ""
         return {"role": "assistant", "content": f"[mock:{model}] echo: {str(last)[:500]}",
                 "_route": {"provider": "mock", "model": model, "mock": True}}
-    last_err: Exception | None = None
-    for cand in ordered[: max(1, retries + 1)]:
+    errs: list[str] = []
+    for cand in ordered[: max(1, min(len(ordered), max_attempts))]:
         pname, mid = cand["provider"], cand["model"]
         meta = PROVIDERS.get(pname)
         if not meta or meta.get("native"):
@@ -336,15 +348,16 @@ def chat(messages: list[dict], model: str = "auto-fastest", cfg: dict | None = N
             payload.update(provider_params(pname, (extra.get("reasoning") or "medium"), mid))
         try:
             body, ms = _post_openai(meta["base"], key, payload, timeout)
-            _record(pname, mid, ms, True, model)
+            _record(pname, mid, ms, True, model, tools=need)
             msg = body["choices"][0]["message"]
             msg["_route"] = {"provider": pname, "model": mid, "ms": int(ms)}
             return msg
         except Exception as e:  # noqa: BLE001 - failover path
-            _record(pname, mid, 5000, False)
-            last_err = e
+            nf = "404" in str(e)
+            _record(pname, mid, 5000, False, model, tools=need, not_found=nf)
+            errs.append(f"{pname}/{mid}: {str(e)[:100]}")
             continue
-    raise RuntimeError(f"all providers failed for {model!r}: {last_err}")
+    raise RuntimeError(f"all providers failed for {model!r}: " + "; ".join(errs[:5]))
 
 
 def list_models(cfg: dict | None = None) -> list[dict]:
