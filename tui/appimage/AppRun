@@ -10,7 +10,7 @@ log() { echo "[harness] $*" >&2; }
 # --- 1. harness CLI (installed once, refreshed when the contract moves) ---
 # AppRun depends on current CLI behavior (per-directory serve, AppImage lookup,
 # setup-only). Reinstall whenever the installed copy is missing or too old.
-NEED_PROTO=3
+NEED_PROTO=4
 cli_ok() { python3 -c "from harness import PROTO; raise SystemExit(0 if PROTO >= $NEED_PROTO else 1)" 2>/dev/null; }
 if ! cli_ok; then
   log "installing harness CLI from GitHub (once)..."

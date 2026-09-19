@@ -321,11 +321,15 @@ def cmd_tui(args) -> int:
     os.environ["HARNESS_TOKEN"] = ensure_token()
     os.environ.setdefault("HARNESS_URL", f"http://127.0.0.1:{args.port}")
     _ensure_tmp()
+    try:
+        cfg_path = ensure_opencode_config()
+    except Exception as e:
+        print(f"harness: config merge failed ({e}) — continuing", file=sys.stderr)
+        cfg_path = _opencode_config_path()
     if args.setup_only:
         print(f"export HARNESS_TOKEN={os.environ['HARNESS_TOKEN']}")
         print(f"export HARNESS_URL={os.environ['HARNESS_URL']}")
         return 0
-    cfg_path = ensure_opencode_config()
     binary = _find_tui()
     if not binary:
         print("harness-tui binary not found. Get it via:")
