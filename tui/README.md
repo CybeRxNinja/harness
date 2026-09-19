@@ -1,6 +1,6 @@
 # TUI-B fork (opencode -> harness-tui)
 
-Upstream: `sst/opencode` pinned (`TUI_REF` in workflow, currently `v1.18.31`).
+Upstream: `sst/opencode` pinned in `tui/UPSTREAM_REF` (currently `v1.18.31`).
 Only `packages/opencode` + `packages/tui` are built; web UI embed skipped.
 
 ## Reskin = plugin + config, not a rewrite

@@ -16,7 +16,6 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
-  workflows: write  # sync bumps TUI_REF inside build-tui.yml
 env:
   UPSTREAM: sst/opencode
 jobs:
@@ -39,7 +38,7 @@ jobs:
       - name: Compare with pin
         id: cmp
         run: |
-          CURRENT=$(grep -oP '^  TUI_REF: \K\S+' .github/workflows/build-tui.yml | head -1)
+          CURRENT="$(tr -d ' \t\r\n' < tui/UPSTREAM_REF)"
           echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "pinned: $CURRENT / upstream: ${{ steps.target.outputs.tag }}"
           if [ "$CURRENT" = "${{ steps.target.outputs.tag }}" ]; then
@@ -90,8 +89,8 @@ jobs:
           git config user.name "harness-sync"
           git config user.email "harness-sync@localhost"
           git checkout -b "$BR"
-          sed -i "s|^  TUI_REF: .*|  TUI_REF: $TAG  # pinned sst/opencode tag; bump on rebase|" .github/workflows/build-tui.yml
-          git add .github/workflows/build-tui.yml
+          printf '%s\n' "$TAG" > tui/UPSTREAM_REF
+          git add tui/UPSTREAM_REF
           git commit -m "sync upstream pin to $TAG (patches verified)" || exit 0
           git push -u origin "$BR"
           gh pr create --title "upstream sync: $TAG" --fill \

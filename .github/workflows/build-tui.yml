@@ -7,13 +7,17 @@ on:
   workflow_dispatch:
 permissions:
   contents: write  # lets the Release step publish (repo default is read-only)
-env:
-  TUI_REF: v1.18.31  # pinned sst/opencode tag; bump on rebase
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Read upstream pin
+        id: pin
+        run: |
+          REF="$(tr -d ' \t\r\n' < tui/UPSTREAM_REF)"
+          echo "TUI_REF=$REF" >> "$GITHUB_ENV"
+          echo "pin=$REF"
       - name: Checkout upstream opencode
         uses: actions/checkout@v4
         with:
