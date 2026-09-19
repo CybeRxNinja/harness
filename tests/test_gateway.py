@@ -63,8 +63,10 @@ def test_sse_text_extract():
     assert _msg_chars([{"role": "user", "content": "hello"}]) == 5
     assert _msg_chars([{"role": "user", "content": [{"type": "text", "text": "abc"}]}]) == 3
     assert _sse_chars(b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n') == 2
-    assert _model_ctx("auto-fastest") == 0
+    assert _model_ctx("auto-fastest") == 200000
     assert _model_ctx("deepseek-v3.2") == 128000
+    assert _model_ctx("tag:reasoning") == 200000
+    assert _model_ctx("nope-unknown-xyz") == 0
 
 
 def test_tasks_global_and_usage_global():
