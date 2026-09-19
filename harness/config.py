@@ -26,8 +26,8 @@ DEFAULT_CONFIG: dict = {
     "budgets": {"max_turns": 25, "max_tokens": 120000, "max_cost_usd": 2.0, "max_parallel": 2, "max_depth": 1},
     "categories": {
         "quick": {"models": ["auto-fastest"], "reasoning": "low", "max_turns": 15},
-        "deep": {"models": ["tag:free", "tag:reasoning+min_ctx:32k", "auto-fastest"], "reasoning": "high", "max_turns": 25},
-        "ultrabrain": {"models": ["tag:free", "tag:reasoning", "auto-fastest"], "reasoning": "max", "max_turns": 30},
+        "deep": {"models": ["tag:reasoning+min_ctx:32k", "tag:free", "auto-fastest"], "reasoning": "high", "max_turns": 25},
+        "ultrabrain": {"models": ["tag:reasoning", "tag:free", "auto-fastest"], "reasoning": "max", "max_turns": 30},
         "visual": {"models": ["tag:coding", "auto-fastest"], "reasoning": "medium", "max_turns": 20},
         "writing": {"models": ["tag:general", "auto-fastest"], "reasoning": "medium", "max_turns": 15},
         "unspecified-low": {"models": ["auto-fastest"], "reasoning": "low", "max_turns": 15},
