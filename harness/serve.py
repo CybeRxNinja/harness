@@ -68,9 +68,19 @@ def _sse_chars(payload: bytes) -> int:
 
 
 def _model_ctx(model: str) -> int:
-    from .router import GROUPS
+    from .router import GROUPS, parse_model
     g = GROUPS.get(model or "")
-    return int(g.get("ctx", 0)) if g else 0
+    if g:
+        return int(g.get("ctx", 0))
+    try:
+        tag = parse_model(model or "").get("tag")
+    except Exception:
+        tag = None
+    if tag:
+        return max([int(x.get("ctx", 0)) for x in GROUPS.values() if tag in x.get("tags", [])] or [0])
+    if (model or "") in ("auto-fastest", ""):
+        return max([int(x.get("ctx", 0)) for x in GROUPS.values()] or [0])
+    return 0
 
 
 def _record_v1(root, model: str, msgs: list, out_chars: int, dur_ms: int = 0,
