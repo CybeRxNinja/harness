@@ -16,6 +16,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  workflows: write  # sync bumps TUI_REF inside build-tui.yml
 env:
   UPSTREAM: sst/opencode
 jobs:
