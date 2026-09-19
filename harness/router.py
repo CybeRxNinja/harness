@@ -538,6 +538,11 @@ def rank(cands: list[dict], cfg: dict, need_tools: bool = False) -> list[dict]:
             continue
         if need_tools and st.get("no_tools"):
             continue
+        meta = PROVIDERS.get(c["provider"], {})
+        if meta.get("env") and not os.environ.get(meta["env"]):
+            # keyless: only anonymous-capable free endpoints may attempt
+            if not (meta.get("optional_key") and c["model"].endswith(":free")):
+                continue
         ewma = st.get("ewma_ms", target)
         err = st.get("errors", 0)
         latency_score = target / (target + max(0, ewma))
@@ -590,10 +595,11 @@ def recent_routes(limit: int = 10) -> list[dict]:
 
 def _post_openai(base: str, key: str, payload: dict, timeout: int) -> dict:
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(base + "/chat/completions", data=data, headers={
-        "Content-Type": "application/json", "Authorization": f"Bearer {key}",
-        "HTTP-Referer": "https://localhost/harness", "X-Title": "harness",
-    })
+    headers = {"Content-Type": "application/json",
+               "HTTP-Referer": "https://localhost/harness", "X-Title": "harness"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    req = urllib.request.Request(base + "/chat/completions", data=data, headers=headers)
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode()), (time.time() - t0) * 1000
@@ -609,10 +615,12 @@ def _post_openai_stream(base: str, key: str, payload: dict, timeout: int):
     payload = dict(payload)
     payload["stream"] = True
     data = json.dumps(payload).encode()
-    req = _u.Request(base + "/chat/completions", data=data, headers={
-        "Content-Type": "application/json", "Authorization": f"Bearer {key}",
-        "HTTP-Referer": "https://localhost/harness", "X-Title": "harness", "Accept": "text/event-stream",
-    })
+    headers = {"Content-Type": "application/json",
+               "HTTP-Referer": "https://localhost/harness", "X-Title": "harness",
+               "Accept": "text/event-stream"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    req = _u.Request(base + "/chat/completions", data=data, headers=headers)
     resp = _u.urlopen(req, timeout=timeout)
     try:
         while True:
@@ -650,8 +658,9 @@ def chat_stream(messages: list[dict], model: str = "auto-fastest", cfg: dict | N
         meta = PROVIDERS.get(pname)
         if not meta or meta.get("native"):
             continue
-        key = os.environ.get(meta.get("env", ""), "") if meta.get("env") else "ollama"
-        if meta.get("env") and not key:
+        key = os.environ.get(meta.get("env", ""), "") if meta.get("env") else ""
+        if meta.get("env") and not key and not (
+                meta.get("optional_key") and mid.endswith(":free")):
             continue
         payload = {"model": mid, "messages": messages, "stream": True}
         if tools:
@@ -707,8 +716,9 @@ def chat(messages: list[dict], model: str = "auto-fastest", cfg: dict | None = N
         meta = PROVIDERS.get(pname)
         if not meta or meta.get("native"):
             continue  # v0: OpenAI-compat path only; native Anthropic mapped via openrouter
-        key = os.environ.get(meta.get("env", ""), "") if meta.get("env") else "ollama"
-        if meta.get("env") and not key:
+        key = os.environ.get(meta.get("env", ""), "") if meta.get("env") else ""
+        if meta.get("env") and not key and not (
+                meta.get("optional_key") and mid.endswith(":free")):
             continue
         payload = {"model": mid, "messages": messages, "stream": False}
         if tools:
