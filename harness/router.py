@@ -21,12 +21,17 @@ TARGET_MS_DEFAULT = 3000
 
 # curated static quality 0..1 + tags + ctx. Small, hand-tuned. Extend via config later.
 GROUPS: dict[str, dict] = {
-    "kimi-k2.5": {"quality": 0.82, "ctx": 200000, "tags": ["coding", "general", "agentic"]},
-    "minimax-m2.5": {"quality": 0.80, "ctx": 200000, "tags": ["coding", "general", "agentic"]},
-    "glm-4.7": {"quality": 0.78, "ctx": 128000, "tags": ["coding", "general", "agentic"]},
+    "kimi-k2.5": {"quality": 0.82, "ctx": 200000, "tags": ["coding", "general", "agentic"],
+                 "ids": {"openrouter": "moonshotai/kimi-k2.5", "groq": "moonshotai/kimi-k2-instruct"}},
+    "minimax-m2.5": {"quality": 0.80, "ctx": 200000, "tags": ["coding", "general", "agentic"],
+                    "ids": {"openrouter": "minimax/minimax-m2.5"}},
+    "glm-4.7": {"quality": 0.78, "ctx": 128000, "tags": ["coding", "general", "agentic"],
+               "ids": {"openrouter": "z-ai/glm-5.3"}},
     "deepseek-v3.2": {"quality": 0.84, "ctx": 128000, "tags": ["coding", "reasoning", "general"]},
-    "qwen-coder": {"quality": 0.75, "ctx": 128000, "tags": ["coding", "fast"]},
-    "llama-fast": {"quality": 0.62, "ctx": 128000, "tags": ["fast", "general"]},
+    "qwen-coder": {"quality": 0.75, "ctx": 128000, "tags": ["coding", "fast"],
+                  "ids": {"openrouter": "qwen/qwen3-coder", "groq": "qwen-qwq-32b"}},
+    "llama-fast": {"quality": 0.62, "ctx": 128000, "tags": ["fast", "general"],
+                 "ids": {"openrouter": "meta-llama/llama-3.3-70b-instruct", "groq": "llama-3.3-70b-versatile"}},
 }
 
 # Curated free-tier groups. ids map overrides the group slug per provider
