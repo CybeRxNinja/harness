@@ -1,0 +1,54 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "harness/auto-fastest",
+  "provider": {
+    "harness": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Harness Relay (builtin router)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8787/v1",
+        "apiKey": "{env:HARNESS_TOKEN}"
+      },
+      "models": {
+        "auto-fastest": { "name": "Auto Fastest", "reasoning": true },
+        "tag:coding": { "name": "Coding", "reasoning": true },
+        "tag:reasoning": { "name": "Reasoning", "reasoning": true },
+        "tag:general": { "name": "General", "reasoning": true },
+        "tag:fast": { "name": "Fast", "reasoning": true },
+        "tag:free": { "name": "Free Best", "reasoning": true }
+      }
+    }
+  },
+  "agent": {
+    "orchestrator": {
+      "description": "Plans, delegates to subagents in parallel, merges and verifies. Writes no product code directly.",
+      "mode": "primary",
+      "model": "harness/tag:reasoning",
+      "prompt": "You are the ORCHESTRATOR. Never write product code yourself. Decompose work, spawn parallel subagents via the task tool (one responsibility each), merge their diffs, and verify with tests before done. Keep context lean: ask for SUMMARY+DIFF only.",
+      "permission": {
+        "edit": "deny",
+        "task": "allow",
+        "bash": "ask",
+        "webfetch": "allow"
+      }
+    },
+    "ask": {
+      "description": "Answers from the codebase. No writes.",
+      "mode": "primary",
+      "model": "harness/auto-fastest",
+      "permission": { "edit": "deny", "bash": "deny", "task": "deny" }
+    },
+    "debug": {
+      "description": "Reproduce, localize, reduce, fix, guard.",
+      "mode": "primary",
+      "model": "harness/tag:reasoning",
+      "permission": { "bash": "ask" }
+    },
+    "review": {
+      "description": "Staff-engineer review: five axes, Nit/Blocker severity.",
+      "mode": "primary",
+      "model": "harness/tag:general",
+      "permission": { "edit": "deny", "bash": "deny" }
+    }
+  }
+}

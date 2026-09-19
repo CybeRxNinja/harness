@@ -65,7 +65,7 @@ jobs:
           cp tui/appimage/AppRun harness.AppDir/AppRun
           cp tui/appimage/harness-tui.desktop harness.AppDir/
           cp tui/appimage/harness-tui.png harness.AppDir/
-          cp tui/harness-opencode.json harness.AppDir/
+          cp harness/harness-opencode.json harness.AppDir/
           chmod +x harness.AppDir/AppRun harness.AppDir/usr/bin/harness-tui
           ARCH=x86_64 ./squashfs-root/AppRun harness.AppDir
           ls -la *.AppImage

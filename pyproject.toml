@@ -16,3 +16,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["harness*"]
+
+[tool.setuptools.package-data]
+harness = ["harness-opencode.json"]
