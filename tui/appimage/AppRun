@@ -14,9 +14,11 @@ NEED_PROTO=3
 cli_ok() { python3 -c "from harness import PROTO; raise SystemExit(0 if PROTO >= $NEED_PROTO else 1)" 2>/dev/null; }
 if ! cli_ok; then
   log "installing harness CLI from GitHub (once)..."
-  python3 -m pip install --quiet --break-system-packages "git+https://github.com/CybeRxNinja/harness.git" 2>/dev/null \
-    || python3 -m pip install --quiet "git+https://github.com/CybeRxNinja/harness.git" 2>/dev/null \
-    || log "CLI install failed — continuing (TUI still works, harness chat unavailable)"
+  if ! python3 -m pip install --break-system-packages "git+https://github.com/CybeRxNinja/harness.git" 2>&1 | tail -3 >&2; then
+    log "retrying without break-system-packages..."
+    python3 -m pip install "git+https://github.com/CybeRxNinja/harness.git" 2>&1 | tail -3 >&2
+  fi
+  cli_ok || { log "FATAL: harness CLI install failed — check network/pip, then relaunch"; exit 1; }
 fi
 
 # --- 2. gateway + config + token (rooted at the directory you launched from) ---
