@@ -20,9 +20,14 @@ function fmt(n: number): string {
   return s.replace(/\B(?=(\d{3})+(?!\d))/g, ",")
 }
 
+function shortModel(rid: string): string {
+  const parts = String(rid ?? "").split("/")
+  const last = parts[parts.length - 1] || String(rid ?? "")
+  return last.length > 26 ? `${last.slice(0, 25)}…` : last
+}
+
 function Section(props: {
   title: string
-  extra?: string
   open: boolean
   onToggle: () => void
   theme: any
@@ -35,21 +40,21 @@ function Section(props: {
         <text selectable={false} fg={props.theme.text}>
           <b>{props.title}</b>
         </text>
-        <Show when={props.extra}>
-          <text fg={props.theme.textMuted}>{props.extra}</text>
-        </Show>
       </box>
       <Show when={props.open}>{props.children}</Show>
     </box>
   )
 }
 
+type ProvGroup = { provider: string; total: number; open: boolean; rows: { name: string; steps: number; cost: string }[] }
+
 function useHarness(sessionID: string) {
+  const [started] = createSignal(new Date().toISOString())
   const [todo, setTodo] = createSignal<string[]>([])
   const [agents, setAgents] = createSignal<string[]>([])
   const [skills, setSkills] = createSignal<string[]>([])
   const [memory, setMemory] = createSignal<string[]>([])
-  const [models, setModels] = createSignal<string[]>([])
+  const [groups, setGroups] = createSignal<ProvGroup[]>([])
   const [ctx, setCtx] = createSignal<string[]>([])
   const [usage, setUsage] = createSignal<string[]>([])
   const [err, setErr] = createSignal("")
@@ -86,16 +91,24 @@ function useHarness(sessionID: string) {
           `Generation speed ${u.speed ?? 0} t/s`,
           `Cost ${u.spent ?? "$0.00"}`,
         ])
-        const byProv = new Map<string, { steps: number; free: boolean }>()
-        for (const x of (r ?? []).slice(-30)) {
-          const k = `${x.provider} / ${(x.model ?? "").split("/").pop()}`
-          const e = byProv.get(k) ?? { steps: 0, free: true }
+        const byProv = new Map<string, { steps: number; free: boolean; models: Map<string, number> }>()
+        for (const x of (r ?? []).slice(-60)) {
+          const prov = String(x.provider ?? "relay")
+          const name = shortModel(x.model ?? "")
+          let e = byProv.get(prov)
+          if (!e) { e = { steps: 0, free: true, models: new Map() }; byProv.set(prov, e) }
           e.steps += 1
           if (!(x.model ?? "").endsWith(":free")) e.free = false
-          byProv.set(k, e)
+          e.models.set(name, (e.models.get(name) ?? 0) + 1)
         }
-        setModels([...byProv.entries()].slice(0, 8).map(([k, v]) =>
-          `${k} · ${v.steps} step${v.steps === 1 ? "" : "s"} · ${v.free ? "$0.00" : "n/a"}`.slice(0, 64)))
+        setGroups([...byProv.entries()].slice(0, 6).map(([provider, e]) => ({
+          provider,
+          total: e.steps,
+          open: true,
+          rows: [...e.models.entries()].map(([name, steps]) => ({
+            name, steps, cost: e.free ? "$0.00" : "n/a",
+          })),
+        })))
         const [s, m] = await Promise.all([
           get("/api/skills").catch(() => []),
           get("/api/memory?q=project").catch(() => []),
@@ -108,7 +121,7 @@ function useHarness(sessionID: string) {
     }
     void run()
   })
-  return { todo, agents, skills, memory, models, ctx, usage: usage, err, refresh: () => setTick((x) => x + 1) }
+  return { started, todo, agents, skills, memory, groups, ctx, usage, err, refresh: () => setTick((x) => x + 1) }
 }
 
 function View(props: { api: TuiPluginApi; session_id: string }) {
@@ -118,19 +131,22 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
     Context: true, Usage: true, Models: true, Todo: true,
     Agents: false, Memory: false, Skills: false,
   })
+  const [provOpen, setProvOpen] = createSignal<Record<string, boolean>>({})
   const toggle = (k: string) => setOpen((o) => ({ ...o, [k]: !o[k] }))
+  const toggleProv = (k: string) => setProvOpen((o) => ({ ...o, [k]: !(o[k] ?? true) }))
+  const isProvOpen = (k: string) => provOpen()[k] ?? true
   const rows = (list: () => string[]) => (
     <For each={list()}>{(r) => <text fg={theme().textMuted}>{r}</text>}</For>
   )
   const ready = () => token().length > 0
+  const nModels = () => h.groups().reduce((n, g) => n + g.rows.length, 0)
 
   return (
     <box>
       <box flexDirection="row" gap={1} onMouseDown={() => h.refresh()}>
         <text selectable={false} fg={theme().text}>
-          <b>Harness</b>
+          <b>Session {props.session_id.slice(0, 8)} - {h.started()}</b>
         </text>
-        <text selectable={false} fg={theme().textMuted}>· tap to refresh</text>
       </box>
       <Show when={ready()} fallback={
         <text fg={theme().textMuted}>set HARNESS_TOKEN (`cat ~/.harness/token`)</text>
@@ -142,8 +158,21 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
         <Section title="Token Usage" theme={theme()} open={!!open().Usage} onToggle={() => toggle("Usage")}>
           {rows(h.usage)}
         </Section>
-        <Section title={`Models (${h.models().length})`} theme={theme()} open={!!open().Models} onToggle={() => toggle("Models")}>
-          {rows(h.models)}
+        <Section title={`Models (${nModels()})`} theme={theme()} open={!!open().Models} onToggle={() => toggle("Models")}>
+          <For each={h.groups()}>{(g) => (
+            <box>
+              <box flexDirection="row" gap={1} onMouseDown={() => toggleProv(g.provider)}>
+                <text selectable={false} fg={theme().text}>{isProvOpen(g.provider) ? "▼" : "▶"}</text>
+                <text selectable={false} fg={theme().text}>{g.provider}</text>
+              </box>
+              <Show when={isProvOpen(g.provider)}>
+                <text selectable={false} fg={theme().textMuted}>Model Steps Cost</text>
+                <For each={g.rows}>{(m) => (
+                  <text fg={theme().textMuted}>{`${m.name} ${m.steps} ${m.cost}`.slice(0, 64)}</text>
+                )}</For>
+              </Show>
+            </box>
+          )}</For>
         </Section>
         <Section title="Todo" theme={theme()} open={!!open().Todo} onToggle={() => toggle("Todo")}>
           {rows(h.todo)}
