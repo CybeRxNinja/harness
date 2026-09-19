@@ -167,7 +167,7 @@ def rank(cands: list[dict], cfg: dict) -> list[dict]:
     return out
 
 
-def _record(provider: str, model: str, ms: float, ok: bool) -> None:
+def _record(provider: str, model: str, ms: float, ok: bool, requested: str = "") -> None:
     s = _load_stats()
     key = f"{provider}|{model}"
     st = s.get(key, {"ewma_ms": 3000, "errors": 0})
@@ -176,7 +176,16 @@ def _record(provider: str, model: str, ms: float, ok: bool) -> None:
     if not ok and st["errors"] >= 2:
         st["cooldown_until"] = time.time() + 60
     s[key] = st
+    if ok and requested:
+        recent = s.get("_recent", [])
+        recent.append({"requested": requested, "provider": provider, "model": model,
+                       "ms": int(ms), "ts": int(time.time())})
+        s["_recent"] = recent[-20:]
     _save_stats(s)
+
+
+def recent_routes(limit: int = 10) -> list[dict]:
+    return _load_stats().get("_recent", [])[-limit:]
 
 
 def _post_openai(base: str, key: str, payload: dict, timeout: int) -> dict:
@@ -250,13 +259,13 @@ def chat_stream(messages: list[dict], model: str = "auto-fastest", cfg: dict | N
         try:
             gen = _post_openai_stream(meta["base"], key, payload, timeout)
             first = next(gen)  # failover point: nothing sent to client yet
-            _record(pname, mid, (time.time() - t0) * 1000, True)
+            _record(pname, mid, (time.time() - t0) * 1000, True, model)
             yield first
             for chunk in gen:
                 yield chunk if isinstance(chunk, bytes) else str(chunk).encode()
             return
         except StopIteration:
-            _record(pname, mid, (time.time() - t0) * 1000, True)
+            _record(pname, mid, (time.time() - t0) * 1000, True, model)
             yield b"data: [DONE]\n\n"
             return
         except Exception as e:  # noqa: BLE001 - failover path
@@ -299,7 +308,7 @@ def chat(messages: list[dict], model: str = "auto-fastest", cfg: dict | None = N
             payload.update(provider_params(pname, (extra.get("reasoning") or "medium"), mid))
         try:
             body, ms = _post_openai(meta["base"], key, payload, timeout)
-            _record(pname, mid, ms, True)
+            _record(pname, mid, ms, True, model)
             msg = body["choices"][0]["message"]
             msg["_route"] = {"provider": pname, "model": mid, "ms": int(ms)}
             return msg

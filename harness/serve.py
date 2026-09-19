@@ -120,6 +120,9 @@ class Handler(BaseHTTPRequestHandler):
             out = M.recall(con, q) if q else []
             con.close()
             return self._send(200, out)
+        if parsed.path == "/api/route":
+            from .router import recent_routes
+            return self._send(200, recent_routes())
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):

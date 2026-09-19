@@ -42,8 +42,14 @@ function useTabData(tab: () => Tab, sessionID: string) {
           const d: any[] = await get("/api/memory?q=project")
           setRows(d.slice(0, 8).map((m) => `✎ ${String(m.text).slice(0, 56)}`))
         } else {
-          const d = await get("/v1/models")
-          setRows((d.data ?? []).slice(0, 12).map((m: any) => `▸ ${m.id}`.slice(0, 60)))
+          const d: any[] = await get("/api/route")
+          const seen = new Map<string, any>()
+          for (const r of d) seen.set(r.requested, r)
+          const live = [...seen.values()].reverse().slice(0, 6)
+            .map((r) => `▸ ${r.requested} → ${r.provider}/${r.model} (${r.ms}ms)`.slice(0, 60))
+          const m = await get("/v1/models")
+          const ids = ((m.data ?? []) as any[]).slice(0, 6).map((x) => `· ${x.id}`.slice(0, 60))
+          setRows([...live, ...ids])
         }
         setRows((r) => (r.length ? r : ["(empty)"]))
       } catch (e) {

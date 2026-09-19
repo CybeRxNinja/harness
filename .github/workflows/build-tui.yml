@@ -33,6 +33,7 @@ jobs:
           done
           echo "installing harness sidebar plugin"
           cp ../tui/plugins/harness-panels.tsx packages/tui/src/feature-plugins/sidebar/harness.tsx
+          cp ../tui/plugins/harness-route.tsx packages/tui/src/component/harness-route.tsx
           echo "patches done"
       - name: Install (CI machine, not user PC)
         working-directory: upstream
