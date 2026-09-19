@@ -20,7 +20,9 @@ jobs:
           path: upstream
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          # pinned: upstream packageManager is bun@1.3.14; bun 1.4.x
+          # produces binaries whose prompts defect (a.name TypeError)
+          bun-version: 1.3.14
       - name: Apply harness fork patches
         working-directory: upstream
         run: |
