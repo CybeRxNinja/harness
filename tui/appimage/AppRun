@@ -14,9 +14,9 @@ NEED_PROTO=5
 cli_ok() { python3 -c "from harness import PROTO; raise SystemExit(0 if PROTO >= $NEED_PROTO else 1)" 2>/dev/null; }
 if ! cli_ok; then
   log "installing harness CLI from GitHub (once)..."
-  if ! python3 -m pip install --break-system-packages "git+https://github.com/CybeRxNinja/harness.git" 2>&1 | tail -3 >&2; then
+  if ! python3 -m pip install --no-cache-dir --break-system-packages "git+https://github.com/CybeRxNinja/harness.git" 2>&1 | tail -3 >&2; then
     log "retrying without break-system-packages..."
-    python3 -m pip install "git+https://github.com/CybeRxNinja/harness.git" 2>&1 | tail -3 >&2
+    python3 -m pip install --no-cache-dir "git+https://github.com/CybeRxNinja/harness.git" 2>&1 | tail -3 >&2
   fi
   cli_ok || { log "FATAL: harness CLI install failed — check network/pip, then relaunch"; exit 1; }
 fi
