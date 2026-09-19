@@ -49,6 +49,10 @@
       "mode": "primary",
       "model": "harness/tag:general",
       "permission": { "edit": "deny", "bash": "deny" }
+    },
+    "plan": {
+      "description": "Planning reads and designs; runs on the reasoning chain, not the cheap default.",
+      "model": "harness/tag:reasoning"
     }
   }
 }

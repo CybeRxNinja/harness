@@ -221,7 +221,9 @@ def ensure_opencode_config() -> str:
                 node.setdefault(k, v)
     agents = cur.setdefault("agent", {})
     for name, spec in want["agent"].items():
-        agents.setdefault(name, spec)
+        node = agents.setdefault(name, {})
+        for k, v in spec.items():
+            node.setdefault(k, v)
     cur.setdefault("model", "harness/auto-fastest")
     dest.write_text(_j.dumps(cur, indent=2) + "\n")
     return str(dest)
