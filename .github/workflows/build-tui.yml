@@ -40,7 +40,7 @@ jobs:
         run: bun install
       - name: Compile harness-tui (single native target, official-like flags)
         working-directory: upstream/packages/opencode
-        run: bun run script/build.ts --single --skip-embed-web-ui
+        run: OPENCODE_VERSION="${TUI_REF#v}" bun run script/build.ts --single --skip-embed-web-ui
       - name: Collect binary
         working-directory: upstream/packages/opencode
         run: |
