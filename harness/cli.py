@@ -242,6 +242,20 @@ def _find_tui() -> str | None:
     return None
 
 
+def _ensure_tmp() -> None:
+    """Bun-compiled TUI materializes native libs under TMPDIR. If it is not
+    writable (full /tmp is the classic failure), fall back to a cache dir."""
+    import tempfile as _t
+    tmp = os.environ.get("TMPDIR", "/tmp")
+    try:
+        with _t.TemporaryFile(dir=tmp):
+            return
+    except Exception:
+        fb = Path.home() / ".cache" / "harness-tmp"
+        fb.mkdir(parents=True, exist_ok=True)
+        os.environ["TMPDIR"] = str(fb)
+
+
 def cmd_tui(args) -> int:
     from .serve import ensure_token
     root = _root(args)
@@ -251,6 +265,7 @@ def cmd_tui(args) -> int:
     _ensure_serve(root, args.port)
     os.environ["HARNESS_TOKEN"] = ensure_token()
     os.environ.setdefault("HARNESS_URL", f"http://127.0.0.1:{args.port}")
+    _ensure_tmp()
     cfg_path = ensure_opencode_config()
     binary = _find_tui()
     if not binary:
