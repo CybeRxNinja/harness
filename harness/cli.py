@@ -264,7 +264,7 @@ def _ensure_serve(root: Path, port: int) -> None:
         if not cur or cur.get("root") == str(root):
             return  # same project (or legacy): reuse
         print(f"harness: gateway serves {cur.get('root')} — restarting for {root} "
-              f"(sessions persist in each .opencode/harness/)")
+              f"(sessions persist in each .opencode/harness/)", file=sys.stderr)
         try:
             import os as _o
             _o.kill(int(cur["pid"]), 15)
