@@ -31,6 +31,16 @@ def cmd_chat(args) -> int:
 
 
 def cmd_serve(args) -> int:
+    if getattr(args, "stop", False):
+        from .serve import read_sentinel
+        import os as _o
+        cur = read_sentinel()
+        if not cur:
+            print("no live gateway")
+            return 0
+        _o.kill(int(cur["pid"]), 15)
+        print(f"stopped gateway (was serving {cur.get('root')})")
+        return 0
     from .serve import serve
     serve(_root(args), args.port, "0.0.0.0" if args.expose else "127.0.0.1")
     return 0
@@ -241,8 +251,24 @@ def _serve_healthy(port: int) -> bool:
 def _ensure_serve(root: Path, port: int) -> None:
     import subprocess as _sp
     import time as _t
+    from .serve import read_sentinel
+    root = root.resolve()
     if _serve_healthy(port):
-        return
+        cur = read_sentinel()
+        if not cur or cur.get("root") == str(root):
+            return  # same project (or legacy): reuse
+        print(f"harness: gateway serves {cur.get('root')} — restarting for {root} "
+              f"(sessions persist in each .harness/)")
+        try:
+            import os as _o
+            _o.kill(int(cur["pid"]), 15)
+            for _ in range(20):
+                _t.sleep(0.25)
+                if not _serve_healthy(port):
+                    break
+        except Exception as e:
+            raise RuntimeError(f"cannot stop gateway for {cur.get('root')} (pid {cur.get('pid')}): {e}. "
+                               f"Stop it manually or use --port")
     log = root / ".harness" / "serve.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     _sp.Popen([sys.executable, "-m", "harness", "--root", str(root),
@@ -259,9 +285,10 @@ def _find_tui() -> str | None:
     import glob as _g
     import shutil as _sh
     cands = [_sh.which("harness-tui"), str(Path.home() / ".local" / "bin" / "harness-tui")]
-    # AppImages: single-file, no install (preferred if newer)
-    cands += sorted(_g.glob(str(Path.home() / "Applications" / "harness-tui*.AppImage")))
-    cands += sorted(_g.glob("harness-tui*.AppImage"))
+    # AppImages: single-file, no install (case-insensitive; release uses Harness_TUI-*)
+    for pat in ("harness-tui*.AppImage", "Harness_TUI*.AppImage", "*arness*.AppImage"):
+        cands += sorted(_g.glob(str(Path.home() / "Applications" / pat)))
+        cands += sorted(_g.glob(pat))
     for cand in cands:
         if cand and Path(cand).exists():
             return cand
@@ -292,6 +319,10 @@ def cmd_tui(args) -> int:
     os.environ["HARNESS_TOKEN"] = ensure_token()
     os.environ.setdefault("HARNESS_URL", f"http://127.0.0.1:{args.port}")
     _ensure_tmp()
+    if args.setup_only:
+        print(f"export HARNESS_TOKEN={os.environ['HARNESS_TOKEN']}")
+        print(f"export HARNESS_URL={os.environ['HARNESS_URL']}")
+        return 0
     cfg_path = ensure_opencode_config()
     binary = _find_tui()
     if not binary:
@@ -317,6 +348,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("serve", help="HTTP gateway (TUI-B talks here)")
     s.add_argument("--port", type=int, default=8787)
     s.add_argument("--expose", action="store_true", help="bind 0.0.0.0 (warning: token auth still required)")
+    s.add_argument("--stop", action="store_true", help="stop the running gateway")
     s.set_defaults(fn=cmd_serve)
     d = sub.add_parser("doctor")
     d.add_argument("--verbose", action="store_true")
@@ -356,6 +388,8 @@ def build_parser() -> argparse.ArgumentParser:
     t = sub.add_parser("tui", help="one command: serve + config + launch harness-tui")
     t.add_argument("--port", type=int, default=8787)
     t.add_argument("--dry-run", action="store_true")
+    t.add_argument("--setup-only", action="store_true",
+                   help="ensure serve+config, print exports, do not launch")
     t.set_defaults(fn=cmd_tui)
     return p
 

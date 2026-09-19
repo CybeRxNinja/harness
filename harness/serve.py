@@ -204,8 +204,36 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
 
+def sentinel_path() -> Path:
+    from .config import user_dir
+    return user_dir() / "serve.json"
+
+
+def read_sentinel() -> dict | None:
+    """Live gateway info, or None. Stale entries (dead pid) are ignored."""
+    import json as _j
+    import os as _o
+    try:
+        d = _j.loads(sentinel_path().read_text())
+    except Exception:
+        return None
+    try:
+        _o.kill(int(d.get("pid", 0)), 0)
+        return d
+    except Exception:
+        return None
+
+
 def serve(root: Path, port: int = 8787, host: str = "127.0.0.1") -> None:
+    import json as _j
+    import os as _o
     Handler.root = root.resolve()
     Handler.token = ensure_token()
+    try:
+        sentinel_path().parent.mkdir(parents=True, exist_ok=True)
+        sentinel_path().write_text(_j.dumps(
+            {"root": str(root.resolve()), "port": port, "pid": _o.getpid()}))
+    except Exception:
+        pass
     print(f"harness serve on http://{host}:{port} (token in ~/.harness/token)")
     ThreadingHTTPServer((host, port), Handler).serve_forever()
