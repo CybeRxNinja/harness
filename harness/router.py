@@ -29,6 +29,29 @@ GROUPS: dict[str, dict] = {
     "llama-fast": {"quality": 0.62, "ctx": 128000, "tags": ["fast", "general"]},
 }
 
+# Curated free-tier groups. ids map overrides the group slug per provider
+# (OpenRouter :free endpoints cost $0 under the same key; Groq/Cerebras have
+# free tiers; Ollama is always free/local). IDs churn — failover covers misses.
+FREE_GROUPS: dict[str, dict] = {
+    "free-reasoner": {"quality": 0.80, "ctx": 128000, "tags": ["reasoning", "general", "free"],
+                      "ids": {"openrouter": "deepseek/deepseek-v4-flash-0731:free",
+                              "groq": "deepseek-r1-distill-llama-70b",
+                              "cerebras": "llama-3.3-70b",
+                              "ollama": "deepseek-r1"}},
+    "free-coder": {"quality": 0.78, "ctx": 96000, "tags": ["coding", "general", "free"],
+                   "ids": {"openrouter": "qwen/qwen3.8-27b:free",
+                           "groq": "qwen-qwq-32b",
+                           "cerebras": "qwen-3-coder-480b",
+                           "ollama": "qwen2.5-coder"}},
+    "free-general": {"quality": 0.70, "ctx": 128000, "tags": ["general", "fast", "free"],
+                     "ids": {"openrouter": "z-ai/glm-5.2:free",
+                             "groq": "llama-3.3-70b-versatile",
+                             "nvidia": "meta/llama-3.3-70b-instruct",
+                             "ollama": "llama3.3"}},
+}
+
+GROUPS: dict[str, dict] = {**GROUPS, **FREE_GROUPS}
+
 PROVIDERS: dict[str, dict] = {
     "openrouter": {"base": "https://openrouter.ai/api/v1", "env": "OPENROUTER_API_KEY"},
     "openai": {"base": "https://api.openai.com/v1", "env": "OPENAI_API_KEY"},
@@ -116,7 +139,7 @@ def candidates(parsed: dict, cfg: dict) -> list[dict]:
             return cands
         for pname in PROVIDERS:
             if _provider_has_key(pname):
-                cands.append({"provider": pname, "model": parsed["group"], "quality": g["quality"], "ctx": g["ctx"]})
+                cands.append({"provider": pname, "model": g.get("ids", {}).get(pname, parsed["group"]), "quality": g["quality"], "ctx": g["ctx"]})
         return [c for c in cands if f"{c['provider']}/{c['model']}" not in banned]
     # auto + tag
     want_tag = parsed.get("tag") if parsed["kind"] == "tag" else None
@@ -128,14 +151,14 @@ def candidates(parsed: dict, cfg: dict) -> list[dict]:
             continue
         for pname in PROVIDERS:
             if _provider_has_key(pname):
-                cands.append({"provider": pname, "model": gid, "quality": g["quality"], "ctx": g["ctx"]})
+                cands.append({"provider": pname, "model": g.get("ids", {}).get(pname, gid), "quality": g["quality"], "ctx": g["ctx"]})
     if not cands and want_tag:
         # relax min_ctx rather than hard-fail
         for gid, g in GROUPS.items():
             if want_tag in g["tags"]:
                 for pname in PROVIDERS:
                     if _provider_has_key(pname):
-                        cands.append({"provider": pname, "model": gid, "quality": g["quality"], "ctx": g["ctx"]})
+                        cands.append({"provider": pname, "model": g.get("ids", {}).get(pname, gid), "quality": g["quality"], "ctx": g["ctx"]})
     # last resort: any keyed provider with raw model passthrough
     if not cands:
         for pname in PROVIDERS:

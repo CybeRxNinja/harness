@@ -61,10 +61,10 @@ jobs:
           rm appimagetool.AppImage
           rm -rf harness.AppDir
           mkdir -p harness.AppDir/usr/bin
-          cp "$GITHUB_WORKSPACE/harness-tui-linux-x64" harness.AppDir/usr/bin/harness-tui
-          cp ../tui/appimage/AppRun harness.AppDir/AppRun
-          cp ../tui/appimage/harness-tui.desktop harness.AppDir/
-          cp ../tui/appimage/harness-tui.png harness.AppDir/
+          cp harness-tui-linux-x64 harness.AppDir/usr/bin/harness-tui
+          cp tui/appimage/AppRun harness.AppDir/AppRun
+          cp tui/appimage/harness-tui.desktop harness.AppDir/
+          cp tui/appimage/harness-tui.png harness.AppDir/
           chmod +x harness.AppDir/AppRun harness.AppDir/usr/bin/harness-tui
           ARCH=x86_64 ./squashfs-root/AppRun harness.AppDir
           ls -la *.AppImage
