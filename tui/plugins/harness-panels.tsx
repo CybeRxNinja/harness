@@ -60,9 +60,9 @@ function useHarness(sessionID: string) {
     const run = async () => {
       try {
         const [t, a, u, r] = await Promise.all([
-          get(`/api/tasks?session=${encodeURIComponent(sessionID)}`),
+          get(`/api/tasks`),
           get("/api/agents"),
-          get(`/api/usage?session=${encodeURIComponent(sessionID)}`),
+          get(`/api/usage`),
           get("/api/route"),
         ])
         setTodo([

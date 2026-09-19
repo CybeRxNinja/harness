@@ -65,3 +65,22 @@ def test_sse_text_extract():
     assert _sse_chars(b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n') == 2
     assert _model_ctx("auto-fastest") == 0
     assert _model_ctx("deepseek-v3.2") == 128000
+
+
+def test_tasks_global_and_usage_global():
+    import json, urllib.request
+    srv = _serve()
+    port = srv.server_address[1]
+    tok = open(os.path.expanduser("~/.harness/token")).read().strip()
+
+    def get(path):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                                     headers={"Authorization": f"Bearer {tok}"})
+        return json.loads(urllib.request.urlopen(req, timeout=10).read())
+
+    # global views work without any session id (what the TUI panel uses)
+    tasks = get("/api/tasks")
+    assert "todos" in tasks and "inbox" in tasks
+    u = get("/api/usage")
+    assert u["total"] == u["input"] + u["output"] and "by_model" in u
+    srv.shutdown()

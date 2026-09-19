@@ -156,9 +156,14 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             sess = (qs.get("session") or [""])[0]
             con = connect(self.root)
-            todos = [{"text": r[0], "status": r[1]} for r in
-                     con.execute("SELECT text,status FROM todos WHERE session=? ORDER BY id", (sess,)).fetchall()]
-            inbox = R.inbox(con) if sess else []
+            if sess:
+                todos = [{"text": r[0], "status": r[1]} for r in
+                         con.execute("SELECT text,status FROM todos WHERE session=? ORDER BY id", (sess,)).fetchall()]
+                inbox = R.inbox(con)
+            else:
+                todos = [{"text": r[0], "status": r[1]} for r in
+                         con.execute("SELECT text,status FROM todos ORDER BY id DESC LIMIT 10").fetchall()]
+                inbox = R.inbox(con, limit=5)
             con.close()
             return self._send(200, {"todos": todos, "inbox": inbox})
         if parsed.path == "/api/skills":
