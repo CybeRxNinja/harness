@@ -1,4 +1,93 @@
 #!/bin/sh
-# AppRun: single-file launch, no install. HARNESS_TOKEN comes from the
-# environment — launch via `harness tui` or export it (see harness setup).
+# Harness AppImage AppRun — first launch sets everything up, later launches just run.
+#   1. merges provider.harness + agents into opencode.json (backed up, never clobbered)
+#   2. installs the harness Python CLI from GitHub if missing (stdlib-only, tiny)
+#   3. starts `harness serve` if not already up
+#   4. installs a launcher shortcut (~/.local/share/applications)
+#   5. execs the bundled TUI
+set -u
+PORT="${HARNESS_PORT:-8787}"
+HARNESS_DIR="$HOME/.harness"
+TOKEN_FILE="$HARNESS_DIR/token"
+CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+CFG="$CFG_DIR/opencode.json"
+
+log() { echo "[harness] $*" >&2; }
+
+# --- 1. opencode.json merge (python stdlib only, no harness dep) ---
+if command -v python3 >/dev/null 2>&1 && [ -f "$APPDIR/harness-opencode.json" ]; then
+  APPDIR="$APPDIR" CFG="$CFG" python3 -c "
+import json, os, shutil, time
+dest = os.environ['CFG']
+want = json.load(open(os.path.join(os.environ['APPDIR'], 'harness-opencode.json')))
+os.makedirs(os.path.dirname(dest), exist_ok=True)
+cur = {}
+if os.path.exists(dest):
+    try: cur = json.load(open(dest))
+    except Exception: cur = {}
+    shutil.copy2(dest, dest + '.bak-%d' % int(time.time()))
+prov = cur.setdefault('provider', {})
+if 'harness' not in prov:
+    prov['harness'] = want['provider']['harness']
+else:
+    models = prov['harness'].setdefault('models', {})
+    for mid, spec in want['provider']['harness'].get('models', {}).items():
+        node = models.setdefault(mid, {})
+        for k, v in spec.items(): node.setdefault(k, v)
+agents = cur.setdefault('agent', {})
+for name, spec in want.get('agent', {}).items(): agents.setdefault(name, spec)
+cur.setdefault('model', 'harness/auto-fastest')
+json.dump(cur, open(dest, 'w'), indent=2)
+" 2>/dev/null || log "config merge skipped"
+fi
+
+# --- 2. harness CLI ---
+if ! python3 -c "import harness" 2>/dev/null; then
+  log "installing harness CLI from GitHub (once)..."
+  python3 -m pip install --quiet --break-system-packages "git+https://github.com/CybeRxNinja/harness.git" 2>/dev/null \
+    || python3 -m pip install --quiet "git+https://github.com/CybeRxNinja/harness.git" 2>/dev/null \
+    || log "CLI install failed — continuing (TUI still works, harness chat unavailable)"
+fi
+
+# --- 3. gateway ---
+healthy() { python3 -c "
+import sys, urllib.request
+try:
+    r = urllib.request.urlopen('http://127.0.0.1:$1/health', timeout=2)
+    sys.exit(0 if r.status == 200 else 1)
+except Exception: sys.exit(1)" "$PORT" 2>/dev/null; }
+if ! healthy; then
+  log "starting harness serve on :$PORT ..."
+  mkdir -p "$HARNESS_DIR"
+  if python3 -c "import harness" 2>/dev/null; then
+    (setsid nohup python3 -m harness --root "$HOME" serve --port "$PORT" >>"$HARNESS_DIR/serve.log" 2>&1 &) 2>/dev/null
+    for i in 1 2 3 4 5 6 7 8 9 10; do healthy && break; sleep 1; done
+  else
+    log "no harness CLI — start the gateway manually later: harness serve"
+  fi
+fi
+if [ -f "$TOKEN_FILE" ]; then
+  HARNESS_TOKEN="$(cat "$TOKEN_FILE")"; export HARNESS_TOKEN
+fi
+HARNESS_URL="${HARNESS_URL:-http://127.0.0.1:$PORT}"; export HARNESS_URL
+
+# --- 4. launcher shortcut ---
+DESKTOP="$HOME/.local/share/applications/harness-tui.desktop"
+if [ -n "${APPIMAGE:-}" ] && [ ! -f "$DESKTOP" ]; then
+  mkdir -p "$(dirname "$DESKTOP")" "$HOME/.local/share/icons"
+  [ -f "$APPDIR/harness-tui.png" ] && cp -f "$APPDIR/harness-tui.png" "$HOME/.local/share/icons/" 2>/dev/null
+  cat > "$DESKTOP" <<EOF
+[Desktop Entry]
+Name=Harness TUI
+Comment=All-in-one AI coding harness
+Exec="$APPIMAGE"
+Icon=harness-tui
+Type=Application
+Categories=Development;Utility;
+Terminal=true
+EOF
+  log "launcher shortcut installed"
+fi
+
+# --- 5. run ---
 exec "$APPDIR/usr/bin/harness-tui" "$@"
