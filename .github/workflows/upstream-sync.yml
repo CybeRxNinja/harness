@@ -93,5 +93,8 @@ jobs:
           git add tui/UPSTREAM_REF
           git commit -m "sync upstream pin to $TAG (patches verified)" || exit 0
           git push -u origin "$BR"
-          gh pr create --title "upstream sync: $TAG" --fill \
-            --body "Automated pin bump ${{ steps.cmp.outputs.current }} → $TAG. Patches + plugins verified applicable. Merge, then tag tui-vX for the release build." || true
+          if ! gh pr create --title "upstream sync: $TAG" --fill \
+            --body "Automated pin bump to $TAG. Patches + plugins verified applicable. Merge, then tag tui-vX for the release build."; then
+            gh issue create --title "upstream sync ready: $TAG (merge manually)" \
+              --body "Branch \`$BR\` is pushed and patch-verified, but Actions may not open PRs here. Merge by hand: \`gh pr create --head $BR --title 'upstream sync: $TAG'\` — then tag tui-vX for the release build." || true
+          fi
