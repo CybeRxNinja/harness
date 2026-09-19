@@ -65,7 +65,7 @@ jobs:
           cd upstream-check
           shopt -s nullglob
           for p in ../tui/patches/*.patch; do
-            git apply --check "$p" >/tmp/opencode/patch-check.log 2>&1 || FAIL="$FAIL $p"
+            git apply --check "$p" >>"$GITHUB_STEP_SUMMARY" 2>&1 || FAIL="$FAIL $p"
           done
           for f in ../tui/plugins/*.tsx; do
             [ -f "$f" ] || FAIL="$FAIL (missing plugin $f)"
@@ -78,8 +78,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh issue create --title "upstream sync blocked: patches fail on ${{ steps.target.outputs.tag }}" \
-            --body " nuestros patches/plugins no longer apply cleanly on upstream \`${{ steps.target.outputs.tag }}\` (from \`${{ steps.cmp.outputs.current }}\`). Failing: ${{ steps.verify.outputs.fail }}. Rebase the reskin by hand, then bump TUI_REF." \
-            --label upstream-sync || true
+            --body "Our patches/plugins no longer apply cleanly on upstream \`${{ steps.target.outputs.tag }}\` (from \`${{ steps.cmp.outputs.current }}\`). Failing: ${{ steps.verify.outputs.fail }}. Rebase the reskin by hand, then bump TUI_REF." || true
       - name: Bump pin on branch + open PR
         if: steps.cmp.outputs.stale == 'true' && success()
         env:
