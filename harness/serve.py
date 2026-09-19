@@ -19,7 +19,6 @@ def token_path() -> Path:
     from .config import user_dir
     return user_dir() / "token"
 
-
 def ensure_token() -> str:
     p = token_path()
     try:

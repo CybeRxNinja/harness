@@ -167,6 +167,34 @@ def cmd_plan(args) -> int:
     return 0
 
 
+def cmd_router(args) -> int:
+    from . import router as R
+    from .config import load_config
+    cfg, _ = load_config(_root(args))
+    if args.router_action == "refresh":
+        cat = R.refresh_catalog(probe=args.probe)
+        n = sum(len(v) for v in cat.get("providers", {}).values())
+        print(f"catalog: {n} models across {sorted(cat.get('providers', {}))}; "
+              f"dead: {len(cat.get('dead', []))}")
+    elif args.router_action == "catalog":
+        cat = R.load_catalog()
+        if not cat:
+            print("catalog empty — run: harness router refresh")
+            return 0
+        for pname, models in cat.get("providers", {}).items():
+            for m in models[:25]:
+                card = R.classify(m["id"], m.get("first_seen"))
+                ok, why = R.is_allowed(pname, m["id"], cfg, m.get("first_seen"))
+                params = (f"{card['params_total_b']:g}B" if card["params_total_b"] else "?")
+                bench = f"{card['bench']:g}" if card["bench"] is not None else "-"
+                gate = "ok" if ok else f"HELD({why.split(':')[0]})"
+                print(f"{pname:10s} {m['id'][:44]:44s} {params:>10s} bench={bench:>4s} {gate}")
+    elif args.router_action == "approve":
+        R.approve_model(args.provider, args.model)
+        print(f"approved {args.provider}/{args.model}")
+    return 0
+
+
 def cmd_setup(args) -> int:
     from .serve import ensure_token
     from .config import user_dir
@@ -395,6 +423,13 @@ def build_parser() -> argparse.ArgumentParser:
     pl.set_defaults(fn=cmd_plan)
     su = sub.add_parser("setup")
     su.set_defaults(fn=cmd_setup)
+    ro = sub.add_parser("router", help="model catalog: refresh/discover providers")
+    ro.add_argument("router_action", choices=["refresh", "catalog", "approve"])
+    ro.add_argument("--probe", action="store_true",
+                    help="actually call each free model once (slow, burns rate limits)")
+    ro.add_argument("--provider", default="")
+    ro.add_argument("--model", default="")
+    ro.set_defaults(fn=cmd_router)
     t = sub.add_parser("tui", help="one command: serve + config + launch harness-tui")
     t.add_argument("--port", type=int, default=8787)
     t.add_argument("--dry-run", action="store_true")
@@ -409,7 +444,7 @@ def main(argv=None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv and not argv[0].startswith("-") and argv[0] not in (
-            "chat", "serve", "doctor", "config", "skills", "memory", "checkpoint", "plan", "setup", "tui"):
+            "chat", "serve", "doctor", "config", "skills", "memory", "checkpoint", "plan", "setup", "tui", "router"):
         argv = ["chat", argv[0]] + argv[1:]
     args = build_parser().parse_args(argv)
     if not getattr(args, "cmd", None) and not hasattr(args, "fn"):

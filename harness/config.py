@@ -23,6 +23,8 @@ DEFAULT_CONFIG: dict = {
         "target_latency_ms": 3000,
         "timeout_s": 60,
         "max_retries": 2,
+        "max_attempts": 5,
+        "new_model_policy": "ask",
         "ban": [],
     },
     "budgets": {"max_turns": 25, "max_tokens": 120000, "max_cost_usd": 2.0, "max_parallel": 2, "max_depth": 1},

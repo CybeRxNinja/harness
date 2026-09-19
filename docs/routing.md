@@ -13,3 +13,13 @@ tag:reasoning first (best quality, e.g. openrouter/deepseek-v3.2), tag:free fall
 Bulk/cheap (quick, explore, writing): auto-fastest / tag:general.
 Zen models (Muse Spark free) are TUI-side only: no stable third-party endpoint
 exists, so the Python router cannot spend them. Pick them with ctrl+p in the TUI.
+
+## Self-managed catalog (the router owns selection/verification/updates)
+Discovery: providers catalogs re-fetched automatically (daily) + on demand
+(harness router refresh [--probe]). Each id is classified: param count parsed
+from the id (550b-a55b = 550B total/55B active), benchmark estimate by family,
+first-seen recency. Unknown families are quarantined, never silently routed:
+harness router catalog shows verdicts, harness router approve <provider/model>
+allows one, router.new_model_policy allow|ask|deny sets the default (ask).
+Live QoS (latency/errors/429 backoff/tool-support flags) continuously verifies
+and re-ranks everything actually served.
