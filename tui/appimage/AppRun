@@ -7,8 +7,12 @@ HARNESS_DIR="$HOME/.harness"
 
 log() { echo "[harness] $*" >&2; }
 
-# --- 1. harness CLI (installed once from GitHub) ---
-if ! python3 -c "import harness" 2>/dev/null; then
+# --- 1. harness CLI (installed once, refreshed when the contract moves) ---
+# AppRun depends on current CLI behavior (per-directory serve, AppImage lookup,
+# setup-only). Reinstall whenever the installed copy is missing or too old.
+NEED_PROTO=3
+cli_ok() { python3 -c "from harness import PROTO; raise SystemExit(0 if PROTO >= $NEED_PROTO else 1)" 2>/dev/null; }
+if ! cli_ok; then
   log "installing harness CLI from GitHub (once)..."
   python3 -m pip install --quiet --break-system-packages "git+https://github.com/CybeRxNinja/harness.git" 2>/dev/null \
     || python3 -m pip install --quiet "git+https://github.com/CybeRxNinja/harness.git" 2>/dev/null \
@@ -16,7 +20,7 @@ if ! python3 -c "import harness" 2>/dev/null; then
 fi
 
 # --- 2. gateway + config + token (rooted at the directory you launched from) ---
-if python3 -c "import harness" 2>/dev/null; then
+if cli_ok; then
   # shellcheck disable=SC1090
   eval "$(python3 -m harness --root "$PWD" tui --setup-only --port "$PORT" 2>/dev/null)" || log "gateway setup had issues — continuing"
 else
