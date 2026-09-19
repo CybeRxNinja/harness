@@ -73,12 +73,20 @@ def _model_ctx(model: str) -> int:
     return int(g.get("ctx", 0)) if g else 0
 
 
-def _record_v1(root, model: str, msgs: list, out_chars: int) -> None:
+def _record_v1(root, model: str, msgs: list, out_chars: int, dur_ms: int = 0,
+               prov: str = "", rid: str = "") -> None:
     try:
         from .store import connect, record_usage
+        from .router import recent_routes
+        if not rid:
+            for r in reversed(recent_routes(5)):
+                if r.get("requested") == model:
+                    prov, rid = r.get("provider", ""), f"{r.get('provider','')}/{r.get('model','')}"
+                    dur_ms = dur_ms or r.get("ms", 0)
+                    break
         con = connect(root)
         record_usage(con, "relay", model, _msg_chars(msgs) // 4, out_chars // 4,
-                     _model_ctx(model))
+                     _model_ctx(model), dur_ms, prov, rid)
         con.close()
     except Exception:
         pass
@@ -244,6 +252,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             extra = reasoning_from_body(body) or None
             if body.get("stream"):
+                import time as _t
+                _t0 = _t.time()
                 payload = b""
                 try:
                     for chunk in chat_stream(msgs, model=model, cfg=cfg, extra=extra,
@@ -253,7 +263,8 @@ class Handler(BaseHTTPRequestHandler):
                     payload += f'data: {json.dumps({"error": str(e)[:300]})}\n\n'.encode()
                 if not payload.endswith(b"data: [DONE]\n\n"):
                     payload += b"data: [DONE]\n\n"
-                _record_v1(self.root, model, msgs, _sse_chars(payload))
+                _record_v1(self.root, model, msgs, _sse_chars(payload),
+                           dur_ms=int((_t.time() - _t0) * 1000))
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-store")
@@ -265,8 +276,13 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return
             try:
+                import time as _t2
+                _t1 = _t2.time()
                 m = chat(msgs, model=model, cfg=cfg, extra=extra)
-                _record_v1(self.root, model, msgs, len(str(m.get("content", ""))))
+                _rt = m.get("_route", {}) if isinstance(m, dict) else {}
+                _record_v1(self.root, model, msgs, len(str(m.get("content", ""))),
+                           dur_ms=int((_t2.time() - _t1) * 1000),
+                           prov=_rt.get("provider", ""), rid=f"{_rt.get('provider','')}/{_rt.get('model','')}")
                 return self._send(200, {"id": "chatcmpl-harness", "object": "chat.completion",
                                         "choices": [{"index": 0, "message": {k: v for k, v in m.items() if not k.startswith("_")}, "finish_reason": "stop"}]})
             except Exception as e:

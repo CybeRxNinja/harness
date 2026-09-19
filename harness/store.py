@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS workers(id TEXT PRIMARY KEY, session TEXT, name TEXT,
 CREATE TABLE IF NOT EXISTS mailbox(id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT, receiver TEXT, receiver_role TEXT, content TEXT, ts INTEGER);
 CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, source TEXT, ts INTEGER);
 CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, name TEXT, diff TEXT, gist TEXT, ts INTEGER);
-CREATE TABLE IF NOT EXISTS usage(id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT, model TEXT, inp INTEGER, out INTEGER, ctx INTEGER, ts INTEGER);
+CREATE TABLE IF NOT EXISTS usage(id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT, model TEXT, inp INTEGER, out INTEGER, ctx INTEGER, ts INTEGER, dur INTEGER DEFAULT 0, prov TEXT DEFAULT '', rid TEXT DEFAULT '');
 """
 
 
@@ -73,10 +73,23 @@ def estimate_text_tokens(text: str) -> int:
 
 
 def record_usage(con: sqlite3.Connection, session: str, model: str,
-                 inp: int, out: int, ctx: int = 0) -> None:
+                 inp: int, out: int, ctx: int = 0, dur_ms: int = 0,
+                 prov: str = "", rid: str = "") -> None:
     import time as _t
-    con.execute("INSERT INTO usage(session,model,inp,out,ctx,ts) VALUES(?,?,?,?,?,?)",
-                (session, model, int(inp), int(out), int(ctx), int(_t.time())))
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(usage)").fetchall()}
+        for col in ("dur", "prov", "rid"):
+            if col not in cols:
+                con.execute(f"ALTER TABLE usage ADD COLUMN {col} {'INTEGER' if col == 'dur' else 'TEXT'}")
+                cols.add(col)
+    except Exception:
+        pass
+    try:
+        con.execute("INSERT INTO usage(session,model,inp,out,ctx,dur,prov,rid) VALUES(?,?,?,?,?,?,?,?)",
+                    (session, model, int(inp), int(out), int(ctx), int(dur_ms), prov, rid))
+    except Exception:
+        con.execute("INSERT INTO usage(session,model,inp,out,ctx) VALUES(?,?,?,?,?)",
+                    (session, model, int(inp), int(out), int(ctx)))
     con.commit()
 
 
@@ -87,16 +100,28 @@ def get_usage(con: sqlite3.Connection, session: str = "") -> dict:
         q += " WHERE session=?"
         args = (session,)
     inp, out, calls = con.execute(q, args).fetchone()
+    dur = con.execute(
+        "SELECT COALESCE(SUM(dur),0) FROM usage" + (" WHERE session=?" if session else ""),
+        args).fetchone()[0]
     by_model = con.execute(
-        "SELECT model, SUM(inp), SUM(out), COUNT(*) FROM usage "
-        + ("WHERE session=? " if session else "") + "GROUP BY model ORDER BY 4 DESC LIMIT 8",
+        "SELECT COALESCE(NULLIF(rid,''),model), SUM(inp), SUM(out), COUNT(*), "
+        "MAX(CASE WHEN rid LIKE '%:free' OR prov='ollama' THEN 0 "
+        "WHEN rid = '' AND (model LIKE '%free%' OR model LIKE 'tag:free%') THEN 0 "
+        "ELSE 1 END) "
+        "FROM usage " + ("WHERE session=? " if session else "") + "GROUP BY 1 ORDER BY 4 DESC LIMIT 8",
         args).fetchall()
     last = con.execute(
         "SELECT model, inp, ctx FROM usage "
         + ("WHERE session=? " if session else "") + "ORDER BY id DESC LIMIT 1",
         args).fetchone()
     ctx_pct = round(100 * last[1] / last[2], 1) if last and last[2] else 0.0
+    secs = (dur or 0) / 1000
+    speed = round(out / secs, 1) if secs > 0 and out else 0.0
+    spent_known = all(p == 0 for _, _, _, _, p in by_model)
+    models = [{"model": m, "input": i, "output": o, "calls": c,
+               "cost": "$0.00" if p == 0 else "n/a"} for m, i, o, c, p in by_model]
     return {"input": inp, "output": out, "total": inp + out, "calls": calls,
-            "ctx_pct": ctx_pct, "last_model": last[0] if last else "",
-            "by_model": [{"model": m, "input": i, "output": o, "calls": c}
-                         for m, i, o, c in by_model]}
+            "ctx_pct": ctx_pct, "ctx_tokens": last[1] if last else 0,
+            "ctx_limit": last[2] if last else 0, "speed": speed,
+            "spent": "$0.00" if spent_known else "n/a",
+            "last_model": last[0] if last else "", "by_model": models}
