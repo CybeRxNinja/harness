@@ -222,15 +222,19 @@ def ensure_opencode_config() -> str:
         _sh.copy2(dest, dest.with_suffix(f".bak-{int(_t.time())}.json"))
     want = _bundled_opencode_json()
     prov = cur.setdefault("provider", {})
+    # The relay block is managed: baseURL always follows the live gateway so
+    # --port / HARNESS_URL just work. Edit those, not this URL.
+    relay = os.environ.get("HARNESS_URL", "http://127.0.0.1:8787").rstrip("/") + "/v1"
     if "harness" not in prov:
         prov["harness"] = want["provider"]["harness"]
-    else:
-        # backfill new keys (e.g. reasoning capability) without clobbering user edits
-        existing_models = prov["harness"].setdefault("models", {})
-        for mid, spec in want["provider"]["harness"].get("models", {}).items():
-            node = existing_models.setdefault(mid, {})
-            for k, v in spec.items():
-                node.setdefault(k, v)
+    hp = prov["harness"]
+    hp.setdefault("options", {})["baseURL"] = relay
+    # backfill new keys (e.g. reasoning capability) without clobbering user edits
+    existing_models = prov["harness"].setdefault("models", {})
+    for mid, spec in want["provider"]["harness"].get("models", {}).items():
+        node = existing_models.setdefault(mid, {})
+        for k, v in spec.items():
+            node.setdefault(k, v)
     agents = cur.setdefault("agent", {})
     for name, spec in want["agent"].items():
         node = agents.setdefault(name, {})

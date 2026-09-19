@@ -28,3 +28,22 @@ def test_find_tui_prefers_appimage(tmp_path, monkeypatch):
     monkeypatch.setattr("shutil.which", lambda *a, **k: None)
     found = cli._find_tui()
     assert found is not None and found.endswith(".AppImage")
+
+
+def test_relay_baseurl_follows_port(tmp_path, monkeypatch):
+    import json
+    cfgdir = tmp_path / "cfg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfgdir))
+    monkeypatch.setenv("HARNESS_URL", "http://127.0.0.1:9999")
+    from harness.cli import ensure_opencode_config
+    ensure_opencode_config()
+    d = json.loads((cfgdir / "opencode" / "opencode.json").read_text())
+    assert d["provider"]["harness"]["options"]["baseURL"] == "http://127.0.0.1:9999/v1"
+    # custom edits elsewhere survive; rerun is idempotent
+    d["provider"]["harness"]["options"]["apiKey"] = "CUSTOM"
+    (cfgdir / "opencode" / "opencode.json").write_text(json.dumps(d))
+    monkeypatch.delenv("HARNESS_URL")
+    ensure_opencode_config()
+    d2 = json.loads((cfgdir / "opencode" / "opencode.json").read_text())
+    assert d2["provider"]["harness"]["options"]["apiKey"] == "CUSTOM"
+    assert d2["provider"]["harness"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
