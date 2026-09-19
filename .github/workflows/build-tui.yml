@@ -35,9 +35,9 @@ jobs:
       - name: Install (CI machine, not user PC)
         working-directory: upstream
         run: bun install
-      - name: Compile harness-tui (single native target, no embedded web UI)
+      - name: Compile harness-tui (single native target, official-like flags)
         working-directory: upstream/packages/opencode
-        run: bun run script/build.ts --single --skip-embed-web-ui --skip-install
+        run: bun run script/build.ts --single --skip-embed-web-ui
       - name: Collect binary
         working-directory: upstream/packages/opencode
         run: |
