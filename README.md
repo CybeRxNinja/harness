@@ -24,12 +24,17 @@ export OPENROUTER_API_KEY=sk-...
 harness chat "fix failing tests" --mode orchestrator --model tag:coding
 ```
 
-## TUI (TUI-B, CI-built)
+## TUI (AppImage — recommended, zero install mess)
 
-One command does everything (starts `serve`, wires `opencode.json`, launches the TUI):
+Download `Harness_TUI-x86_64.AppImage` from
+[releases](https://github.com/CybeRxNinja/harness/releases), `chmod +x`, run it.
+First launch self-setups: merges the harness provider into `opencode.json`,
+installs the Python CLI from GitHub, starts the gateway, installs a launcher
+shortcut. Nothing else to install.
 
 ```bash
-harness tui
+chmod +x Harness_TUI-x86_64.AppImage
+./Harness_TUI-x86_64.AppImage   # or: harness tui
 ```
 
 No binary yet / SSH / scripts: `harness chat ...` is the guaranteed fallback (same loop).
