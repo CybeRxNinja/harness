@@ -2,6 +2,8 @@ name: build-tui
 on:
   push:
     tags: ["tui-v*"]
+  pull_request:
+    paths: ["tui/**", ".github/workflows/build-tui.yml", "harness/harness-opencode.json"]
   workflow_dispatch:
 permissions:
   contents: write  # lets the Release step publish (repo default is read-only)

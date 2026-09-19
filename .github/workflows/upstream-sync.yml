@@ -1,0 +1,98 @@
+name: upstream-sync
+# Keeps our opencode fork pin fresh: checks upstream releases on schedule,
+# bumps TUI_REF, verifies our patches + plugins still apply, opens a PR.
+# Merging is human; tagging tui-vX after merge cuts the release (which
+# compile-verifies via build-tui).
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # weekly Monday 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream tag to sync to (default: latest release)"
+        required: false
+        default: ""
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+env:
+  UPSTREAM: sst/opencode
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve target ref
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          if [ -n "$INPUT_REF" ]; then
+            echo "tag=$INPUT_REF" >> "$GITHUB_OUTPUT"
+          else
+            TAG=$(gh release view --repo "$UPSTREAM" --json tagName -q .tagName)
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Compare with pin
+        id: cmp
+        run: |
+          CURRENT=$(grep -oP '^  TUI_REF: \K\S+' .github/workflows/build-tui.yml | head -1)
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "pinned: $CURRENT / upstream: ${{ steps.target.outputs.tag }}"
+          if [ "$CURRENT" = "${{ steps.target.outputs.tag }}" ]; then
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Up to date, nothing to do
+        if: steps.cmp.outputs.stale == 'false'
+        run: echo "pin already at ${{ steps.cmp.outputs.current }}"
+      - name: Checkout upstream at target
+        if: steps.cmp.outputs.stale == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: sst/opencode
+          ref: ${{ steps.target.outputs.tag }}
+          path: upstream-check
+      - name: Verify patches + plugins apply
+        id: verify
+        if: steps.cmp.outputs.stale == 'true'
+        run: |
+          set +e
+          FAIL=""
+          cd upstream-check
+          shopt -s nullglob
+          for p in ../tui/patches/*.patch; do
+            git apply --check "$p" >/tmp/opencode/patch-check.log 2>&1 || FAIL="$FAIL $p"
+          done
+          for f in ../tui/plugins/*.tsx; do
+            [ -f "$f" ] || FAIL="$FAIL (missing plugin $f)"
+          done
+          echo "fail=$FAIL" >> "$GITHUB_OUTPUT"
+          [ -z "$FAIL" ]
+      - name: Open conflict issue
+        if: steps.cmp.outputs.stale == 'true' && failure() && steps.verify.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --title "upstream sync blocked: patches fail on ${{ steps.target.outputs.tag }}" \
+            --body " nuestros patches/plugins no longer apply cleanly on upstream \`${{ steps.target.outputs.tag }}\` (from \`${{ steps.cmp.outputs.current }}\`). Failing: ${{ steps.verify.outputs.fail }}. Rebase the reskin by hand, then bump TUI_REF." \
+            --label upstream-sync || true
+      - name: Bump pin on branch + open PR
+        if: steps.cmp.outputs.stale == 'true' && success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          BR="upstream-sync/${TAG}"
+          git config user.name "harness-sync"
+          git config user.email "harness-sync@localhost"
+          git checkout -b "$BR"
+          sed -i "s|^  TUI_REF: .*|  TUI_REF: $TAG  # pinned sst/opencode tag; bump on rebase|" .github/workflows/build-tui.yml
+          git add .github/workflows/build-tui.yml
+          git commit -m "sync upstream pin to $TAG (patches verified)" || exit 0
+          git push -u origin "$BR"
+          gh pr create --title "upstream sync: $TAG" --fill \
+            --body "Automated pin bump ${{ steps.cmp.outputs.current }} → $TAG. Patches + plugins verified applicable. Merge, then tag tui-vX for the release build." || true
