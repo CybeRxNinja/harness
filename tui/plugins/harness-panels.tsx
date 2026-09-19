@@ -4,7 +4,7 @@ import { createEffect, createSignal, For, Show } from "solid-js"
 
 const id = "harness:sidebar-panels"
 
-const TABS = ["Tasks", "Agents", "Skills", "Memory", "Models"] as const
+const TABS = ["Todo", "Agents", "Skills", "Memory", "Models", "Stats"] as const
 type Tab = (typeof TABS)[number]
 
 const base = () => process.env.HARNESS_URL ?? "http://127.0.0.1:8787"
@@ -18,6 +18,12 @@ async function get(path: string): Promise<any> {
   return res.json()
 }
 
+function fmt(n: number): string {
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return `${n}`
+}
+
 function useTabData(tab: () => Tab, sessionID: string) {
   const [rows, setRows] = createSignal<string[]>([])
   const [err, setErr] = createSignal("")
@@ -27,9 +33,9 @@ function useTabData(tab: () => Tab, sessionID: string) {
     setRows(["…"])
     const run = async () => {
       try {
-        if (t === "Tasks") {
+        if (t === "Todo") {
           const d = await get(`/api/tasks?session=${encodeURIComponent(sessionID)}`)
-          const todos = (d.todos ?? []).map((x: any) => `${x.status === "done" ? "●" : "○"} ${x.text}`.slice(0, 60))
+          const todos = (d.todos ?? []).map((x: any) => `${x.status === "done" ? "●" : x.status === "doing" ? "◐" : "○"} ${x.text}`.slice(0, 60))
           const inbox = (d.inbox ?? []).map((x: any) => `◈ ${x.from}: ${String(x.content).slice(0, 60)}`)
           setRows([...todos, ...inbox].slice(0, 12))
         } else if (t === "Agents") {
@@ -41,6 +47,15 @@ function useTabData(tab: () => Tab, sessionID: string) {
         } else if (t === "Memory") {
           const d: any[] = await get("/api/memory?q=project")
           setRows(d.slice(0, 8).map((m) => `✎ ${String(m.text).slice(0, 56)}`))
+        } else if (t === "Stats") {
+          const u: any = await get(`/api/usage?session=${encodeURIComponent(sessionID)}`)
+          const top = (u.by_model ?? []).slice(0, 4)
+            .map((m: any) => `▪ ${m.model}: ${fmt(m.input)}+${fmt(m.output)}`.slice(0, 60))
+          setRows([
+            `in ${fmt(u.input ?? 0)} · out ${fmt(u.output ?? 0)} · ${u.calls ?? 0} calls`,
+            `context ${u.ctx_pct ?? 0}%${u.last_model ? ` · ${u.last_model}` : ""}`.slice(0, 60),
+            ...top,
+          ])
         } else {
           const d: any[] = await get("/api/route")
           const seen = new Map<string, any>()
@@ -64,7 +79,7 @@ function useTabData(tab: () => Tab, sessionID: string) {
 
 function View(props: { api: TuiPluginApi; session_id: string }) {
   const [open, setOpen] = createSignal(true)
-  const [tab, setTab] = createSignal<Tab>("Tasks")
+  const [tab, setTab] = createSignal<Tab>("Todo")
   const theme = () => props.api.theme.current
   const { rows, err } = useTabData(tab, props.session_id)
   const ready = () => token().length > 0
@@ -72,8 +87,8 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
   return (
     <box>
       <box flexDirection="row" gap={1} onMouseDown={() => setOpen((x) => !x)}>
-        <text fg={theme().text}>{open() ? "▼" : "▶"}</text>
-        <text fg={theme().text}>
+        <text selectable={false} fg={theme().text}>{open() ? "▼" : "▶"}</text>
+        <text selectable={false} fg={theme().text}>
           <b>Harness</b>
         </text>
       </box>
@@ -87,7 +102,7 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
           <box flexDirection="row" gap={1}>
             <For each={TABS}>
               {(t) => (
-                <text fg={t === tab() ? theme().text : theme().textMuted} onMouseDown={() => setTab(t)}>
+                <text selectable={false} fg={t === tab() ? theme().text : theme().textMuted} onMouseDown={() => setTab(t)}>
                   {t === tab() ? `[${t}]` : t}
                 </text>
               )}

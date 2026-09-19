@@ -31,3 +31,37 @@ def test_endpoints():
     assert isinstance(get("/api/agents"), list)
     assert get("/v1/models")["object"] == "list"
     srv.shutdown()
+
+
+def test_usage_tracking():
+    import json, urllib.request
+    srv = _serve()
+    port = srv.server_address[1]
+    tok = open(os.path.expanduser("~/.harness/token")).read().strip()
+
+    def post(path, body):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Authorization": f"Bearer {tok}",
+                                              "Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req, timeout=15).read())
+
+    def get(path):
+        req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                                     headers={"Authorization": f"Bearer {tok}"})
+        return json.loads(urllib.request.urlopen(req, timeout=10).read())
+
+    post("/api/chat", {"session_id": "usetest", "mode": "ask", "message": "hello world usage"})
+    u = get("/api/usage?session=usetest")
+    assert u["calls"] >= 1 and u["input"] > 0 and u["total"] == u["input"] + u["output"]
+    assert isinstance(u["by_model"], list)
+    srv.shutdown()
+
+
+def test_sse_text_extract():
+    from harness.serve import _sse_chars, _msg_chars, _model_ctx
+    assert _msg_chars([{"role": "user", "content": "hello"}]) == 5
+    assert _msg_chars([{"role": "user", "content": [{"type": "text", "text": "abc"}]}]) == 3
+    assert _sse_chars(b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n') == 2
+    assert _model_ctx("auto-fastest") == 0
+    assert _model_ctx("deepseek-v3.2") == 128000

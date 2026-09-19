@@ -39,6 +39,51 @@ def ensure_token() -> str:
     return t
 
 
+def _msg_chars(messages: list) -> int:
+    n = 0
+    for m in messages or []:
+        c = (m or {}).get("content", "")
+        if isinstance(c, str):
+            n += len(c)
+        elif isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    n += len(part["text"])
+    return n
+
+
+def _sse_chars(payload: bytes) -> int:
+    import json as _j
+    import re as _re
+    n = 0
+    try:
+        for m in _re.finditer(rb'"content"\s*:\s*"((?:[^"\\]|\\.)*)"', payload):
+            try:
+                n += len(_j.loads('"' + m.group(1).decode("utf-8", "replace") + '"'))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return n
+
+
+def _model_ctx(model: str) -> int:
+    from .router import GROUPS
+    g = GROUPS.get(model or "")
+    return int(g.get("ctx", 0)) if g else 0
+
+
+def _record_v1(root, model: str, msgs: list, out_chars: int) -> None:
+    try:
+        from .store import connect, record_usage
+        con = connect(root)
+        record_usage(con, "relay", model, _msg_chars(msgs) // 4, out_chars // 4,
+                     _model_ctx(model))
+        con.close()
+    except Exception:
+        pass
+
+
 class Handler(BaseHTTPRequestHandler):
     root: Path = Path(".")
     token: str = ""
@@ -122,6 +167,14 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/route":
             from .router import recent_routes
             return self._send(200, recent_routes())
+        if parsed.path == "/api/usage":
+            from .store import get_usage
+            qs = urllib.parse.parse_qs(parsed.query)
+            sess = (qs.get("session") or [""])[0]
+            con = connect(self.root)
+            out = get_usage(con, sess)
+            con.close()
+            return self._send(200, out)
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -148,7 +201,23 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(500, {"error": str(e)[:500]})
             if stream:
+                try:
+                    from .store import record_usage as _ru2
+                    _con3 = connect(self.root)
+                    _ru2(_con3, sid, out.get("route_model", body.get("model", "")), len(msg) // 4,
+                         len(out.get("content", "")) // 4, 0)
+                    _con3.close()
+                except Exception:
+                    pass
                 return self._send(200, f"data: {json.dumps({'delta': out['content'][:6000]})}\n\ndata: [DONE]\n\n", sse=True)
+            try:
+                from .store import record_usage as _ru
+                _con2 = connect(self.root)
+                _ru(_con2, sid, out.get("route_model", body.get("model", "")), len(msg) // 4,
+                    len(out.get("content", "")) // 4, 0)
+                _con2.close()
+            except Exception:
+                pass
             return self._send(200, {"session_id": sid, "content": out["content"], "touched": out.get("touched", [])})
         if self.path == "/api/spawn":
             con = connect(self.root)
@@ -184,6 +253,7 @@ class Handler(BaseHTTPRequestHandler):
                     payload += f'data: {json.dumps({"error": str(e)[:300]})}\n\n'.encode()
                 if not payload.endswith(b"data: [DONE]\n\n"):
                     payload += b"data: [DONE]\n\n"
+                _record_v1(self.root, model, msgs, _sse_chars(payload))
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-store")
@@ -196,6 +266,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 m = chat(msgs, model=model, cfg=cfg, extra=extra)
+                _record_v1(self.root, model, msgs, len(str(m.get("content", ""))))
                 return self._send(200, {"id": "chatcmpl-harness", "object": "chat.completion",
                                         "choices": [{"index": 0, "message": {k: v for k, v in m.items() if not k.startswith("_")}, "finish_reason": "stop"}]})
             except Exception as e:
