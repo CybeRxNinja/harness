@@ -230,9 +230,13 @@ def _ensure_serve(root: Path, port: int) -> None:
 
 
 def _find_tui() -> str | None:
+    import glob as _g
     import shutil as _sh
-    for cand in (_sh.which("harness-tui"), str(Path.home() / ".local" / "bin" / "harness-tui"),
-                 str(Path("harness-tui-linux-x64").resolve())):
+    cands = [_sh.which("harness-tui"), str(Path.home() / ".local" / "bin" / "harness-tui")]
+    # AppImages: single-file, no install (preferred if newer)
+    cands += sorted(_g.glob(str(Path.home() / "Applications" / "harness-tui*.AppImage")))
+    cands += sorted(_g.glob("harness-tui*.AppImage"))
+    for cand in cands:
         if cand and Path(cand).exists():
             return cand
     return None

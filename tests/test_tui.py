@@ -16,3 +16,15 @@ def test_tui_config_merge(tmp_path, monkeypatch):
     ensure_opencode_config()
     d2 = json.loads(open(out).read())
     assert d2 == d
+
+
+def test_find_tui_prefers_appimage(tmp_path, monkeypatch):
+    from harness import cli
+    home = tmp_path / "home"
+    apps = home / "Applications"
+    apps.mkdir(parents=True)
+    (apps / "harness-tui-x86_64.AppImage").write_text("x")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr("shutil.which", lambda *a, **k: None)
+    found = cli._find_tui()
+    assert found is not None and found.endswith(".AppImage")

@@ -1,0 +1,4 @@
+#!/bin/sh
+# AppRun: single-file launch, no install. HARNESS_TOKEN comes from the
+# environment — launch via `harness tui` or export it (see harness setup).
+exec "$APPDIR/usr/bin/harness-tui" "$@"
