@@ -46,7 +46,11 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "harness/0.1"
 
     def log_message(self, *a):
-        pass
+        try:
+            with open("/home/jailbreaker20/.harness/serve.log", "a") as f:
+                f.write(" ".join(str(x) for x in a) + "\n")
+        except Exception:
+            pass
 
     def _auth(self) -> bool:
         if self.path in ("/health",):
@@ -82,7 +86,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             return self._send(200, {"ok": True, "version": "0.1.0"})
         if not self._auth():
-            return self._send(401, {"error": "unauthorized"})
+            return self._send(401, {"error": "unauthorized: launch via `harness tui` or export HARNESS_TOKEN=$(cat ~/.harness/token)"})
         cfg, _ = load_config(self.root)
         if parsed.path == "/v1/models":
             return self._send(200, {"object": "list", "data": list_models(cfg)})
@@ -125,7 +129,7 @@ class Handler(BaseHTTPRequestHandler):
         from . import rlm as R
         from .router import chat, parse_model
         if not self.path.startswith("/health") and not self._auth():
-            return self._send(401, {"error": "unauthorized"})
+            return self._send(401, {"error": "unauthorized: launch via `harness tui` or export HARNESS_TOKEN=$(cat ~/.harness/token)"})
         body = self._body()
         cfg, _ = load_config(self.root)
         if self.path.startswith("/api/chat"):
