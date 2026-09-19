@@ -1,4 +1,4 @@
-"""Config layers: defaults < ~/.harness/harness.jsonc < .harness/harness.jsonc < env/flags.
+"""Config layers: defaults < ~/.harness/harness.jsonc < .opencode/harness.jsonc < env/flags.
 
 JSONC supported (// and /* */ comments, trailing commas).
 Project layer can never touch USER_ONLY_KEYS.
@@ -12,6 +12,8 @@ import re
 import shutil
 import time
 from pathlib import Path
+
+from .paths import state_dir
 
 USER_ONLY_KEYS = ("secrets", "token", "trusted_project_dirs", "mcp_env_allowlist", "security")
 
@@ -94,12 +96,12 @@ def load_config(project_dir: str | Path = ".") -> tuple[dict, dict]:
         # strip user-only violations silently (project can't set them anyway)
         cfg = _deep_merge(cfg, udata)
         info["user"] = str(ufile)
-    # walk from proj up to $HOME for .harness/harness.jsonc (nearest wins)
+    # walk from proj up to $HOME for .opencode/harness.jsonc (nearest wins)
     home = Path.home()
     chain: list[Path] = []
     cur = proj
     while True:
-        cand = cur / ".harness" / "harness.jsonc"
+        cand = cur / ".opencode" / "harness.jsonc"
         if cand.exists():
             chain.append(cand)
         if cur == home or cur == cur.parent or cur == Path("/"):
@@ -142,7 +144,7 @@ def set_value(project_dir: str | Path, path: str, value, scope: str = "user") ->
     _check_mutable(path)
     if scope not in ("user", "project"):
         raise ValueError("scope must be user|project")
-    dest = (user_dir() if scope == "user" else Path(project_dir).resolve() / ".harness") / "harness.jsonc"
+    dest = (user_dir() if scope == "user" else state_dir(Path(project_dir).resolve())) / "harness.jsonc"
     dest.parent.mkdir(parents=True, exist_ok=True)
     old_data = _load_jsonc(dest) if dest.exists() else {}
     if dest.exists():

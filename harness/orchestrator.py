@@ -7,9 +7,11 @@ import time
 import uuid
 from pathlib import Path
 
+from .paths import state_dir
+
 
 def boulder_path(root: Path) -> Path:
-    return root / ".harness" / "boulder.json"
+    return state_dir(root) / "boulder.json"
 
 
 def load_boulder(root: Path) -> dict:
@@ -29,7 +31,7 @@ def save_boulder(root: Path, data: dict) -> None:
 def start_plan(root, title: str, items: list[str]) -> str:
     b = load_boulder(root)
     wid = "w_" + uuid.uuid4().hex[:6]
-    plan_file = root / ".harness" / "plans" / f"{re.sub(r'[^a-z0-9-]+','-',title.lower())[:40]}.md"
+    plan_file = state_dir(root) / "plans" / f"{re.sub(r'[^a-z0-9-]+','-',title.lower())[:40]}.md"
     plan_file.parent.mkdir(parents=True, exist_ok=True)
     body = f"# {title}\n\n" + "\n".join(f"- [ ] {i+1}. {t}" for i, t in enumerate(items))
     plan_file.write_text(body + "\n")
@@ -53,7 +55,7 @@ def check_box(root: Path, plan_file: str, idx_hint: str = "") -> bool:
     new, n = re.subn(r"- \[ \] ", "- [x] ", text, count=1)
     if n:
         p.write_text(new)
-        ledger = root / ".harness" / "ledger.jsonl"
+        ledger = state_dir(root) / "ledger.jsonl"
         ledger.parent.mkdir(parents=True, exist_ok=True)
         with open(ledger, "a") as f:
             f.write(json.dumps({"ts": int(time.time()), "plan": plan_file, "checked": idx_hint[:120]}) + "\n")

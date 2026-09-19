@@ -10,6 +10,8 @@ import traceback
 from contextlib import redirect_stdout
 from pathlib import Path
 
+from .paths import state_dir
+
 BLOCKED_IMPORTS = ("socket", "urllib.request", "http.client", "ftplib", "smtplib")
 
 
@@ -42,8 +44,8 @@ class Kernel:
     def __init__(self, project_root: Path, session_id: str):
         self.root = project_root.resolve()
         self.session_id = session_id
-        self.store = self.root / ".harness" / "kernel" / f"{session_id}.pkl"
-        self.runs = self.root / ".harness" / "runs"
+        self.store = state_dir(self.root) / "kernel" / f"{session_id}.pkl"
+        self.runs = state_dir(self.root) / "runs"
         self.runs.mkdir(parents=True, exist_ok=True)
         self.ns: dict = {"__session__": session_id}
         self._load()

@@ -102,7 +102,8 @@ def test_memory_loop(root):
     assert any("gamma" in h["text"] for h in M.recall(con, "gamma"))
     pid = M.stage_lesson(con, "audit-lesson", "evidence blob", "gist")
     assert any(p["id"] == pid for p in M.list_pending(con))
-    assert M.approve(con, pid, root / ".harness" / "MEMORY.md")
+    from harness.paths import state_dir
+    assert M.approve(con, pid, state_dir(root) / "MEMORY.md")
     assert M.forget(con, "gamma") >= 0
     con.close()
 

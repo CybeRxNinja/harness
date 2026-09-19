@@ -7,6 +7,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .paths import state_dir
+
 _POOL = ThreadPoolExecutor(max_workers=2)
 _LOCK = threading.Semaphore(2)
 
@@ -36,7 +38,7 @@ def spawn(con, cfg: dict, project_root: Path, prompt: str, name: str,
     else:
         chain = ((cfg.get("agents", {}) or {}).get(subagent_type, {}) or {}).get("models", ["auto-fastest"])
     model = chain[0] if chain else "auto-fastest"
-    sdir = project_root / ".harness" / "workers" / wid
+    sdir = state_dir(project_root) / "workers" / wid
     sdir.mkdir(parents=True, exist_ok=True)
     (sdir / "prompt.md").write_text(f"# {name}\n\n{prompt}\n")
     con.execute("INSERT INTO workers(id,session,name,category,model,status,cost,updated) VALUES(?,?,?,?,?,?,?,?)",
@@ -74,7 +76,7 @@ def _run_worker(root: str, wid: str, prompt: str, name: str, kind: str, model: s
             content = str(msg.get("content", ""))[:4000]
         except Exception as e:
             content = f"worker failed: {e}"
-        (project_root / ".harness" / "workers" / wid / "result.md").write_text(content)
+        (state_dir(project_root) / "workers" / wid / "result.md").write_text(content)
         con.execute("UPDATE workers SET status=? WHERE id=?", ("done", wid))
         con.execute("INSERT INTO mailbox(sender,receiver,receiver_role,content,ts) VALUES(?,?,?,?,?)",
                     (name, "parent", "parent", content[:4000], int(time.time())))

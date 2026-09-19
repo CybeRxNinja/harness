@@ -8,6 +8,8 @@ import sys
 import uuid
 from pathlib import Path
 
+from .paths import state_dir
+
 
 def _root(args) -> Path:
     return Path(getattr(args, "root", ".")).resolve()
@@ -99,7 +101,7 @@ def cmd_skills(args) -> int:
                     con.commit()
                     print(f"approved {pid}")
                 else:
-                    ok = approve(con, pid, root / ".harness" / "MEMORY.md")
+                    ok = approve(con, pid, state_dir(root) / "MEMORY.md")
                     print(f"{'approved' if ok else 'missing'} {pid}")
             else:
                 con.execute("DELETE FROM pending WHERE id=?", (pid,))
@@ -258,7 +260,7 @@ def _ensure_serve(root: Path, port: int) -> None:
         if not cur or cur.get("root") == str(root):
             return  # same project (or legacy): reuse
         print(f"harness: gateway serves {cur.get('root')} — restarting for {root} "
-              f"(sessions persist in each .harness/)")
+              f"(sessions persist in each .opencode/harness/)")
         try:
             import os as _o
             _o.kill(int(cur["pid"]), 15)
@@ -269,7 +271,7 @@ def _ensure_serve(root: Path, port: int) -> None:
         except Exception as e:
             raise RuntimeError(f"cannot stop gateway for {cur.get('root')} (pid {cur.get('pid')}): {e}. "
                                f"Stop it manually or use --port")
-    log = root / ".harness" / "serve.log"
+    log = state_dir(root) / "serve.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     _sp.Popen([sys.executable, "-m", "harness", "--root", str(root),
                "serve", "--port", str(port)],

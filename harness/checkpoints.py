@@ -6,9 +6,11 @@ import subprocess
 import time
 from pathlib import Path
 
+from .paths import state_dir
+
 
 def checkpoint(root: Path, touched: list[str] | None = None) -> str:
-    dest = root / ".harness" / "shadow" / time.strftime("%Y%m%d-%H%M%S")
+    dest = state_dir(root) / "shadow" / time.strftime("%Y%m%d-%H%M%S")
     dest.mkdir(parents=True, exist_ok=True)
     # try git diff
     try:
@@ -35,7 +37,7 @@ def restore(root: Path, snap: str) -> str:
     s = Path(snap)
     if not s.exists():
         # allow short id
-        cands = sorted((root / ".harness" / "shadow").glob("*"))
+        cands = sorted((state_dir(root) / "shadow").glob("*"))
         match = [c for c in cands if c.name.startswith(snap)]
         if not match:
             raise FileNotFoundError(f"no snapshot {snap}")

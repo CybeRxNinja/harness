@@ -8,8 +8,9 @@ from pathlib import Path
 
 
 def db_path(project_root: Path) -> Path:
-    p = project_root.resolve() / ".harness" / "sessions.db"
-    p.parent.mkdir(parents=True, exist_ok=True)
+    from .paths import migrate_legacy, state_dir
+    migrate_legacy(project_root)
+    p = state_dir(project_root) / "sessions.db"
     return p
 
 

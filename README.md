@@ -45,7 +45,7 @@ No binary yet / SSH / scripts: `harness chat ...` is the guaranteed fallback (sa
 harness/       core: loop, kernel(RLM), rlm(spawn), router(builtin relay),
                reasoning, compact, orchestrator, tasks, store, memory,
                skills, mcp, checkpoints, serve, doctor, cli
-.harness/skills/  seed skills (Addy subset) + reverse-router (disabled default)
+.opencode/harness/skills/  seed skills (Addy subset) + reverse-router (disabled default)
 docs/          one page per feature
 tui/           fork notes + patches + reskin spec
 ```

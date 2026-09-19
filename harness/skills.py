@@ -5,6 +5,8 @@ import re
 import time
 from pathlib import Path
 
+from .paths import state_dir
+
 DANGEROUS = re.compile(r"(curl .*\| *sh|private[_-]?key|BEGIN RSA|exfil|\.env\b.*(send|post|upload))", re.I)
 
 
@@ -13,7 +15,7 @@ def skill_roots(project_root: Path, cfg: dict) -> list[tuple[str, Path, int]]:
     from .config import user_dir
     roots: list[tuple[str, Path, int]] = []
     # project tiers
-    for cand in (project_root / ".harness" / "skills", project_root / ".agents" / "skills"):
+    for cand in (state_dir(project_root) / "skills", project_root / ".agents" / "skills"):
         if cand.exists():
             roots.append(("project", cand, 0))
     local = user_dir() / "skills"
@@ -163,7 +165,7 @@ def scan_security(text: str) -> str:
 def bundles(project_root: Path) -> dict:
     from .config import user_dir
     out: dict = {}
-    for d in (user_dir() / "skill-bundles", project_root / ".harness" / "skill-bundles"):
+    for d in (user_dir() / "skill-bundles", state_dir(project_root) / "skill-bundles"):
         if d.exists():
             for y in d.glob("*.yaml"):
                 try:

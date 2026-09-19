@@ -63,7 +63,7 @@ def edit(root: Path, path: str, old: str, new: str, hash_id: str = "") -> str:
 def glob(root: Path, pattern: str, limit: int = 50) -> list[str]:
     out: list[str] = []
     for dirpath, _, files in os.walk(root):
-        if ".git" in dirpath or ".harness" in dirpath:
+        if ".git" in dirpath or ".opencode" in dirpath or ".harness" in dirpath:
             continue
         for f in files:
             rel = os.path.relpath(os.path.join(dirpath, f), root)
@@ -78,7 +78,7 @@ def grep(root: Path, pattern: str, include: str = "*", limit: int = 40) -> list[
     rx = re.compile(pattern)
     out: list[str] = []
     for dirpath, _, files in os.walk(root):
-        if ".git" in dirpath or ".harness" in dirpath:
+        if ".git" in dirpath or ".opencode" in dirpath or ".harness" in dirpath:
             continue
         for f in files:
             if not fnmatch.fnmatch(f, include):
