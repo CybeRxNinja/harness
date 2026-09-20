@@ -53,13 +53,16 @@ Modes: `code orchestrator plan ask debug review`. Models: explicit
 
 ## The plugin (`harness/plugin/harness.ts`)
 
-A single stock-opencode v2 plugin (no fork). Once installed it:
+A single stock-opencode v2 plugin (no fork), default-exported as
+`{ id, setup(ctx) }`. Once installed it:
 
-- seeds bundled skills into opencode's skill store;
-- exposes `skills_list`/`skill_view`/`memory_recall` as native tools;
-- condenses oversized tool outputs in place;
-- on `experimental.session.compacting`, injects a recalled memory brief into the
-  compaction summary so durable project facts survive a condensed transcript.
+- seeds bundled skills into opencode's skill store (`ctx.skill.transform`);
+- exposes `skills_list`/`skill_view`/`memory_recall` as native tools
+  (`ctx.tool.transform`);
+- condenses oversized tool outputs in place (`ctx.tool.hook("execute.after")`);
+- on compaction (`ctx.session.hook("compaction")`), appends a recalled memory
+  brief to the summarization request so durable project facts survive a
+  condensed transcript.
 
 Harness agents come from `opencode.json` (merged by `harness plugin install`/
 `harness tui`); skills surface as native plugin tools, no MCP hop.

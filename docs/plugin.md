@@ -28,16 +28,27 @@ harness tui --setup-only  # prep only, then run `opencode` yourself
 
 ## What the plugin does
 
-1. **Skill seeding** — registers the bundled skills (under
-   `harness/data/skills/`) into opencode's skill store so they're usable without
-   editing `opencode.json`.
-2. **Native tools** — `skills_list`/`skill_view`/`memory_recall` read local
-   disk + SQLite directly (no gateway, no extra process).
-3. **Output condensing** — `tool.execute.after` collapses oversized tool
-   results in place (errors pass through untouched).
-4. **Compaction memory** — on opencode's `experimental.session.compacting` hook,
-   it recalls project facts locally and injects them as compaction context, so
+All four are registered through the v2 plugin context from `setup(ctx)`:
+
+1. **Skill seeding** — `ctx.skill.transform` registers the bundled skills
+   (`harness/data/skills/<category>/<name>/SKILL.md`) into opencode's skill store
+   so they're loadable by id without editing `opencode.json`.
+2. **Native tools** — `ctx.tool.transform` adds
+   `skills_list`/`skill_view`/`memory_recall` as *direct* tools
+   (`options: { codemode: false }`; the v2 default is Code-Mode-only, where a
+   by-name call fails with "No tool named … is currently available"). They read
+   local disk + SQLite directly (no gateway, no extra process).
+3. **Output condensing** — the `ctx.tool.hook("execute.after")` hook collapses
+   oversized tool results in place (errors pass through untouched).
+4. **Compaction memory** — the `ctx.session.hook("compaction")` hook recalls
+   project facts locally and appends them to the summarization request, so
    durable facts survive the summary step.
+
+The loader only accepts a default-exported object with a string `id` plus an
+`effect` or `setup` function, and `setup` must return a cleanup function or
+nothing — any other returned value is called as a cleanup function and kills
+plugin activation. The file therefore has no imports and returns nothing; see
+`harness/plugin/README.md` for the full contract.
 
 ## What the plugin does NOT do (those come from opencode.json)
 
@@ -63,7 +74,28 @@ Uninstall only removes harness-owned entries (agents without a user model pin,
 legacy `provider.harness` / `harness/*` leftovers). Anything you customized
 beyond that is left alone.
 
+## Troubleshooting
+
+**"OpenCode's free tier can only be used from within OpenCode"** — this is
+zen/opencode's server-side gate, not a plugin bug. The free-tier endpoint
+accepts a request only if its tool list advertises a tool literally named
+`shell` (verified by replaying captured requests: `shell` present → 200,
+renamed/fake tool or only read tools → `FreeTierError`). Agents whose
+`permission.bash` is `deny` (e.g. the built-in `ask`) never get a shell tool,
+so *any* free model fails under them. `build`/`plan`/`orchestrator` include
+`shell` and work. Fix: run free models with a shell-capable agent, or give the
+agent `"bash": "allow"`, or use a paid key for read-only agents.
+
+**The plugin doesn't show in the TUI's Plugins panel** — expected. The panel
+lists plugins that register TUI client components (`features.tui`); harness
+registers server features only (`features.server: true`) and is verified active
+via `opencode api get /api/plugin` (or `GET /api/plugin` with basic auth against
+`opencode serve`). Its tools/skills/hooks work regardless of the panel.
+
 ## Verify
 
 - `harness doctor` reports your user model, the plugin file, and opencode presence.
 - A long chat: when the session compacts, the recalled memory brief is applied.
+- `python scripts/opencode_smoke.py` (CI runs this too): boots a real
+  `opencode serve`, forces activation, asserts the plugin is `active` with the
+  11 bundled skills seeded.

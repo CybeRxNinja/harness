@@ -22,6 +22,6 @@ lines) / `aggressive` (truncate 60). Raw output spills to
 plus a stats trailer naming engines, filter and raw filename.
 
 ## Plugin hook
-The opencode plugin's `tool.execute.after` runs the same policy on opencode-side
-tool results (>4000 chars, errors pass through untouched). Errors can never be
-hidden by either path.
+The opencode plugin's `ctx.tool.hook("execute.after")` handler runs the same
+policy on opencode-side tool results (>4000 chars, errors pass through
+untouched). Errors can never be hidden by either path.

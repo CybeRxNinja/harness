@@ -1,245 +1,456 @@
-// Harness plugin for STOCK opencode v2. No fork, no custom binary.
-// Install: `harness plugin install` copies this file to
-// ~/.config/opencode/plugins/ (auto-loaded, no config edit needed).
-// Zero runtime imports: the v2.0.8 server resolves plugin imports in an
-// isolated registry (node_modules under ~/.config/opencode is reconciled
-// away), so any value-level import fails load with ResolveMessage.
-// `import type` is erased by Bun and is safe.
-import type { PluginInput } from "@opencode-ai/plugin"
+// Harness plugin for STOCK opencode v2. Installed by `harness plugin install`
+// into ~/.config/opencode/plugins/ (auto-discovered, no config entry needed).
+//
+// Loader contract (opencode v2.0.8, PluginModule.load + PluginSupervisor):
+//   * The default export must be an object shaped { id, setup } (or
+//     { id, effect }); anything else fails the load with
+//     "Plugin must export a default definition with an id and an effect or
+//     setup function."
+//   * `setup` runs at activation and may return a cleanup function. Returning
+//     any OTHER truthy value makes the host call that value as a cleanup
+//     function ("TypeError: … is not a function"), the activation dies, the
+//     plugin never appears under /plugins, and session work that waits for
+//     plugin activation stalls. v1 hook objects are NOT read in v2: tools,
+//     skills and hooks must be registered through the ctx.* APIs below.
+//   * No value-level imports: the server compiles plugins in its own registry
+//     where bare specifiers do not resolve. This file imports nothing.
+//
+// What it registers:
+//   1. skill seeding      ctx.skill.transform(editor => editor.add(skill))
+//   2. native tools       ctx.tool.transform(editor => editor.add(tool))
+//   3. output condensing  ctx.tool.hook("execute.after", fn)
+//   4. compaction brief   ctx.session.hook("compaction", fn)
+//
+// Provider / agents are NOT duplicated here: they come from opencode.json.
 
-async function sh(cmd: string[]): Promise<{ ok: boolean; text: string }> {
+type Rec = Record<string, any>
+
+const CONDENSE_OVER = 4000
+const MAX_SKILL_CHARS = 12000
+const NO_FACTS = "(nothing recalled — verify from the transcript instead)"
+const BRIEF_MARK = "Harness memory brief"
+const ERROR_LINE = /Traceback |Error:|Exception:|FAILED|failed|AssertionError|panic:|fatal:/
+
+function short(e: unknown): string {
+  const s = e instanceof Error ? e.message : String(e)
+  return s.length > 160 ? `${s.slice(0, 160)}…` : s
+}
+
+/** Async process helper: never blocks the opencode server's event loop. */
+async function run(cmd: string[]): Promise<{ ok: boolean; text: string }> {
   try {
-    const proc = Bun.spawnSync(cmd)
-    const out = Buffer.isBuffer(proc.stdout) ? proc.stdout.toString() : String(proc.stdout ?? "")
-    return { ok: proc.exitCode === 0, text: out }
+    const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" })
+    const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+    return { ok: code === 0, text: out ?? "" }
   } catch {
     return { ok: false, text: "" }
   }
 }
 
-async function seedSkills(): Promise<any[]> {
-  const out: any[] = []
-  const r = await sh(["python3", "-c",
-    "import harness,os; print(os.path.join(os.path.dirname(harness.__file__),'data','skills'))"])
-  const root = r.ok ? r.text.trim() : ""
-  if (!root) return out
-  const glob = new Bun.Glob("*/SKILL.md")
-  for await (const rel of glob.scan({ cwd: root, absolute: false })) {
+/**
+ * `ctx.skill.list()` returns the raw server response, whose shape differs
+ * between versions (`SkillInfo[]`, `{data: [...]}`, `{skills: [...]}`).
+ * Normalize whatever comes back into an array.
+ */
+function asSkills(listed: any): Rec[] {
+  const candidates = [listed, listed?.data, listed?.skills, listed?.items]
+  for (const c of candidates) {
+    if (Array.isArray(c)) return c
+    for (const inner of [c?.data, c?.skills, c?.items]) if (Array.isArray(inner)) return inner
+  }
+  return []
+}
+
+/** One-line description for the skill listing: collapse whitespace, never cut mid-word. */
+function shortenDesc(value: unknown): string {
+  const d = String(value ?? "").replace(/\s+/g, " ").trim()
+  if (d.length <= 240) return d
+  const cut = d.slice(0, 240)
+  const space = cut.lastIndexOf(" ")
+  return `${(space > 120 ? cut.slice(0, space) : cut).trimEnd()}…`
+}
+
+function frontmatter(text: string): Rec {
+  const fm: Rec = {}
+  const m = text.match(/^---\s*\n([\s\S]*?)\n---/)
+  for (const line of (m?.[1] ?? "").split("\n")) {
+    const i = line.indexOf(":")
+    if (i > 0) fm[line.slice(0, i).trim()] = line.slice(i + 1).trim()
+  }
+  return fm
+}
+
+/** Directories that may hold bundled harness skills, best first. */
+async function skillRoots(): Promise<string[]> {
+  const roots: string[] = []
+  const home = process.env.HOME ?? ""
+  if (process.env.HARNESS_SKILLS_DIR) roots.push(process.env.HARNESS_SKILLS_DIR)
+  const py = await run([
+    "python3", "-c",
+    "import harness,os; print(os.path.join(os.path.dirname(harness.__file__),'data','skills'))",
+  ])
+  if (py.ok && py.text.trim()) roots.push(py.text.trim())
+  if (home) roots.push(`${home}/.harness/skills`)
+  return [...new Set(roots.filter((r) => r && r.length > 1))]
+}
+
+/**
+ * Bundled skills in opencode's shape: {id, name, description, path, content}.
+ * Seeds live at `<root>/<category>/<skill>/SKILL.md` (see harness/skills.py),
+ * so glob two levels down.
+ */
+async function seedSkills(): Promise<Rec[]> {
+  const out: Rec[] = []
+  const seen = new Set<string>()
+  const { join, basename, dirname } = await import("node:path")
+  for (const root of await skillRoots()) {
+    const rels: string[] = []
     try {
-      const { join, basename, dirname } = await import("node:path")
-      const full = join(root, rel)
-      const text = await Bun.file(full).text()
-      const m = text.match(/^---\s*\n([\s\S]*?)\n---/)
-      const fm: Record<string, string> = {}
-      for (const line of (m?.[1] ?? "").split("\n")) {
-        const i = line.indexOf(":")
-        if (i > 0) fm[line.slice(0, i).trim()] = line.slice(i + 1).trim()
-      }
-      const dirName = basename(dirname(full))
-      out.push({
-        id: `harness-${dirName}`,
-        name: fm.name || dirName,
-        description: (fm.description || "Harness skill").slice(0, 500),
-        path: full,
-        content: text,
-      })
+      const glob = new Bun.Glob("**/SKILL.md")
+      for await (const rel of glob.scan({ cwd: root, absolute: false })) rels.push(rel)
     } catch {
-      /* skip unreadable seeds */
+      continue // missing/unreadable root
+    }
+    for (const rel of rels.slice(0, 200)) {
+      try {
+        const full = join(root, rel)
+        const text = await Bun.file(full).text()
+        const fm = frontmatter(text)
+        const name = fm.name || basename(dirname(full))
+        if (seen.has(name)) continue
+        seen.add(name)
+        out.push({
+          id: `harness-${name}`,
+          name,
+          description: (fm.description || "Harness skill").slice(0, 500),
+          path: full,
+          content: text,
+        })
+      } catch {
+        /* skip unreadable seed */
+      }
     }
   }
   return out
 }
 
-// V2 shape: default-exported {id, effect} (only `effect` is invoked by the
-// v2.0.8 loader; `setup` loads clean but never runs). Zero runtime imports:
-// the server resolves plugin imports in an isolated registry, so any
-// value-level import fails load.
-const HarnessPlugin = {
-  id: "harness",
-  effect: async (ctx: PluginInput) => {
-    const log = (m: string) => console.error(`[harness] ${m}`)
-    const cwd = ctx.directory || process.cwd()
+/**
+ * Read a skill body (SKILL.md or a references/ file) by id or name.
+ *
+ * Never throws: built-in skills report a virtual path (`/builtin/opencode.md`)
+ * that is not a real file — their body only exists in the inline `content`
+ * field. A missing file must come back as readable text, not a raw ENOENT that
+ * surfaces to the model as a broken tool call.
+ */
+async function readSkill(skill: Rec, subpath?: string): Promise<string> {
+  const label = String(skill.id ?? skill.name ?? "skill")
+  const inline = typeof skill.content === "string" ? skill.content : ""
+  const skillPath = String(skill.path ?? "")
 
-    // Seed bundled skills into the opencode skill store so they are usable
-    // without a hand-edited config. Provider / agents / MCP are NOT duplicated
-    // here — they are merged into opencod.json by `harness tui` setup
-    // (ensure_opencode_config), see harness/harness-opencode.json.
+  const readFile = async (file: string): Promise<string | null> => {
     try {
+      if (!(await Bun.file(file).exists())) return null
+      const text = await Bun.file(file).text()
+      if (text.length <= MAX_SKILL_CHARS) return text
+      return `${text.slice(0, MAX_SKILL_CHARS)}\n\n[harness: truncated at ${MAX_SKILL_CHARS} chars — read ${file} for the rest]`
+    } catch {
+      return null
+    }
+  }
+
+  if (subpath) {
+    const { join, dirname } = await import("node:path")
+    if (!skillPath) return `not found: ${subpath} (the ${label} skill has no directory to read from)`
+    const base = dirname(skillPath)
+    const target = join(base, subpath)
+    if (!base || !target.startsWith(base)) return `cannot read ${subpath}: path escapes the ${label} skill directory`
+    const text = await readFile(target)
+    if (text !== null) return text
+    return `not found: ${subpath} (the ${label} skill has no such file under ${base})`
+  }
+
+  const text = await readFile(skillPath)
+  if (text !== null) return text
+  if (inline) return inline.slice(0, MAX_SKILL_CHARS)
+  return `skill body unavailable for ${label} (no readable path: ${skillPath || "none"})`
+}
+
+/** Candidate DBs for durable facts: project-local first (see harness/paths.py). */
+function factDbs(projectDir: string): string[] {
+  const home = process.env.HOME ?? ""
+  return [`${projectDir}/.opencode/harness/sessions.db`, `${home}/.opencode/harness/sessions.db`].filter(
+    (p) => p && !p.startsWith("/.opencode"),
+  )
+}
+
+/**
+ * Durable facts from the session DB, straight off disk.
+ *
+ * Two modes, and the distinction matters:
+ *   search — only rows matching one of `patterns`. An empty pattern list means
+ *     the query had no searchable terms, and we return NOTHING: answering an
+ *     unrelated query with the newest handful of facts reads as recall but is
+ *     just noise the model would cite.
+ *   recent — the newest rows, regardless of text. Used for the compaction
+ *     brief, where there is no query to match (a session id appears in no fact).
+ */
+async function facts(
+  projectDir: string,
+  patterns: string[] = [],
+  limit = 5,
+  mode: "search" | "recent" = "search",
+): Promise<string[]> {
+  if (mode === "search" && !patterns.length) return []
+  const { Database } = await import("bun:sqlite").catch(() => ({}) as any)
+  if (!Database) return []
+  const hits: string[] = []
+  const where = mode === "recent" ? "1=1" : patterns.map(() => "text LIKE ?").join(" OR ")
+  const params = mode === "recent" ? [] : patterns.map((p) => `%${p}%`)
+  for (const dbPath of factDbs(projectDir)) {
+    try {
+      if (!(await Bun.file(dbPath).exists())) continue
+      const db = new Database(dbPath, { readonly: true })
+      try {
+        const rows = db
+          .query(`SELECT text, source FROM facts WHERE ${where} ORDER BY id DESC LIMIT ?`)
+          .all(...params, limit) as any[]
+        for (const r of rows) hits.push(`- [${r.source}] ${String(r.text).slice(0, 200)}`)
+      } finally {
+        db.close()
+      }
+    } catch {
+      /* unreadable db */
+    }
+    if (hits.length >= limit) break
+  }
+  return hits
+}
+
+/** Words long enough to be worth matching; falls back to the phrase itself. */
+function terms(query: string): string[] {
+  const ws = String(query ?? "")
+    .split(/\s+/)
+    .filter((w) => w.length > 2)
+  return [...new Set(ws)].slice(0, 5)
+}
+
+/** Keyword recall for the memory_recall tool. "" means nothing relevant. */
+async function recallFacts(query: string, projectDir: string): Promise<string> {
+  const ws = terms(query)
+  if (ws.length) return (await facts(projectDir, ws)).join("\n")
+  const whole = String(query ?? "").trim()
+  if (whole.length > 2) return (await facts(projectDir, [whole])).join("\n")
+  return ""
+}
+
+function condenseText(raw: string): string {
+  const lines = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").split("\n")
+  const kept: string[] = []
+  let run: string[] = []
+  const flush = () => {
+    if (run.length >= 3) kept.push(run[0], `... [${run.length - 1} repeated lines] ...`)
+    else kept.push(...run)
+    run = []
+  }
+  for (const ln of lines) {
+    if (run.length && ln === run[0]) run.push(ln)
+    else {
+      flush()
+      run = [ln]
+    }
+  }
+  flush()
+  let out = kept
+  if (out.length > 48) out = [...out.slice(0, 24), `... [${out.length - 44} lines elided] ...`, ...out.slice(-20)]
+  const text = out.join("\n")
+  if (text.length >= raw.length) return raw
+  const pct = Math.round(100 * (1 - text.length / raw.length))
+  return `${text}\n  [harness: condensed ${pct}% (${raw.length} → ${text.length} chars). Head and tail kept; re-run a narrower command for the middle.]`
+}
+
+/** Shrink oversized tool output in place; errors pass through untouched. */
+function condenseToolResult(event: Rec): void {
+  if (!event || event.status === "error") return
+  const result = event.result
+  if (!result || typeof result !== "object") return
+  const content = result.content
+  if (!Array.isArray(content)) return
+  for (const part of content) {
+    if (!part || part.type !== "text" || typeof part.text !== "string") continue
+    if (part.text.length <= CONDENSE_OVER) continue
+    if (ERROR_LINE.test(part.text)) continue
+    part.text = condenseText(part.text)
+  }
+}
+
+const HarnessPlugin = {
+  // the loader requires a non-empty string id
+  id: "harness",
+
+  async setup(ctx: Rec) {
+    const log = (m: string) => console.error(`[harness] ${m}`)
+    const directory: string = ctx?.location?.directory || process.cwd()
+
+    // 1. Seed the bundled skills into opencode's skill store so they are
+    //    loadable (by id) without hand-editing opencode.json.
+    try {
+      // guarded: a future host that renames/removes this API degrades to a log
+      if (typeof ctx?.skill?.transform !== "function") throw new Error("ctx.skill.transform unavailable")
       const seeds = await seedSkills()
       if (seeds.length) {
-        await ctx.skill.transform((editor: any) => {
-          const existing = new Set(editor.list().map((s: any) => s.id ?? s.name))
+        await ctx.skill.transform((editor: Rec) => {
+          const current = editor?.list?.()
+          const known = new Set((Array.isArray(current) ? current : []).map((s: Rec) => String(s?.id)))
           for (const s of seeds) {
-            if (!existing.has(s.id)) {
-              try {
-                editor.add(s)
-              } catch (e) {
-                log(`skill skipped ${s.id}: ${String(e).slice(0, 120)}`)
-              }
+            if (known.has(s.id)) continue
+            try {
+              editor.add(s)
+            } catch (e) {
+              log(`skill skipped ${s.id}: ${short(e)}`)
             }
           }
         })
       }
     } catch (e) {
-      log(`skill seeding failed: ${String(e).slice(0, 120)}`)
+      log(`skill seeding failed: ${short(e)}`)
     }
 
-    // Native tools (no MCP hop): read skills + memory straight from disk.
-    // self-contained: works even with the gateway down.
-    const skillIndex = async (): Promise<{ name: string; description: string }[]> => {
-      const out: { name: string; description: string }[] = []
-      const home = process.env.HOME ?? ""
-      const { join, basename } = await import("node:path")
-      const roots = [`${home}/.harness/skills`]
-      for (const root of roots) {
-        const glob = new Bun.Glob("*/SKILL.md")
-        for await (const rel of glob.scan({ cwd: root, absolute: false })) {
+    // 2. Native tools (no MCP hop): skills + memory read straight off disk.
+    //    codemode:false is what makes a tool DIRECT (visible in the model's
+    //    tool list); the v2 default puts a tool in the Code Mode catalog only,
+    //    where it is reachable as `tools.<name>()` inside `execute` and calls
+    //    by name fail with "No tool named … is currently available".
+    const direct = { codemode: false }
+    try {
+      // guarded: one failing editor.add skips only that tool, not all three
+      if (typeof ctx?.tool?.transform !== "function") throw new Error("ctx.tool.transform unavailable")
+      await ctx.tool.transform((editor: Rec) => {
+        const add = (t: Rec) => {
           try {
-            const text = await Bun.file(join(root, rel)).text()
-            const m = text.match(/^---\s*\n([\s\S]*?)\n---/)
-            let name = basename(rel.replace(/\/SKILL\.md$/, "")), desc = ""
-            for (const line of (m?.[1] ?? "").split("\n")) {
-              const i = line.indexOf(":")
-              if (i > 0) {
-                const k = line.slice(0, i).trim(), v = line.slice(i + 1).trim()
-                if (k === "name") name = v
-                if (k === "description") desc = v
-              }
-            }
-            out.push({ name, description: desc.slice(0, 300) || name })
-          } catch { /* skip unreadable */ }
-        }
-      }
-      return out
-    }
-    const skillBody = async (name: string, subpath?: string): Promise<string> => {
-      const home = process.env.HOME ?? ""
-      const { join } = await import("node:path")
-      const base = join(home, ".harness", "skills")
-      const glob = new Bun.Glob(`*/${name}/SKILL.md`)
-      for await (const rel of glob.scan({ cwd: base, absolute: false })) {
-        const dir = join(base, rel.replace(/\/SKILL\.md$/, ""))
-        const target = subpath ? join(dir, subpath) : join(dir, "SKILL.md")
-        if (!target.startsWith(dir)) throw new Error("path escapes skill dir")
-        return (await Bun.file(target).text()).slice(0, 12000)
-      }
-      // fall back to bundled seeds inside the pip package
-      const r = await sh(["python3", "-c",
-        "import harness,os; print(os.path.join(os.path.dirname(harness.__file__),'data','skills'))"])
-      if (r.ok) {
-        const g2 = new Bun.Glob(`*/${name}/SKILL.md`)
-        for await (const rel of g2.scan({ cwd: r.text.trim(), absolute: false })) {
-          const dir = join(r.text.trim(), rel.replace(/\/SKILL\.md$/, ""))
-          const target = subpath ? join(dir, subpath) : join(dir, "SKILL.md")
-          if (!target.startsWith(dir)) throw new Error("path escapes skill dir")
-          return (await Bun.file(target).text()).slice(0, 12000)
-        }
-      }
-      throw new Error(`skill not found: ${name}`)
-    }
-    const recallLocal = async (query: string, projectDir: string): Promise<string> => {
-      const { Database } = await import("bun:sqlite").catch(() => ({}) as any)
-      if (!Database) return "(sqlite unavailable)"
-      const hits: string[] = []
-      for (const dbPath of [`${projectDir}/.opencode/harness/sessions.db`,
-                            `${process.env.HOME ?? ""}/.opencode/harness/sessions.db`]) {
-        try {
-          if (!(await Bun.file(dbPath).size)) continue
-          const db = new Database(dbPath, { readonly: true })
-          try {
-            const words = String(query || "").split(/\s+/).filter((w) => w.length > 2).slice(0, 5)
-            const like = words.length ? words.map(() => "text LIKE ?").join(" OR ") : "1=1"
-            const rows = db.query(`SELECT text, source FROM facts WHERE ${like} ORDER BY id DESC LIMIT 5`)
-              .all(...words.map((w) => `%${w}%`)) as any[]
-            for (const r of rows) hits.push(`- [${r.source}] ${String(r.text).slice(0, 200)}`)
-          } finally {
-            db.close()
+            editor.add(t)
+          } catch (e) {
+            log(`tool skipped ${t.name}: ${short(e)}`)
           }
-        } catch { /* unreadable db */ }
-        if (hits.length >= 5) break
-      }
-      return hits.join("\n") || "(nothing recalled — verify from the transcript instead)";
-    }
-
-    return {
-      tool: {
-        skills_list: {
-          description: "List available harness skills (name + when-to-use). Call first, then skill_view.",
-          inputSchema: { type: "object", properties: {} },
+        }
+        add({
+          name: "skills_list",
+          description: "List the skills available in this session (id + when-to-use). Call before skill_view.",
+          input: { type: "object", properties: {}, additionalProperties: false },
+          options: direct,
           execute: async () => {
-            const items = await skillIndex()
-            return items.map((s) => `- ${s.name}: ${s.description}`).join("\n") || "(no skills installed)";
+            let listed: any = null
+            let items: Rec[] = []
+            try {
+              listed = await ctx.skill.list()
+              items = asSkills(listed)
+            } catch {
+              items = []
+            }
+            if (!items.length) items = await seedSkills()
+            const text = items
+              .map((s: Rec) => `- ${s.id ?? s.name}: ${shortenDesc(s.description)}`)
+              .join("\n")
+            if (text) return { content: `${text}\n(${items.length} skills — call skill_view with an id to load one)` }
+            const shape = listed === null ? "unavailable" : `${typeof listed} keys=${Object.keys(listed ?? {}).join(",") || "none"}`
+            return { content: `(no skills installed; skill.list returned ${shape})` }
           },
-        },
-        skill_view: {
-          description: "Load a harness skill SKILL.md (or a references/ file). Use before doing the task the skill covers.",
-          inputSchema: { type: "object", properties: { name: { type: "string" }, path: { type: "string" } }, required: ["name"] },
-          execute: async (args: any) => skillBody(String(args?.name ?? ""), args?.path ? String(args.path) : undefined),
-        },
-        memory_recall: {
-          description: "Recall durable harness facts relevant to a query. Verify before relying.",
-          inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-          execute: async (args: any, context: any) => recallLocal(String(args?.query ?? ""), context?.directory || cwd),
-        },
-      },
-      "tool.execute.after": async (input: any, output: any) => {
-        // Lite RTK: condense oversized tool results in place. Errors and
-        // failures pass through untouched; raw output is already in the
-        // transcript upstream of this hook point.
-        try {
-          const getText = (o: any): string | null => {
-            for (const k of ["result", "content", "output", "text"]) {
-              if (typeof o?.[k] === "string" && o[k].length > 4000) return o[k];
+        })
+
+        add({
+          name: "skill_view",
+          description:
+            "Load a skill's instructions (or a file under its directory, e.g. references/x.md). Use before doing the task the skill covers.",
+          input: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Skill id or name" },
+              path: { type: "string", description: "Optional file inside the skill directory" },
+            },
+            required: ["id"],
+            additionalProperties: false,
+          },
+          options: direct,
+          execute: async (input: Rec) => {
+            const want = String(input?.id ?? "").trim()
+            if (!want) return { content: "skill_view needs an id — call skills_list first and pass one of the listed ids" }
+            let items: Rec[] = []
+            try {
+              items = asSkills(await ctx.skill.list())
+            } catch {
+              items = []
             }
-            return null;
-          };
-          const setText = (o: any, v: string): boolean => {
-            for (const k of ["result", "content", "output", "text"]) {
-              if (typeof o?.[k] === "string") { o[k] = v; return true; }
-            }
-            return false;
-          };
-          const raw = getText(output);
-          if (!raw) return;
-          if (/Traceback |Error:|Exception:|FAILED|failed|AssertionError|panic:|fatal:/.test(raw)) return;
-          const lines = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").split("\n")
-          const kept: string[] = [];
-          let run: string[] = [];
-          const flush = () => {
-            if (run.length >= 3) { kept.push(run[0], `... [${run.length - 1} repeated lines] ...`); }
-            else kept.push(...run);
-            run = [];
-          };
-          for (const ln of lines) {
-            if (run.length && ln === run[0]) run.push(ln);
-            else { flush(); run = [ln]; }
-          }
-          flush();
-          let out = kept;
-          if (out.length > 48) {
-            const cut = out.length - 44;
-            out = [...out.slice(0, 24), `... [${cut} lines elided] ...`, ...out.slice(-20)];
-          }
-          const before = raw.length, after = out.join("\n").length;
-          if (after < before) {
-            setText(output, out.join("\n") + `
-  [condensed ${Math.round(100 * (1 - after / before))}% lite-rtk]`);
-          }
-        } catch { /* never break tool execution */ }
-      },
-      "experimental.session.compacting": async (input: any, output: any) => {
-        // Local recall (no gateway): durable facts survive compaction.
-        try {
-          const sid = String(input?.sessionID ?? input?.sessionId ?? "")
-          const hits = await recallLocal(`session ${sid.slice(0, 8)}`, cwd)
-          if (hits && !hits.startsWith("(nothing recalled") && output && Array.isArray(output.context)) {
-            output.context.push(`Harness memory brief:\n${hits}`)
-          }
-        } catch { /* never break compaction */ }
-      },
+            if (!items.length) items = await seedSkills()
+            const skill = items.find((s: Rec) => String(s.id) === want || String(s.name) === want)
+            if (!skill) return { content: `skill not found: ${want}` }
+            return { content: await readSkill(skill, input?.path ? String(input.path) : undefined) }
+          },
+        })
+
+        add({
+          name: "memory_recall",
+          description: "Recall durable harness facts relevant to a query. Verify before relying on them.",
+          input: {
+            type: "object",
+            properties: { query: { type: "string" } },
+            required: ["query"],
+            additionalProperties: false,
+          },
+          options: direct,
+          execute: async (input: Rec) => ({
+            content: (await recallFacts(String(input?.query ?? ""), directory)) || NO_FACTS,
+          }),
+        })
+      })
+    } catch (e) {
+      log(`tool registration failed: ${short(e)}`)
     }
+
+    // 3. Condense oversized tool results in place (errors untouched).
+    try {
+      // guarded: a host without tool hooks just loses condensing, not activation
+      if (typeof ctx?.tool?.hook !== "function") throw new Error("ctx.tool.hook unavailable")
+      await ctx.tool.hook("execute.after", (event: Rec) => {
+        try {
+          condenseToolResult(event)
+        } catch {
+          /* never break tool execution */
+        }
+      })
+    } catch (e) {
+      log(`tool hook failed: ${short(e)}`)
+    }
+
+    // 4. Compaction brief: the compaction run's system array is built here, so
+    //    the newest durable facts ride along into the summary instead of being
+    //    summarized away. Verified payload (v2): the compaction hook receives
+    //    {sessionID, model, system, messages, options, agent, tools}.
+    try {
+      // guarded: a host without session hooks just loses the brief, not activation
+      if (typeof ctx?.session?.hook !== "function") throw new Error("ctx.session.hook unavailable")
+      await ctx.session.hook("compaction", async (event: Rec) => {
+        try {
+          if (!Array.isArray(event?.system)) return
+          // a retried compaction would otherwise stack duplicate briefs
+          const already = event.system.some((s: Rec) => String(s?.text ?? s).includes(BRIEF_MARK))
+          if (already) return
+          const brief = (await facts(directory, [], 5, "recent")).join("\n")
+          if (!brief) return
+          event.system.push({
+            type: "text",
+            text: `${BRIEF_MARK} (durable facts — verify before relying):\n${brief}`,
+          })
+        } catch (e) {
+          // never break compaction, but never fail silently either
+          log(`compaction brief failed: ${short(e)}`)
+        }
+      })
+    } catch (e) {
+      log(`compaction hook failed: ${short(e)}`)
+    }
+
+    // Nothing returned on purpose: a returned non-function value is treated as
+    // a cleanup function and kills activation.
   },
 }
 
-export { HarnessPlugin }
 export default HarnessPlugin
