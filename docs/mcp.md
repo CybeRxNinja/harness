@@ -3,7 +3,7 @@
 ## 1. Native opencode tools (primary — no extra process)
 The stock-opencode plugin (`harness/plugin/harness.ts`) exposes
 `skills_list` / `skill_view` / `memory_recall` as **native tools** — no MCP
-hop, no stdio framing to break, works even with the gateway down (reads
+hop, no stdio framing to break (reads
 `~/.harness/skills/` + local SQLite directly). This is what opencode agents
 use. No `mcp.*` config block is needed or added.
 

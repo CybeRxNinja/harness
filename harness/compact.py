@@ -15,7 +15,7 @@ def should_compact(messages: list[dict], ctx_limit: int = 128000) -> bool:
 
 def compact(con, cfg: dict, project_root: Path, session: str, kernel, ctx_limit: int = 128000) -> str:
     from .store import history, add_message
-    from . import router
+    from . import models as backend
     hist = history(con, session, 60)
     total = sum(estimate_tokens(m["content"]) for m in hist)
     if total < int(ctx_limit * 0.7):
@@ -24,10 +24,10 @@ def compact(con, cfg: dict, project_root: Path, session: str, kernel, ctx_limit:
     old = hist[:-10]
     old_text = "\n".join(f"{m['role']}: {m['content'][:400]}" for m in old)[-8000:]
     try:
-        msg = router.chat(
+        msg = backend.chat(
             [{"role": "system", "content": "Summarize the conversation into 10 bullets: decisions, files, todos, blockers."},
              {"role": "user", "content": old_text}],
-            model="auto-fastest", cfg=cfg, extra={"reasoning": "low"})
+            model="", cfg=cfg, workdir=project_root)
         summary = str(msg.get("content", ""))[:3000]
     except Exception:
         summary = f"(offline summary) {len(old)} older turns, {total} toks. First: {old_text[:300]}"

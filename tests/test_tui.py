@@ -8,33 +8,36 @@ def test_tui_config_merge(tmp_path, monkeypatch):
     dest.write_text(json.dumps({"model": "openai/gpt", "provider": {"openai": {}}}))
     out = ensure_opencode_config()
     d = json.loads(open(out).read())
-    assert d["model"] == "openai/gpt"  # user value kept
-    assert "harness" in d["provider"]  # harness added
-    assert d["provider"]["harness"]["options"]["apiKey"] == "{env:HARNESS_TOKEN}"
+    assert d["model"] == "openai/gpt"  # user value kept, never pinned
+    assert "harness" not in d.get("provider", {})  # no relay provider
     assert set(("orchestrator", "ask", "debug", "review")) <= set(d["agent"])
+    for spec in d["agent"].values():  # agents inherit the user default
+        assert "model" not in spec
+        assert "harness/" not in json.dumps(spec)
     # idempotent
     ensure_opencode_config()
     d2 = json.loads(open(out).read())
     assert d2 == d
 
 
-def test_relay_baseurl_follows_port(tmp_path, monkeypatch):
+def test_merge_cleans_legacy_relay(tmp_path, monkeypatch):
     import json
     cfgdir = tmp_path / "cfg"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfgdir))
-    monkeypatch.setenv("HARNESS_URL", "http://127.0.0.1:9999")
     from harness.cli import ensure_opencode_config
-    ensure_opencode_config()
-    d = json.loads((cfgdir / "opencode" / "opencode.json").read_text())
-    assert d["provider"]["harness"]["options"]["baseURL"] == "http://127.0.0.1:9999/v1"
-    # custom edits elsewhere survive; rerun is idempotent
-    d["provider"]["harness"]["options"]["apiKey"] = "CUSTOM"
-    (cfgdir / "opencode" / "opencode.json").write_text(json.dumps(d))
-    monkeypatch.delenv("HARNESS_URL")
-    ensure_opencode_config()
-    d2 = json.loads((cfgdir / "opencode" / "opencode.json").read_text())
-    assert d2["provider"]["harness"]["options"]["apiKey"] == "CUSTOM"
-    assert d2["provider"]["harness"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+    dest = tmp_path / "cfg" / "opencode" / "opencode.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps({
+        "model": "harness/auto-fastest",
+        "provider": {"harness": {"options": {"baseURL": "http://127.0.0.1:8787/v1"}}},
+        "agent": {"orchestrator": {"model": "harness/tag:reasoning", "prompt": "mine"}},
+    }))
+    out = ensure_opencode_config()
+    d = json.loads(open(out).read())
+    assert "harness" not in d.get("provider", {})
+    assert "model" not in d  # harness default dropped (user sets their own)
+    assert d["agent"]["orchestrator"].get("prompt") == "mine"  # user keys kept
+    assert "model" not in d["agent"]["orchestrator"]  # harness pin dropped
 
 
 def test_find_opencode(tmp_path, monkeypatch):

@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from . import router
+from . import models as backend
 from .kernel import Kernel
 
 MODE_TOOLS = {
@@ -77,11 +77,12 @@ def run_turn(project_root: Path, session: str, user_msg: str, mode: str = "code"
     except Exception:
         pass
 
-    # /commands handled by cli; here plain loop
-    model = model or cfg.get("model_profile", "capable")
-    if "/" not in model:
-        # profile -> first category chain rung
-        model = {"capable": "tag:reasoning", "simple": "auto-fastest", "deep": "tag:reasoning"}.get(model, "auto-fastest")
+    # Model: explicit provider/model passes through, otherwise the user's
+    # configured opencode default (agents inherit; no relay, no router ids).
+    try:
+        model = backend.resolve_model(model, cfg)
+    except RuntimeError as e:
+        return {"content": f"no model: {e}", "touched": [], "route_model": ""}
 
     budgets = dict((cfg.get("budgets", {}) or {}))
     budgets.update(budget_override or {})
@@ -102,14 +103,15 @@ def run_turn(project_root: Path, session: str, user_msg: str, mode: str = "code"
     final = ""
     for _ in range(max_turns):
         try:
-            msg = router.chat(msgs, model=model, cfg=cfg,
-                              extra={"reasoning": (cfg.get("categories", {}).get("quick", {}) or {}).get("reasoning", "medium")})
+            msg = backend.chat(msgs, model=model, cfg=cfg, tools=TOOLS_SCHEMA,
+                               workdir=project_root)
         except Exception as e:
-            final = f"router failed: {e}"
+            final = f"model backend failed: {e}"
             break
         content = str(msg.get("content", ""))
         tcalls = msg.get("tool_calls") or []
-        # Our stdlib router returns plain text; support [[tool:args]] convention + OpenAI tool_calls
+        # Text protocol: [[tool:name {json}]] blocks parsed by models.parse_tool_calls.
+        # Empty tool list + empty text = done; otherwise the tool loop below runs.
         if not tcalls:
             final = content
             add_message(con, session, "assistant", final)

@@ -1,47 +1,9 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "harness/auto-fastest",
-  "provider": {
-    "harness": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Harness Relay (builtin router)",
-      "options": {
-        "baseURL": "http://127.0.0.1:8787/v1",
-        "apiKey": "{env:HARNESS_TOKEN}"
-      },
-      "models": {
-        "auto-fastest": {
-          "id": "auto-fastest",
-          "name": "Auto Fastest"
-        },
-        "tag:coding": {
-          "id": "tag:coding",
-          "name": "Coding"
-        },
-        "tag:reasoning": {
-          "id": "tag:reasoning",
-          "name": "Reasoning"
-        },
-        "tag:general": {
-          "id": "tag:general",
-          "name": "General"
-        },
-        "tag:fast": {
-          "id": "tag:fast",
-          "name": "Fast"
-        },
-        "tag:free": {
-          "id": "tag:free",
-          "name": "Free Best"
-        }
-      }
-    }
-  },
   "agent": {
     "orchestrator": {
       "description": "Plans, delegates to subagents in parallel, merges and verifies. Writes no product code directly.",
       "mode": "primary",
-      "model": "harness/tag:reasoning",
       "prompt": "You are the ORCHESTRATOR. Never write product code yourself. Decompose work, spawn parallel subagents via the task tool (one responsibility each), merge their diffs, and verify with tests before done. Keep context lean: ask for SUMMARY+DIFF only. Discover procedures with the harness skills_list/skill_view tools and recall durable facts with memory_recall before acting.",
       "permission": {
         "edit": "deny",
@@ -53,7 +15,6 @@
     "ask": {
       "description": "Answers from the codebase. No writes.",
       "mode": "primary",
-      "model": "harness/auto-fastest",
       "permission": {
         "edit": "deny",
         "bash": "deny",
@@ -63,7 +24,6 @@
     "debug": {
       "description": "Reproduce, localize, reduce, fix, guard.",
       "mode": "primary",
-      "model": "harness/tag:reasoning",
       "permission": {
         "bash": "ask"
       }
@@ -71,15 +31,13 @@
     "review": {
       "description": "Staff-engineer review: five axes, Nit/Blocker severity.",
       "mode": "primary",
-      "model": "harness/tag:general",
       "permission": {
         "edit": "deny",
         "bash": "deny"
       }
     },
     "plan": {
-      "description": "Planning reads and designs; runs on the reasoning chain, not the cheap default.",
-      "model": "harness/tag:reasoning"
+      "description": "Planning reads and designs; runs on the reasoning chain, not the cheap default."
     }
   }
 }

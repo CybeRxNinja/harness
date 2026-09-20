@@ -32,22 +32,6 @@ def cmd_chat(args) -> int:
     return 0
 
 
-def cmd_serve(args) -> int:
-    if getattr(args, "stop", False):
-        from .serve import read_sentinel
-        import os as _o
-        cur = read_sentinel()
-        if not cur:
-            print("no live gateway")
-            return 0
-        _o.kill(int(cur["pid"]), 15)
-        print(f"stopped gateway (was serving {cur.get('root')})")
-        return 0
-    from .serve import serve
-    serve(_root(args), args.port, "0.0.0.0" if args.expose else "127.0.0.1")
-    return 0
-
-
 def cmd_doctor(args) -> int:
     from .doctor import run
     print(json.dumps(run(_root(args), args.verbose), indent=2))
@@ -167,44 +151,20 @@ def cmd_plan(args) -> int:
     return 0
 
 
-def cmd_router(args) -> int:
-    from . import router as R
-    from .config import load_config
-    cfg, _ = load_config(_root(args))
-    if args.router_action == "refresh":
-        cat = R.refresh_catalog(probe=args.probe)
-        n = sum(len(v) for v in cat.get("providers", {}).values())
-        print(f"catalog: {n} models across {sorted(cat.get('providers', {}))}; "
-              f"dead: {len(cat.get('dead', []))}")
-    elif args.router_action == "catalog":
-        cat = R.load_catalog()
-        if not cat:
-            print("catalog empty — run: harness router refresh")
-            return 0
-        for pname, models in cat.get("providers", {}).items():
-            for m in models[:25]:
-                card = R.classify(m["id"], m.get("first_seen"))
-                ok, why = R.is_allowed(pname, m["id"], cfg, m.get("first_seen"))
-                params = (f"{card['params_total_b']:g}B" if card["params_total_b"] else "?")
-                bench = f"{card['bench']:g}" if card["bench"] is not None else "-"
-                gate = "ok" if ok else f"HELD({why.split(':')[0]})"
-                print(f"{pname:10s} {m['id'][:44]:44s} {params:>10s} bench={bench:>4s} {gate}")
-    elif args.router_action == "approve":
-        R.approve_model(args.provider, args.model)
-        print(f"approved {args.provider}/{args.model}")
-    return 0
-
-
 def cmd_setup(args) -> int:
-    from .serve import ensure_token
-    from .config import user_dir
     from .skills import ensure_seed_skills
+    from . import models as backend
     seeded = ensure_seed_skills()
-    print("Keys are read from env (never stored by chat). Set e.g.:")
-    print("  export OPENROUTER_API_KEY=... GROQ_API_KEY=... OLLAMA_BASE_URL=http://localhost:11434/v1")
-    print(f"Gateway token: {ensure_token()}  (file {user_dir()/'token'}, chmod 600)")
     print(f"Seed skills installed: {len(seeded)} new" + (f" ({', '.join(seeded[:5])})" if seeded else ""))
-    print("Router default works with zero keys in MOCK mode; add one key to go live.")
+    if _find_opencode():
+        try:
+            print(f"opencode default model: {backend.resolve_model('', {})}")
+        except RuntimeError as e:
+            print(f"WARNING: {e}")
+    else:
+        print("WARNING: opencode binary not found — install stock opencode "
+              "(e.g. `npm create opencode@latest`); models come from YOUR opencode config.")
+    print("No API keys live here: models run inside opencode with the user's own providers.")
     return 0
 
 
@@ -232,14 +192,14 @@ def _bundled_opencode_json() -> dict:
         return _j.loads(_rf("harness").joinpath("harness-opencode.json").read_text())
     except Exception:
         pass
-    return {"provider": {"harness": {"npm": "@ai-sdk/openai-compatible", "name": "Harness Relay",
-            "options": {"baseURL": "http://127.0.0.1:8787/v1", "apiKey": "{env:HARNESS_TOKEN}"},
-            "models": {"auto-fastest": {"name": "Auto Fastest", "reasoning": True}}}},
-            "agent": {}, "model": "harness/auto-fastest"}
+    return {"agent": {}}
 
 
 def ensure_opencode_config() -> str:
-    """Merge provider.harness + harness agents into opencode.json. Never clobbers user keys."""
+    """Merge harness agents into opencode.json. Never clobbers user keys.
+
+    No provider, no model pinning: agents inherit the user's configured
+    opencode default model. The relay is retired (see git history)."""
     import json as _j
     import shutil as _sh
     import time as _t
@@ -252,26 +212,25 @@ def ensure_opencode_config() -> str:
     if dest.exists():
         _sh.copy2(dest, dest.with_suffix(f".bak-{int(_t.time())}.json"))
     want = _bundled_opencode_json()
-    prov = cur.setdefault("provider", {})
-    # The relay block is managed: baseURL always follows the live gateway so
-    # --port / HARNESS_URL just work. Edit those, not this URL.
-    relay = os.environ.get("HARNESS_URL", "http://127.0.0.1:8787").rstrip("/") + "/v1"
-    if "harness" not in prov:
-        prov["harness"] = want["provider"]["harness"]
-    hp = prov["harness"]
-    hp.setdefault("options", {})["baseURL"] = relay
-    # backfill new keys (e.g. reasoning capability) without clobbering user edits
-    existing_models = prov["harness"].setdefault("models", {})
-    for mid, spec in want["provider"]["harness"].get("models", {}).items():
-        node = existing_models.setdefault(mid, {})
-        for k, v in spec.items():
-            node.setdefault(k, v)
     agents = cur.setdefault("agent", {})
-    for name, spec in want["agent"].items():
+    for name, spec in want.get("agent", {}).items():
         node = agents.setdefault(name, {})
         for k, v in spec.items():
             node.setdefault(k, v)
-    cur.setdefault("model", "harness/auto-fastest")
+    # Legacy relay cleanup for upgraders: provider.harness and harness/* model
+    # pins are removed (agents inherit the user default now). User-owned keys
+    # are never touched.
+    try:
+        if isinstance(cur.get("provider"), dict) and "harness" in cur["provider"]:
+            del cur["provider"]["harness"]
+        if isinstance(cur.get("agent"), dict):
+            for _name, _spec in cur["agent"].items():
+                if isinstance(_spec, dict) and str(_spec.get("model", "")).startswith("harness/"):
+                    del _spec["model"]
+        if str(cur.get("model", "")).startswith("harness/"):
+            del cur["model"]
+    except Exception:
+        pass
     # LSP on unless the user already decided (true enables built-ins;
     # explicit false/object is always respected).
     cur.setdefault("lsp", True)
@@ -286,48 +245,6 @@ def ensure_opencode_config() -> str:
         pass
     dest.write_text(_j.dumps(cur, indent=2) + "\n")
     return str(dest)
-
-
-def _serve_healthy(port: int) -> bool:
-    import urllib.request as _u
-    try:
-        with _u.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
-            return r.status == 200
-    except Exception:
-        return False
-
-
-def _ensure_serve(root: Path, port: int) -> None:
-    import subprocess as _sp
-    import time as _t
-    from .serve import read_sentinel
-    root = root.resolve()
-    if _serve_healthy(port):
-        cur = read_sentinel()
-        if not cur or cur.get("root") == str(root):
-            return  # same project (or legacy): reuse
-        print(f"harness: gateway serves {cur.get('root')} — restarting for {root} "
-              f"(sessions persist in each .opencode/harness/)", file=sys.stderr)
-        try:
-            import os as _o
-            _o.kill(int(cur["pid"]), 15)
-            for _ in range(20):
-                _t.sleep(0.25)
-                if not _serve_healthy(port):
-                    break
-        except Exception as e:
-            raise RuntimeError(f"cannot stop gateway for {cur.get('root')} (pid {cur.get('pid')}): {e}. "
-                               f"Stop it manually or use --port")
-    log = state_dir(root) / "serve.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    _sp.Popen([sys.executable, "-m", "harness", "--root", str(root),
-               "serve", "--port", str(port)],
-              stdout=open(log, "a"), stderr=_sp.STDOUT, start_new_session=True)
-    for _ in range(25):
-        if _serve_healthy(port):
-            return
-        _t.sleep(0.4)
-    raise RuntimeError(f"serve did not come up on :{port} (see {log})")
 
 
 def _find_opencode() -> str | None:
@@ -406,9 +323,9 @@ def install_plugin() -> Path:
 
 
 def uninstall_plugin() -> list[str]:
-    """Remove everything `install` manages: the plugin file plus the merged
-    provider/agents/model/mcp blocks. User-owned keys are never touched.
-    Returns human-readable lines of what was removed."""
+    """Remove everything `install` manages: the plugin file plus harness-merged
+    agent blocks. User-owned keys are never touched: agents with a user-set
+    (non-harness) model pin are kept. Returns human-readable lines."""
     import json as _j
     done: list[str] = []
     plugdir = Path.home() / ".config" / "opencode" / "plugins"
@@ -430,11 +347,12 @@ def uninstall_plugin() -> list[str]:
         changed = True
     if isinstance(cur.get("agent"), dict):
         for name in ("orchestrator", "ask", "debug", "review", "plan"):
-            if name in cur["agent"] and isinstance(cur["agent"][name], dict) \
-                    and str(cur["agent"][name].get("model", "")).startswith("harness/"):
-                del cur["agent"][name]
-                done.append(f"removed agent.{name}")
-                changed = True
+            if name in cur["agent"] and isinstance(cur["agent"][name], dict):
+                model = str(cur["agent"][name].get("model", ""))
+                if not model or model.startswith("harness/"):
+                    del cur["agent"][name]
+                    done.append(f"removed agent.{name}")
+                    changed = True
     if str(cur.get("model", "")).startswith("harness/"):
         cur.pop("model", None)
         done.append("removed default model (was harness/*)")
@@ -463,11 +381,11 @@ def cmd_plugin(args) -> int:
         except Exception as e:
             print(f"harness: provider merge failed ({e}) — continuing", file=sys.stderr)
         print(f"plugin installed at {plug} (stock opencod v2, no fork needed)")
-        print("restart opencode/TUI to load it; gateway starts on demand")
+        print("restart opencode/TUI to load it; agents use your opencode default model")
     elif args.plugin_action == "uninstall":
         for line in uninstall_plugin():
             print(line)
-        print("optional: stop gateway (`harness serve --stop`), remove CLI (`pip uninstall harness`)")
+        print("optional: remove CLI (`pip uninstall harness`)")
     elif args.plugin_action == "path":
         for spec in _plugin_files():
             print(spec)
@@ -475,17 +393,11 @@ def cmd_plugin(args) -> int:
 
 
 def cmd_tui(args) -> int:
-    from .serve import ensure_token
     from .skills import ensure_seed_skills
     ensure_seed_skills()
-    root = _root(args)
     if args.dry_run:
-        print(f"would: ensure serve :{args.port}, merge {_opencode_config_path()}, "
-              f"install plugin, exec opencode")
+        print(f"would: merge {_opencode_config_path()}, install plugin, exec opencode")
         return 0
-    _ensure_serve(root, args.port)
-    os.environ["HARNESS_TOKEN"] = ensure_token()
-    os.environ.setdefault("HARNESS_URL", f"http://127.0.0.1:{args.port}")
     try:
         cfg_path = ensure_opencode_config()
     except Exception as e:
@@ -497,8 +409,8 @@ def cmd_tui(args) -> int:
         print(f"harness: plugin install failed ({e}) — continuing", file=sys.stderr)
         plug = Path(__file__).resolve().parent / "plugin" / "harness.ts"
     if args.setup_only:
-        print(f"export HARNESS_TOKEN={os.environ['HARNESS_TOKEN']}")
-        print(f"export HARNESS_URL={os.environ['HARNESS_URL']}")
+        print(f"opencode config: {cfg_path}")
+        print(f"harness plugin: {plug}")
         return 0
     binary = _find_opencode()
     if not binary:
@@ -506,7 +418,7 @@ def cmd_tui(args) -> int:
         print("  npm create opencode@latest   (or: npx opencode)")
         print(f"(opencod.json wired at {cfg_path}; harness plugin at {plug}; CLI fallback: harness chat)")
         return 1
-    print(f"launching {binary} (serve :{args.port}, config + plugin wired)")
+    print(f"launching {binary} (agents inherit your opencode default model; no relay)")
     os.execvp(binary, [binary])
 
 
@@ -521,11 +433,6 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--model", default="")
     c.add_argument("--auto", action="store_true")
     c.set_defaults(fn=cmd_chat)
-    s = sub.add_parser("serve", help="HTTP gateway (TUI and HTTP talk here)")
-    s.add_argument("--port", type=int, default=8787)
-    s.add_argument("--expose", action="store_true", help="bind 0.0.0.0 (warning: token auth still required)")
-    s.add_argument("--stop", action="store_true", help="stop the running gateway")
-    s.set_defaults(fn=cmd_serve)
     d = sub.add_parser("doctor")
     d.add_argument("--verbose", action="store_true")
     d.set_defaults(fn=cmd_doctor)
@@ -561,18 +468,10 @@ def build_parser() -> argparse.ArgumentParser:
     pl.set_defaults(fn=cmd_plan)
     su = sub.add_parser("setup")
     su.set_defaults(fn=cmd_setup)
-    ro = sub.add_parser("router", help="model catalog: refresh/discover providers")
-    ro.add_argument("router_action", choices=["refresh", "catalog", "approve"])
-    ro.add_argument("--probe", action="store_true",
-                    help="actually call each free model once (slow, burns rate limits)")
-    ro.add_argument("--provider", default="")
-    ro.add_argument("--model", default="")
-    ro.set_defaults(fn=cmd_router)
-    t = sub.add_parser("tui", help="serve + opencod config + plugin, then launch opencode")
-    t.add_argument("--port", type=int, default=8787)
+    t = sub.add_parser("tui", help="opencode config + plugin, then launch opencode")
     t.add_argument("--dry-run", action="store_true")
     t.add_argument("--setup-only", action="store_true",
-                   help="ensure serve+config, print exports, do not launch")
+                   help="ensure config+plugin, print paths, do not launch")
     t.set_defaults(fn=cmd_tui)
     mc = sub.add_parser("mcp", help="run harness as an MCP stdio server (skills+memory tools)")
     mc.set_defaults(fn=cmd_mcp)
@@ -588,8 +487,12 @@ def main(argv=None) -> int:
     # `harness "prompt"` shorthand -> chat
     if argv is None:
         argv = sys.argv[1:]
+    if argv and argv[0] in ("serve", "router"):
+        print(f"harness {argv[0]} was retired with the relay: models now come "
+              f"from your opencode config (`harness doctor` to verify).", file=sys.stderr)
+        return 2
     if argv and not argv[0].startswith("-") and argv[0] not in (
-            "chat", "serve", "doctor", "config", "skills", "memory", "checkpoint", "plan", "setup", "tui", "router", "mcp", "plugin"):
+            "chat", "doctor", "config", "skills", "memory", "checkpoint", "plan", "setup", "tui", "mcp", "plugin"):
         argv = ["chat", argv[0]] + argv[1:]
     args = build_parser().parse_args(argv)
     if not getattr(args, "cmd", None) and not hasattr(args, "fn"):

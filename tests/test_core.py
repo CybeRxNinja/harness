@@ -1,18 +1,17 @@
 import json, os
 os.environ["HARNESS_MOCK"] = "1"
 
-def test_router_parse():
-    from harness.router import parse_model, candidates, rank
-    assert parse_model("auto-fastest")["kind"] == "auto"
-    assert parse_model("tag:coding+min_ctx:32k")["min_ctx"] == 32768
-    assert parse_model("openrouter/foo")["kind"] == "pin"
-    c = rank(candidates(parse_model("tag:coding"), {}), {})
-    assert isinstance(c, list)
-
-def test_chat_mock():
-    from harness.router import chat
-    m = chat([{"role": "user", "content": "hi"}], model="tag:coding", cfg={})
-    assert "mock" in m.get("_route", {}) or "content" in m
+def test_models_backend(tmp_path, monkeypatch):
+    from harness.models import resolve_model, chat, parse_tool_calls
+    import pytest
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty"))
+    assert resolve_model("acme/foo", {}) == "acme/foo"
+    with pytest.raises(RuntimeError):
+        resolve_model("tag:reasoning", {})  # legacy id, no user default configured
+    m = chat([{"role": "user", "content": "hi"}], model="acme/foo", cfg={})
+    assert "mock" in m.get("content", "") and m["_route"]["provider"] == "opencode"
+    text, calls = parse_tool_calls('x [[tool:read {"path": "a"}]] y')
+    assert calls and calls[0]["function"]["name"] == "read"
 
 def test_kernel(tmp_path):
     from harness.kernel import Kernel

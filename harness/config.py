@@ -19,33 +19,25 @@ USER_ONLY_KEYS = ("secrets", "token", "trusted_project_dirs", "mcp_env_allowlist
 
 DEFAULT_CONFIG: dict = {
     "model_profile": "capable",
-    "router": {
-        "target_latency_ms": 3000,
-        "timeout_s": 60,
-        "max_retries": 2,
-        "max_attempts": 5,
-        "new_model_policy": "ask",
-        "ban": [],
-    },
     "budgets": {"max_turns": 25, "max_tokens": 120000, "max_cost_usd": 2.0, "max_parallel": 2, "max_depth": 1},
     "compress": {"enabled": True, "threshold": 4000, "intensity": "standard"},
     "categories": {
-        "quick": {"models": ["auto-fastest"], "reasoning": "low", "max_turns": 15},
-        "deep": {"models": ["tag:reasoning+min_ctx:32k", "tag:free", "auto-fastest"], "reasoning": "high", "max_turns": 25},
-        "ultrabrain": {"models": ["tag:reasoning", "tag:free", "auto-fastest"], "reasoning": "max", "max_turns": 30},
-        "visual": {"models": ["tag:coding", "auto-fastest"], "reasoning": "medium", "max_turns": 20},
-        "writing": {"models": ["tag:general", "auto-fastest"], "reasoning": "medium", "max_turns": 15},
-        "unspecified-low": {"models": ["auto-fastest"], "reasoning": "low", "max_turns": 15},
-        "unspecified-high": {"models": ["tag:general", "auto-fastest"], "reasoning": "high", "max_turns": 25},
+        "quick": {"reasoning": "low", "max_turns": 15},
+        "deep": {"reasoning": "high", "max_turns": 25},
+        "ultrabrain": {"reasoning": "max", "max_turns": 30},
+        "visual": {"reasoning": "medium", "max_turns": 20},
+        "writing": {"reasoning": "medium", "max_turns": 15},
+        "unspecified-low": {"reasoning": "low", "max_turns": 15},
+        "unspecified-high": {"reasoning": "high", "max_turns": 25},
     },
     "agents": {
-        "explore": {"models": ["auto-fastest"], "reasoning": "low", "tools": {"write": False, "edit": False, "shell": False}},
-        "librarian": {"models": ["auto-fastest"], "reasoning": "low", "tools": {"write": False, "edit": False, "shell": False}},
-        "plan-consultant": {"models": ["tag:reasoning", "auto-fastest"], "reasoning": "high"},
-        "plan-reviewer": {"models": ["tag:reasoning", "auto-fastest"], "reasoning": "high"},
-        "code-reviewer": {"models": ["tag:general", "auto-fastest"], "reasoning": "medium", "tools": {"shell": False}},
-        "test-engineer": {"models": ["tag:coding", "auto-fastest"], "reasoning": "medium", "tools": {"shell": True}},
-        "security-auditor": {"models": ["tag:reasoning", "auto-fastest"], "reasoning": "high", "tools": {"shell": False}},
+        "explore": {"reasoning": "low", "tools": {"write": False, "edit": False, "shell": False}},
+        "librarian": {"reasoning": "low", "tools": {"write": False, "edit": False, "shell": False}},
+        "plan-consultant": {"reasoning": "high"},
+        "plan-reviewer": {"reasoning": "high"},
+        "code-reviewer": {"reasoning": "medium", "tools": {"shell": False}},
+        "test-engineer": {"reasoning": "medium", "tools": {"shell": True}},
+        "security-auditor": {"reasoning": "high", "tools": {"shell": False}},
     },
     "skills": {"write_approval": True, "disabled": ["reverse-*"], "external_dirs": ["~/.agents/skills"], "create_dir": ""},
     "memory": {"enabled": True, "cap_lines": 200, "retention_days": 30},
@@ -55,7 +47,9 @@ DEFAULT_CONFIG: dict = {
 }
 
 # Agent-mutable top-level keys. Everything else needs human CLI.
-MUTABLE_TOP = {"model_profile", "router", "budgets", "categories", "agents", "skills", "memory", "mcp", "tui", "compress"}
+# NOTE: there is intentionally no "router" section (retired) and no model
+# chains: every agent inherits the user's configured opencode default model.
+MUTABLE_TOP = {"model_profile", "budgets", "categories", "agents", "skills", "memory", "mcp", "tui", "compress"}
 
 
 def _strip_jsonc(text: str) -> str:

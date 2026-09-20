@@ -1,5 +1,5 @@
-"""Full feature audit: router, RLM kernel, spawn, memory, skills, checkpoints,
-compact, config, orchestrator, reasoning, MCP. Runs in MOCK mode on temp dirs."""
+"""Full feature audit: opencode-backed models, RLM kernel, spawn, memory, skills,
+checkpoints, compact, config, orchestrator, reasoning, MCP. MOCK mode, temp dirs."""
 import os
 os.environ["HARNESS_MOCK"] = "1"
 
@@ -9,6 +9,7 @@ import pytest
 @pytest.fixture()
 def root(tmp_path, monkeypatch):
     monkeypatch.setenv("HARNESS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))  # no user model: hermetic
     r = tmp_path / "proj"
     r.mkdir(parents=True, exist_ok=True)
     return r
@@ -21,16 +22,18 @@ def cfg(root):
     return cfg
 
 
-def test_router_matrix(cfg):
-    from harness.router import parse_model, candidates, rank
-    assert parse_model("auto-fastest")["kind"] == "auto"
-    assert parse_model("tag:coding")["kind"] == "tag"
-    assert parse_model("tag:free+min_ctx:32k")["min_ctx"] == 32768
-    assert parse_model("openrouter/x")["kind"] == "pin"
-    assert parse_model("free-coder")["kind"] == "group"
-    assert rank(candidates(parse_model("tag:reasoning"), cfg), cfg)
-    assert rank(candidates(parse_model("tag:free"), cfg), cfg)
-    assert rank(candidates(parse_model("auto-fastest"), cfg), cfg)
+def test_models_matrix(cfg, tmp_path, monkeypatch):
+    # every agent inherits the user's opencode default; explicit pins pass through
+    import json
+    from harness import models as M
+    cfgdir = tmp_path / "cfg"
+    (cfgdir / "opencode").mkdir(parents=True)
+    (cfgdir / "opencode" / "opencode.json").write_text(json.dumps({"model": "acme/workhorse"}))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfgdir))
+    assert M.resolve_model("", cfg) == "acme/workhorse"
+    assert M.resolve_model("other/explicit", cfg) == "other/explicit"
+    m = M.chat([{"role": "user", "content": "hi"}], model="", cfg=cfg)
+    assert m["_route"] == {"provider": "opencode", "model": "acme/workhorse", "mock": True}
 
 
 def test_reasoning_levels():
@@ -78,13 +81,13 @@ def test_spawn_contract(root, cfg):
     import time
     con = connect(root)
     h = rlm.spawn(con, cfg, root, "do research", name="w1", category="quick")
-    assert h["status"] in ("queued", "running", "done") and h["model"] == "auto-fastest"
+    assert h["status"] in ("queued", "running", "done") and h["model"] == "user-default"
     with pytest.raises(ValueError):
         rlm.spawn(con, cfg, root, "x", name="w2", category="quick", subagent_type="explore")
     with pytest.raises(ValueError):
         rlm.spawn(con, cfg, root, "x", name="w3")
     h2 = rlm.spawn(con, cfg, root, "where is auth?", name="w2", subagent_type="explore")
-    assert "auto-fastest" in h2["model"]
+    assert h2["model"] == "user-default"
     time.sleep(4)
     names = {w["name"] for w in rlm.list_subagents(con)}
     assert {"w1", "w2"} <= names

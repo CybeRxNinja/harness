@@ -2,8 +2,7 @@
 
 Deterministic, stdlib-only, no LLM involved. Two engines, always stacked
 `rtk -> caveman`, applied to **tool outputs only** — never to user/assistant
-messages and never on the `/v1` relay passthrough (which stays
-byte-transparent for strict clients).
+messages.
 
 ## RTK-lite (`harness/compress.py:rtk_lite`)
 Command-aware filters (pytest/tracebacks, npm/bun/tsc, git, pip/uv, shell

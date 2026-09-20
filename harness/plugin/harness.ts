@@ -7,10 +7,6 @@
 // `import type` is erased by Bun and is safe.
 import type { PluginInput } from "@opencode-ai/plugin"
 
-const NEED_PROTO = 6
-const RELAY_PORT = process.env.HARNESS_PORT ?? "8787"
-const RELAY_URL = process.env.HARNESS_URL ?? `http://127.0.0.1:${RELAY_PORT}`
-
 async function sh(cmd: string[]): Promise<{ ok: boolean; text: string }> {
   try {
     const proc = Bun.spawnSync(cmd)
@@ -18,49 +14,6 @@ async function sh(cmd: string[]): Promise<{ ok: boolean; text: string }> {
     return { ok: proc.exitCode === 0, text: out }
   } catch {
     return { ok: false, text: "" }
-  }
-}
-
-async function gatewayHealthy(): Promise<boolean> {
-  try {
-    return (await fetch(`${RELAY_URL}/health`)).ok
-  } catch {
-    return false
-  }
-}
-
-async function ensureCli(log: (m: string) => void): Promise<boolean> {
-  const v = await sh(["python3", "-c", "from harness import PROTO; print(PROTO)"])
-  if (v.ok && (parseInt(v.text.trim()) || 0) >= NEED_PROTO) return true
-  log("harness: installing Python CLI from GitHub")
-  let r = await sh(["python3", "-m", "pip", "install", "--no-cache-dir", "--break-system-packages",
-    "git+https://github.com/CybeRxNinja/harness.git"])
-  if (!r.ok) {
-    r = await sh(["python3", "-m", "pip", "install", "--no-cache-dir",
-      "git+https://github.com/CybeRxNinja/harness.git"])
-  }
-  if (!r.ok) {
-    log("harness: CLI install failed; continuing degraded")
-    return false
-  }
-  return true
-}
-
-async function ensureGateway(cwd: string, log: (m: string) => void): Promise<void> {
-  if (await gatewayHealthy()) return
-  if (!(await ensureCli())) return
-  try {
-    const proc = Bun.spawn(["python3", "-m", "harness", "--root", cwd, "serve", "--port", RELAY_PORT], {
-      cwd,
-      stdout: "ignore",
-      stderr: "ignore",
-    })
-    proc.unref()
-    for (let i = 0; i < 25 && !(await gatewayHealthy()); i++) {
-      await new Promise((r) => setTimeout(r, 400))
-    }
-  } catch (e) {
-    log(`harness: gateway start failed (${String(e).slice(0, 120)})`)
   }
 }
 
@@ -97,47 +50,15 @@ async function seedSkills(): Promise<any[]> {
   return out
 }
 
-// Fetch a short memory brief from the gateway so durable project facts
-// survive session compaction. Returns "" when there is nothing worth keeping
-// (no token, gateway down, or no matching facts).
-async function gatewayToken(): Promise<string> {
-  if (process.env.HARNESS_TOKEN) return process.env.HARNESS_TOKEN
-  try {
-    const home = process.env.HOME ?? ""
-    const t = (await Bun.file(`${home}/.harness/token`).text()).trim()
-    return t
-  } catch {
-    return ""
-  }
-}
-
-async function memoryBrief(sessionID: string, log: (m: string) => void): Promise<string> {
-  const token = await gatewayToken()
-  if (!token) return ""
-  const q = encodeURIComponent(sessionID.slice(0, 40))
-  try {
-    const res = await fetch(`${RELAY_URL}/api/memory?q=${q}`,
-      { headers: { Authorization: `Bearer ${token}` } })
-    if (!res.ok) return ""
-    const items: Array<{ text: string; source: string }> = await res.json()
-    if (!items.length) return ""
-    const lines = items.slice(0, 5).map((it) => `- ${String(it.text).slice(0, 200)}`)
-    return `Harness memory brief (session ${sessionID.slice(0, 8)}):\n${lines.join("\n")}`
-  } catch (e) {
-    log(`memory brief failed: ${String(e).slice(0, 120)}`)
-    return ""
-  }
-}
-
-// V2 shape: the module exports a function that receives ctx and returns
-// hooks. (@opencode-ai/plugin is pinned in ~/.config/opencode/package.json,
-// so the value-level `tool` import above always resolves for local plugins.)
+// V2 shape: default-exported {id, effect} (only `effect` is invoked by the
+// v2.0.8 loader; `setup` loads clean but never runs). Zero runtime imports:
+// the server resolves plugin imports in an isolated registry, so any
+// value-level import fails load.
 const HarnessPlugin = {
   id: "harness",
   effect: async (ctx: PluginInput) => {
     const log = (m: string) => console.error(`[harness] ${m}`)
     const cwd = ctx.directory || process.cwd()
-    await ensureGateway(cwd, log)
 
     // Seed bundled skills into the opencode skill store so they are usable
     // without a hand-edited config. Provider / agents / MCP are NOT duplicated
@@ -307,11 +228,14 @@ const HarnessPlugin = {
         } catch { /* never break tool execution */ }
       },
       "experimental.session.compacting": async (input: any, output: any) => {
-        const sid = String(input?.sessionID ?? input?.sessionId ?? "")
-        const brief = await memoryBrief(sid, log)
-        if (brief && output && Array.isArray(output.context)) {
-          output.context.push(brief)
-        }
+        // Local recall (no gateway): durable facts survive compaction.
+        try {
+          const sid = String(input?.sessionID ?? input?.sessionId ?? "")
+          const hits = await recallLocal(`session ${sid.slice(0, 8)}`, cwd)
+          if (hits && !hits.startsWith("(nothing recalled") && output && Array.isArray(output.context)) {
+            output.context.push(`Harness memory brief:\n${hits}`)
+          }
+        } catch { /* never break compaction */ }
       },
     }
   },

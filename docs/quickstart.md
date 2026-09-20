@@ -2,19 +2,19 @@
 1. Install the harness CLI: `pip install -e .` (repo) or
    `curl -fsSL https://raw.githubusercontent.com/CybeRxNinja/harness/main/install.sh | bash`.
    Stdlib-only, no dependencies.
-2. Install **stock opencod** (`npm create opencode@latest` or `npx opencode`).
-3. `harness setup` — mints the gateway token, seeds global skills, prints key
-   env vars. Then install the plugin: `harness plugin install` (copies
+2. Install **stock opencode** (`npm create opencode@latest` or `npx opencode`).
+3. Set your model in `opencode.json` (e.g. `"model": "anthropic/claude-sonnet-4-5"`).
+   Every harness agent inherits this default.
+4. `harness setup` — seeds global skills, verifies your model + opencode binary.
+   Then install the plugin: `harness plugin install` (copies
    `harness/plugin/harness.ts` to `~/.config/opencode/plugins/`, auto-loaded by
-   opencod v2).
-4. `harness doctor` — RAM, disk, DB size, provider keys, router top pick.
-5. `harness chat "hi" --mode ask` — works with zero keys (MOCK echo).
-6. Go live: `export OPENROUTER_API_KEY=...` (also GROQ, CEREBRAS, NVIDIA,
-   GOOGLE, KILO, OPENCODE, OLLAMA_BASE_URL).
-7. `harness tui` — ensures gateway + opencod config + plugin, then launches
-   stock opencod. Each directory gets its own `.opencode/harness/` state;
-   switching directories restarts the gateway (sessions persist per directory).
+   opencode v2).
+5. `harness doctor` — Python, disk, DB size, resolved user model, plugin file.
+6. `harness chat "hi" --mode ask` — works with zero model access (MOCK echo);
+   with your model configured it runs for real via `opencode run`.
+7. `harness tui` — ensures opencode config + plugin, then launches
+   stock opencode. Each directory gets its own `.opencode/harness/` state.
 
 Key files: `AGENTS.md` (rules, highest precedence), `harness.jsonc` layers
 (defaults < `~/.harness` < `.opencode/harness.jsonc` < env), budgets enforced.
-See `docs/plugin.md` for the opencod plugin install walkthrough.
+See `docs/plugin.md` for the opencode plugin install walkthrough.

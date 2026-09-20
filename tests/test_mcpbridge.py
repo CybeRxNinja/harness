@@ -51,4 +51,4 @@ def test_merge_skips_mcp_block(tmp_path, monkeypatch):
     import json as _j
     d = _j.loads((tmp_path / "cfg" / "opencode" / "opencode.json").read_text())
     assert "harness-skills" not in d.get("mcp", {})
-    assert "harness" in d.get("provider", {})
+    assert "harness" not in d.get("provider", {})  # no relay provider merged

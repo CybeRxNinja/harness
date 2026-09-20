@@ -32,12 +32,12 @@ def spawn(con, cfg: dict, project_root: Path, prompt: str, name: str,
     if max_depth < 1:
         raise RuntimeError("nested spawn disabled (max_depth)")
     wid = "w_" + uuid.uuid4().hex[:8]
-    # resolve model chain
-    if category:
-        chain = ((cfg.get("categories", {}) or {}).get(category, {}) or {}).get("models", ["auto-fastest"])
-    else:
-        chain = ((cfg.get("agents", {}) or {}).get(subagent_type, {}) or {}).get("models", ["auto-fastest"])
-    model = chain[0] if chain else "auto-fastest"
+    # Workers inherit the user's configured opencode default model.
+    from . import models as _backend
+    try:
+        model = _backend.resolve_model("", cfg)
+    except RuntimeError:
+        model = "user-default"
     sdir = state_dir(project_root) / "workers" / wid
     sdir.mkdir(parents=True, exist_ok=True)
     (sdir / "prompt.md").write_text(f"# {name}\n\n{prompt}\n")
@@ -52,7 +52,7 @@ def spawn(con, cfg: dict, project_root: Path, prompt: str, name: str,
 def _run_worker(root: str, wid: str, prompt: str, name: str, kind: str, model: str,
                 skills: list[str], budget: dict) -> None:
     from .store import connect
-    from . import router
+    from . import models as _backend
     from .config import load_config
     project_root = Path(root)
     con = connect(project_root)
@@ -82,9 +82,9 @@ def _run_worker(root: str, wid: str, prompt: str, name: str, kind: str, model: s
                 skill_text = "\n\nRelevant skills (follow them):\n" + "\n---\n".join(parts)
                 sys += skill_text[:8000]
         try:
-            msg = router.chat([{"role": "system", "content": sys},
-                               {"role": "user", "content": prompt[:6000]}],
-                              model=model, cfg=cfg, extra={"reasoning": "low"})
+            msg = _backend.chat([{"role": "system", "content": sys},
+                                 {"role": "user", "content": prompt[:6000]}],
+                                model=model, cfg=cfg, workdir=project_root)
             content = str(msg.get("content", ""))[:4000]
         except Exception as e:
             content = f"worker failed: {e}"

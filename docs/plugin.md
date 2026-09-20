@@ -1,75 +1,69 @@
-# Plugin (install to opencod)
-Harness ships as a single stock-opencod v2 **server plugin**, not a fork.
-Installing it gives your opencod sessions a local relay gateway, built-in
-skills, and memory that survives session compaction.
+# Plugin (install to opencode)
+Harness ships as a single stock-opencode v2 **server plugin**, not a fork.
+Installing it gives your opencode sessions built-in skills, native
+skills/memory tools, and memory that survives session compaction. There is
+no relay: models always come from **your** opencode providers.
 
 ## Install
 
 ```bash
 pip install git+https://github.com/CybeRxNinja/harness.git   # harness CLI (stdlib-only)
 harness plugin install --from-release plugin-v0.2            # no repo checkout needed
-opencode                                                     # stock opencode; the plugin auto-starts the gateway
+opencode                                                     # stock opencode; the plugin auto-loads
 ```
 
 (From a checkout instead: `pip install -e .` then plain `harness plugin install`.)
 
 The plugin file lands at `~/.config/opencode/plugins/harness.ts` and is
-auto-loaded by opencod v2 — no entry in `opencod.json`'s `plugin` array is
-required (`harness plugin install` only prunes any legacy specs left from an
-older fork-based setup). `harness tui` does the above setup and launches
-opencod for you:
+auto-loaded by opencode v2 — no entry in `opencode.json`'s `plugin` array is
+required. `harness tui` does the above setup and launches opencode for you:
 
 ```bash
-harness tui             # gateway + opencod config + plugin, then exec opencode
-eval "$(harness tui --setup-only)"   # prep a shell, then run `opencode`
+harness tui             # opencode config + plugin, then exec opencode
+harness tui --setup-only  # prep only, then run `opencode` yourself
 ```
 
-> No API keys are needed to start (MOCK/offline relay). Add `OPENROUTER_API_KEY`
-> (or GROQ/CEREBRAS/NVIDIA/GOOGLE/KILO/OPENCODE/OLLAMA) to go live.
+> Models are yours: set `model` in `opencode.json` (or per-agent `model`).
+> Harness agents carry no model pins — they inherit your default.
 
 ## What the plugin does
 
-1. **Gateway bootstrap** — starts `harness serve` (localhost:8787) on first use
-   and keeps it alive for the session; installs/refreshes the Python CLI from
-   GitHub when the installed `PROTO` is too old (contract v6).
-2. **Skill seeding** — registers the bundled skills (under
-   `harness/data/skills/`) into opencod's skill store so they're usable without
-   editing `opencod.json`.
-3. **Compaction memory** — on opencod's `experimental.session.compacting` hook,
-   it recalls project facts via the gateway (`GET /api/memory?q=<sessionID>`,
-   Bearer `HARNESS_TOKEN`) and injects them as compaction context, so durable
-   facts survive the summary step.
+1. **Skill seeding** — registers the bundled skills (under
+   `harness/data/skills/`) into opencode's skill store so they're usable without
+   editing `opencode.json`.
+2. **Native tools** — `skills_list`/`skill_view`/`memory_recall` read local
+   disk + SQLite directly (no gateway, no extra process).
+3. **Output condensing** — `tool.execute.after` collapses oversized tool
+   results in place (errors pass through untouched).
+4. **Compaction memory** — on opencode's `experimental.session.compacting` hook,
+   it recalls project facts locally and injects them as compaction context, so
+   durable facts survive the summary step.
 
-## What the plugin does NOT do (those come from opencod.json)
+## What the plugin does NOT do (those come from opencode.json)
 
-Provider/agents are merged into `~/.config/opencode/opencode.json` by
-`harness tui`/`harness setup` (`ensure_opencode_config`), not by the plugin:
+Agents are merged into `~/.config/opencode/opencode.json` by
+`harness plugin install`/`harness tui` (`ensure_opencode_config`), not by the
+plugin:
 
-- `provider.harness` — the relay (`harness/auto-fastest`, `tag:coding`,
-  `tag:reasoning`, `tag:general`, `tag:fast`, `tag:free`); openai-compat at
-  `http://127.0.0.1:8787/v1`, key `{env:HARNESS_TOKEN}`.
-- `agent` — `orchestrator/ask/debug/review` + native `plan` (pinned to
-  `harness/tag:reasoning`).
+- `agent` — `orchestrator/ask/debug/review` + native `plan`, with modern
+  `permission` maps (auto-approve compatible). No `model` keys: every agent
+  runs on your configured default unless you pin one yourself.
 
-Skills need no MCP hop: the plugin exposes `skills_list`/`skill_view`/
-`memory_recall` as native opencode tools. The stdio server
-(`harness mcp`) remains for non-opencode MCP clients only.
+Skills need no MCP hop. The stdio server (`harness mcp`) remains for
+non-opencode MCP clients only.
 
 ## Uninstall
 
 ```bash
-harness plugin uninstall   # removes plugin file + provider/agents/model (user keys untouched)
-harness serve --stop       # stop the gateway (optional)
-pip uninstall harness      # remove the CLI (optional; AppImage reinstalls on next launch)
+harness plugin uninstall   # removes plugin file + harness-merged agents (user keys untouched)
+pip uninstall harness      # remove the CLI (optional)
 ```
 
-Uninstall only removes harness-owned entries (agents whose model points at
-`harness/*`, the default model if it is `harness/*`). Anything you customized
+Uninstall only removes harness-owned entries (agents without a user model pin,
+legacy `provider.harness` / `harness/*` leftovers). Anything you customized
 beyond that is left alone.
 
 ## Verify
 
-- `opencode` offers `harness/*` models when you pick a model.
-- MCP → `harness-skills` exposes the skills/memory tools.
+- `harness doctor` reports your user model, the plugin file, and opencode presence.
 - A long chat: when the session compacts, the recalled memory brief is applied.
-- `harness doctor` reports the gateway, router top pick, and opencod presence.
