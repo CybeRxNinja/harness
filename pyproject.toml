@@ -18,4 +18,4 @@ where = ["."]
 include = ["harness*"]
 
 [tool.setuptools.package-data]
-harness = ["harness-opencode.json"]
+harness = ["harness-opencode.json", "data/skills/*/*/SKILL.md"]

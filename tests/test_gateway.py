@@ -25,6 +25,8 @@ def test_endpoints():
         return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
     assert get("/health")["ok"] is True
+    from harness.skills import ensure_seed_skills
+    ensure_seed_skills()
     assert isinstance(get("/api/skills"), list)
     assert any(s["name"] == "using-agent-skills" for s in get("/api/skills"))
     assert isinstance(get("/api/memory?q=test"), list)

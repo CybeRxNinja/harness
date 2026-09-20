@@ -198,9 +198,12 @@ def cmd_router(args) -> int:
 def cmd_setup(args) -> int:
     from .serve import ensure_token
     from .config import user_dir
+    from .skills import ensure_seed_skills
+    seeded = ensure_seed_skills()
     print("Keys are read from env (never stored by chat). Set e.g.:")
     print("  export OPENROUTER_API_KEY=... GROQ_API_KEY=... OLLAMA_BASE_URL=http://localhost:11434/v1")
     print(f"Gateway token: {ensure_token()}  (file {user_dir()/'token'}, chmod 600)")
+    print(f"Seed skills installed: {len(seeded)} new" + (f" ({', '.join(seeded[:5])})" if seeded else ""))
     print("Router default works with zero keys in MOCK mode; add one key to go live.")
     return 0
 
@@ -269,6 +272,12 @@ def ensure_opencode_config() -> str:
         for k, v in spec.items():
             node.setdefault(k, v)
     cur.setdefault("model", "harness/auto-fastest")
+    # harness skills as MCP tools (agent can list/view skills + recall memory)
+    mcp = cur.setdefault("mcp", {})
+    if "harness-skills" not in mcp:
+        mcp["harness-skills"] = {"type": "local",
+                                 "command": [sys.executable, "-m", "harness", "mcp"],
+                                 "enabled": True}
     dest.write_text(_j.dumps(cur, indent=2) + "\n")
     return str(dest)
 
@@ -343,8 +352,15 @@ def _ensure_tmp() -> None:
         os.environ["TMPDIR"] = str(fb)
 
 
+def cmd_mcp(args) -> int:
+    from .mcp_server import serve_stdio
+    return serve_stdio(_root(args))
+
+
 def cmd_tui(args) -> int:
     from .serve import ensure_token
+    from .skills import ensure_seed_skills
+    ensure_seed_skills()
     root = _root(args)
     if args.dry_run:
         print(f"would: ensure serve :{args.port}, merge {_opencode_config_path()}, exec harness-tui")
@@ -436,6 +452,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--setup-only", action="store_true",
                    help="ensure serve+config, print exports, do not launch")
     t.set_defaults(fn=cmd_tui)
+    mc = sub.add_parser("mcp", help="run harness as an MCP stdio server (skills+memory tools)")
+    mc.set_defaults(fn=cmd_mcp)
     return p
 
 
@@ -444,7 +462,7 @@ def main(argv=None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv and not argv[0].startswith("-") and argv[0] not in (
-            "chat", "serve", "doctor", "config", "skills", "memory", "checkpoint", "plan", "setup", "tui", "router"):
+            "chat", "serve", "doctor", "config", "skills", "memory", "checkpoint", "plan", "setup", "tui", "router", "mcp"):
         argv = ["chat", argv[0]] + argv[1:]
     args = build_parser().parse_args(argv)
     if not getattr(args, "cmd", None) and not hasattr(args, "fn"):

@@ -175,3 +175,38 @@ def bundles(project_root: Path) -> dict:
                 except Exception:
                     continue
     return out
+
+
+def seed_source() -> Path | None:
+    """Canonical seed skills: installed package data first, repo tree fallback."""
+    try:
+        from importlib.resources import files as _rf
+        p = _rf("harness") / "data" / "skills"
+        if p.is_dir():
+            return Path(str(p))
+    except Exception:
+        pass
+    for cand in (Path(__file__).resolve().parent / "data" / "skills",
+                 Path(__file__).resolve().parent.parent / ".opencode" / "harness" / "skills"):
+        if cand.is_dir():
+            return cand
+    return None
+
+
+def ensure_seed_skills() -> list[str]:
+    """Copy missing seed skills to the global dir. Never overwrites user edits."""
+    from .config import user_dir
+    src = seed_source()
+    if src is None:
+        return []
+    dest = user_dir() / "skills"
+    installed = []
+    for md in src.rglob("SKILL.md"):
+        name = _frontmatter(md).get("name", md.parent.name)
+        target = dest / md.parent.parent.name / md.parent.name / "SKILL.md"
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(md.read_text(errors="replace"))
+        installed.append(name)
+    return installed

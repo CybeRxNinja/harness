@@ -111,6 +111,7 @@ def test_memory_loop(root):
 def test_skills_progressive(root, cfg):
     from harness import skills as S
     from pathlib import Path as _P
+    S.ensure_seed_skills()
     names = [s["name"] for s in S.scan(_P("."), cfg)]
     assert "using-agent-skills" in names
     assert "reverse-router" not in names  # disabled by default (opt-in sec pack)

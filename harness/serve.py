@@ -331,6 +331,11 @@ def serve(root: Path, port: int = 8787, host: str = "127.0.0.1") -> None:
     Handler.root = root.resolve()
     Handler.token = ensure_token()
     try:
+        from .skills import ensure_seed_skills
+        ensure_seed_skills()
+    except Exception:
+        pass
+    try:
         sentinel_path().parent.mkdir(parents=True, exist_ok=True)
         sentinel_path().write_text(_j.dumps(
             {"root": str(root.resolve()), "port": port, "pid": _o.getpid()}))

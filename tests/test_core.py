@@ -43,10 +43,12 @@ def test_config_layers(tmp_path, monkeypatch):
     except PermissionError:
         pass
 
-def test_skills_scan():
+def test_skills_scan(tmp_path, monkeypatch):
     from harness import skills as S
     from harness.config import load_config
     from pathlib import Path
+    monkeypatch.setenv("HARNESS_HOME", str(tmp_path / "home"))
+    assert "using-agent-skills" in S.ensure_seed_skills()
     cfg, _ = load_config(Path("."))
     names = [s["name"] for s in S.scan(Path("."), cfg)]
     assert "using-agent-skills" in names
