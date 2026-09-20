@@ -358,7 +358,7 @@ console.log(JSON.stringify(out))
 def test_plugin_files_exist():
     from harness.cli import _plugin_files
     files = _plugin_files()
-    assert len(files) == 1 and Path(files[0]).exists()
+    assert len(files) == 2 and all(Path(f).exists() for f in files)
     text = Path(files[0]).read_text()
     # Loader contract lock (opencode v2.0.8 PluginModule.load): the default
     # export must be an object with id + (effect | setup). `setup(ctx)` may
@@ -382,6 +382,13 @@ def test_plugin_files_exist():
     # load with ResolveMessage (err_51f4c6d8). Dynamic node:/bun: imports and
     # Bun globals are fine.
     assert not re.search(r"^\s*import\s+(type\s+)?[{\*\w]", text, re.M), "plugin must not use static imports"
+    # TUI entrypoint (tui.tsx): its presence is what makes the TUI plugin list
+    # include harness (features.tui is set only for plugins with a tui
+    # entrypoint; a bare server.ts shows only under the panel's Server section).
+    tui = Path(files[1]).read_text()
+    assert 'id: "harness"' in tui and "setup(ctx" in tui
+    assert 'ui.slot' in tui, "TUI plugin must register a slot"
+    assert not re.search(r"^\s*import\s+(type\s+)?[{\*\w]", tui, re.M), "TUI plugin must not use static imports"
 
 
 @pytest.mark.skipif(BUN is None, reason="bun is not installed")
@@ -503,8 +510,11 @@ def test_plugin_install_idempotent(tmp_path, monkeypatch):
     assert r.returncode == 0, r.stderr[:300]
     d = json.loads((_opencode_config_path()).read_text())
     assert not [p for p in d.get("plugin", []) if "harness/plugin" in str(p)], "legacy specs removed"
-    installed = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins" / "harness.ts"
-    assert installed.exists()
+    plugdir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins"
+    # directory layout: server entrypoint + TUI entrypoint (the tui one is what
+    # makes the TUI plugin list include harness)
+    assert (plugdir / "harness" / "server.ts").exists()
+    assert (plugdir / "harness" / "tui.tsx").exists()
     r = subprocess.run([sys.executable, "-m", "harness", "plugin", "install"],
                        capture_output=True, text=True, timeout=60,
                        cwd=str(REPO_ROOT))
@@ -513,10 +523,17 @@ def test_plugin_install_idempotent(tmp_path, monkeypatch):
     d = json.loads((_opencode_config_path()).read_text())
     assert "harness" not in d.get("provider", {})
     assert "orchestrator" in d.get("agent", {})
+    # a legacy single-file install is superseded, not left behind to double-load
+    legacy = plugdir / "harness.ts"
+    legacy.write_text("// stale single-file install")
+    r = subprocess.run([sys.executable, "-m", "harness", "plugin", "install"],
+                       capture_output=True, text=True, timeout=60,
+                       cwd=str(REPO_ROOT))
+    assert r.returncode == 0 and not legacy.exists(), "legacy harness.ts must be removed"
     r = subprocess.run([sys.executable, "-m", "harness", "plugin", "uninstall"],
                        capture_output=True, text=True, timeout=60,
                        cwd=str(REPO_ROOT))
-    assert r.returncode == 0 and "removed plugin file" in r.stdout
+    assert r.returncode == 0 and "removed plugin dir" in r.stdout
     d = json.loads((_opencode_config_path()).read_text())
     assert "harness" not in d.get("provider", {})
-    assert not (Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins" / "harness.ts").exists()
+    assert not (plugdir / "harness").exists()

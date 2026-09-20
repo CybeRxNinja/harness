@@ -259,14 +259,44 @@ def cmd_mcp(args) -> int:
 
 
 def _plugin_files() -> list[str]:
-    """Absolute path of the shipped v2 plugin module."""
+    """Absolute paths of the shipped v2 plugin entrypoints (server + TUI)."""
     from pathlib import Path as _P
-    return [str((_P(__file__).resolve().parent / "plugin" / "harness.ts").resolve())]
+    base = _P(__file__).resolve().parent / "plugin"
+    return [str((base / name).resolve()) for name in ("harness.ts", "tui.tsx")]
+
+
+def _plugins_dir() -> Path:
+    """opencode's auto-loaded plugins dir (~/.config/opencode/plugins)."""
+    plugdir = Path.home() / ".config" / "opencode" / "plugins"
+    if os.environ.get("XDG_CONFIG_HOME"):
+        plugdir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins"
+    return plugdir
+
+
+def _install_dir(plugdir: Path) -> Path:
+    """Installed layout: <plugins>/harness/{server.ts,tui.tsx}.
+
+    The loader probes a plugin DIRECTORY for `server.*` and `tui.*`
+    entrypoints. The TUI's plugin list only includes plugins whose features
+    include `tui`, which is set only when a `tui` entrypoint exists — a bare
+    harness.ts is a server-only plugin and shows solely under the panel's
+    Server section."""
+    return plugdir / "harness"
+
+
+def _remove_legacy_single_file(plugdir: Path) -> Path | None:
+    """Pre-directory installs dropped a bare harness.ts; supersede it."""
+    legacy = plugdir / "harness.ts"
+    if legacy.exists():
+        legacy.unlink()
+        return legacy
+    return None
 
 
 def download_plugin(release: str = "latest") -> Path:
-    """Fetch harness.ts from a GitHub release asset into the plugins dir.
-    No repo checkout needed — pairs with the pip/AppImage CLI install."""
+    """Fetch the plugin entrypoints from a GitHub release into the plugins dir.
+    Writes <plugins>/harness/{server.ts,tui.tsx}; `harness.ts` is accepted as
+    the server asset for older releases. No repo checkout needed."""
     import json as _j
     import urllib.request as _u
     api = ("https://api.github.com/repos/CybeRxNinja/harness/releases/latest"
@@ -275,38 +305,49 @@ def download_plugin(release: str = "latest") -> Path:
     with _u.urlopen(api, timeout=30) as r:
         rel = _j.loads(r.read().decode())
     tag = rel.get("tag_name", release)
-    asset = next((a for a in rel.get("assets", []) if a.get("name") == "harness.ts"), None)
-    if asset is None:
-        raise ValueError(f"no harness.ts asset in release {tag}")
-    plugdir = Path.home() / ".config" / "opencode" / "plugins"
-    if os.environ.get("XDG_CONFIG_HOME"):
-        plugdir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins"
-    plugdir.mkdir(parents=True, exist_ok=True)
-    dest_file = plugdir / "harness.ts"
-    with _u.urlopen(asset["browser_download_url"], timeout=120) as r:
-        dest_file.write_bytes(r.read())
-    print(f"plugin {tag} downloaded to {dest_file}")
-    return dest_file
+    assets = {a.get("name"): a["browser_download_url"] for a in rel.get("assets", [])}
+    server_url = assets.get("server.ts") or assets.get("harness.ts")
+    if server_url is None:
+        raise ValueError(f"no server.ts/harness.ts asset in release {tag}")
+    plugdir = _plugins_dir()
+    dest_dir = _install_dir(plugdir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with _u.urlopen(server_url, timeout=120) as r:
+        (dest_dir / "server.ts").write_bytes(r.read())
+    tui_url = assets.get("tui.tsx") or assets.get("tui.ts")
+    if tui_url:
+        with _u.urlopen(tui_url, timeout=120) as r:
+            (dest_dir / "tui.tsx").write_bytes(r.read())
+    _remove_legacy_single_file(plugdir)
+    print(f"plugin {tag} downloaded to {dest_dir}")
+    return dest_dir
 
 
 def install_plugin() -> Path:
-    """Copy the shipped harness.ts server plugin into opencod's auto-loaded
-    plugins dir (~/.config/opencode/plugins/) and drop any legacy v1
-    'harness/plugin' specs from opencod.json. Returns the installed path.
+    """Install the shipped plugin into opencode's auto-loaded plugins dir as
+    <plugins>/harness/{server.ts,tui.tsx} and drop any legacy v1
+    'harness/plugin' specs from opencode.json. Returns the installed dir.
 
-    Stock opencod v2 auto-loads every plugin from that dir, so no config entry
-    is required (the `plugin` array only stores legacy specs we prune here)."""
+    Stock opencode v2 auto-loads every plugin from that dir, so no config
+    entry is required (the legacy `plugin` array specs are pruned here).
+    The directory form (not a bare .ts) is what makes the TUI's plugin list
+    show harness: the list filters on features.tui, set only for plugins
+    with a `tui` entrypoint."""
     import json as _j
     import shutil as _sh
-    plugdir = Path.home() / ".config" / "opencode" / "plugins"
-    if os.environ.get("XDG_CONFIG_HOME"):
-        plugdir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins"
+    plugdir = _plugins_dir()
     plugdir.mkdir(parents=True, exist_ok=True)
-    src = Path(__file__).resolve().parent / "plugin" / "harness.ts"
-    if not src.exists():
+    base = Path(__file__).resolve().parent / "plugin"
+    src_server = base / "harness.ts"
+    src_tui = base / "tui.tsx"
+    if not src_server.exists():
         raise FileNotFoundError("plugin source missing from install (dev: run from repo)")
-    dest_file = plugdir / "harness.ts"
-    _sh.copy2(src, dest_file)
+    dest_dir = _install_dir(plugdir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    _sh.copy2(src_server, dest_dir / "server.ts")
+    if src_tui.exists():
+        _sh.copy2(src_tui, dest_dir / "tui.tsx")
+    _remove_legacy_single_file(plugdir)
     dest = _opencode_config_path()
     try:
         cur = _j.loads(dest.read_text()) if dest.exists() else {}
@@ -319,22 +360,25 @@ def install_plugin() -> Path:
     if len(plugs) != before or not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(_j.dumps(cur, indent=2) + "\n")
-    return dest_file
+    return dest_dir
 
 
 def uninstall_plugin() -> list[str]:
-    """Remove everything `install` manages: the plugin file plus harness-merged
-    agent blocks. User-owned keys are never touched: agents with a user-set
-    (non-harness) model pin are kept. Returns human-readable lines."""
+    """Remove everything `install` manages: the plugin dir (plus any legacy
+    single-file install) and harness-merged agent blocks. User-owned keys are
+    never touched: agents with a user-set (non-harness) model pin are kept.
+    Returns human-readable lines."""
     import json as _j
+    import shutil as _sh
     done: list[str] = []
-    plugdir = Path.home() / ".config" / "opencode" / "plugins"
-    if os.environ.get("XDG_CONFIG_HOME"):
-        plugdir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins"
-    target = plugdir / "harness.ts"
+    plugdir = _plugins_dir()
+    target = _install_dir(plugdir)
     if target.exists():
-        target.unlink()
-        done.append(f"removed plugin file {target}")
+        _sh.rmtree(target, ignore_errors=True)
+        done.append(f"removed plugin dir {target}")
+    legacy = _remove_legacy_single_file(plugdir)
+    if legacy:
+        done.append(f"removed legacy plugin file {legacy}")
     dest = _opencode_config_path()
     try:
         cur = _j.loads(dest.read_text()) if dest.exists() else {}
@@ -373,7 +417,7 @@ def cmd_plugin(args) -> int:
     if args.plugin_action == "install":
         if getattr(args, "from_release", ""):
             download_plugin(args.from_release)
-            plug = _opencode_config_path().parent / "plugins" / "harness.ts"
+            plug = _opencode_config_path().parent / "plugins" / "harness"
         else:
             plug = install_plugin()
         try:

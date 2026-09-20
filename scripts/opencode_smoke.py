@@ -36,14 +36,22 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-PLUGIN_SRC = REPO / "harness" / "plugin" / "harness.ts"
+PLUGIN_DIR = REPO / "harness" / "plugin"
 
 
 def install_plugin() -> Path:
-    """Copy the plugin into opencode's auto-loaded plugins dir (idempotent)."""
-    dest = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "opencode" / "plugins" / "harness.ts"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(PLUGIN_SRC.read_text())
+    """Install the plugin dir (server.ts + tui.tsx) into opencode's auto-loaded
+    plugins dir (idempotent); mirrors `harness plugin install`."""
+    dest = (Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+            / "opencode" / "plugins" / "harness")
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "server.ts").write_text((PLUGIN_DIR / "harness.ts").read_text())
+    tui = PLUGIN_DIR / "tui.tsx"
+    if tui.exists():
+        (dest / "tui.tsx").write_text(tui.read_text())
+    legacy = dest.parent / "harness.ts"
+    if legacy.exists():
+        legacy.unlink()
     return dest
 
 
@@ -124,8 +132,8 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=4199)
     args = ap.parse_args()
 
-    if not PLUGIN_SRC.exists():
-        print(f"FAIL: {PLUGIN_SRC} missing")
+    if not PLUGIN_DIR.exists():
+        print(f"FAIL: {PLUGIN_DIR} missing")
         return 2
     dest = install_plugin()
 
@@ -133,12 +141,16 @@ def main() -> int:
     with Server(args.port) as srv:
         harness = wait_for_activation(srv)
         status = harness.get("state", {}).get("status")
+        features = harness.get("features", {})
         src_path = harness.get("source", {}).get("path")
-        print(f"plugin: id={harness.get('id')} status={status} path={src_path}")
+        print(f"plugin: id={harness.get('id')} status={status} features={features} path={src_path}")
         if status != "active":
             failures.append(f"plugin not active: {json.dumps(harness)}")
-        elif src_path and Path(src_path).resolve() != dest.resolve():
-            failures.append(f"active plugin is not the installed file: {src_path}")
+        elif src_path and Path(src_path).resolve().parent != dest.resolve():
+            failures.append(f"active plugin is not the installed dir: {src_path}")
+        if not features.get("tui"):
+            failures.append("features.tui not set — TUI plugin list would omit harness "
+                            f"(features={json.dumps(features)})")
 
         # 2. skills seeded
         skills = list_skills(srv)
@@ -153,7 +165,7 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}")
         return 1
-    print(f"\nSMOKE OK — plugin active, {len(seeded)} skills seeded (installed at {dest})")
+    print(f"\nSMOKE OK — plugin active with features.tui, {len(seeded)} skills seeded (installed at {dest})")
     return 0
 
 

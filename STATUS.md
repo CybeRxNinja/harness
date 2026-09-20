@@ -22,10 +22,15 @@ future-host degradation).
   never advertises `shell` and fails under ANY zen free model. `build`/
   `plan`/`orchestrator` (shell allowed) work. Fixes: use a shell-capable agent,
   set `"bash": "allow"` on the agent, or use a paid key for read-only agents.
-- **The TUI Plugins panel lists only `features.tui` plugins.** harness registers
-  `features.server: true` (server-side only), so the panel doesn't show it even
-  though `/api/plugin` reports `{status: active}` and all features work. Panel
-  entries would require a TUI client plugin (`@opencode-ai/plugin/tui`).
+- **The TUI Plugins panel lists only `features.tui` plugins — now satisfied.**
+  The flag is set only for plugins with a `tui` entrypoint, so the single-file
+  install could never appear in the panel's list (only under Server). The
+  install is now a directory (`plugins/harness/{server.ts,tui.tsx}`);
+  `tui.tsx` registers a footer chip via `ctx.ui.slot({append:
+  "home.footer.status"})`. Verified: `/api/plugin` reports
+  `features:{server:true,tui:true}`, `opencode plugin list` shows harness, TUI
+  reconciliation loads 13 plugins with no errors. Legacy `harness.ts` installs
+  are removed by `harness plugin install`.
 - **The "update available" banner is opencode's own updater, unrelated to the
   plugin.** The check runs on every TUI launch against
   `https://opencode.ai/update/api/...` and currently reports

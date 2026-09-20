@@ -14,9 +14,14 @@ opencode                                                     # stock opencode; t
 
 (From a checkout instead: `pip install -e .` then plain `harness plugin install`.)
 
-The plugin file lands at `~/.config/opencode/plugins/harness.ts` and is
-auto-loaded by opencode v2 — no entry in `opencode.json`'s `plugin` array is
-required. `harness tui` does the above setup and launches opencode for you:
+The plugin lands at `~/.config/opencode/plugins/harness/` as a directory with
+two entrypoints — `server.ts` (skills/tools/hooks) and `tui.tsx` (a footer
+status chip in the TUI) — and is auto-loaded by opencode v2; no entry in
+`opencode.json`'s `plugin` array is required. The directory form matters:
+opencode probes a plugin directory for `server.*` and `tui.*` entrypoints, and
+the TUI's Plugins panel lists only plugins with a `tui` entrypoint
+(`features.tui`); a bare `harness.ts` is a server-only plugin and appears
+solely under the panel's Server section. `harness tui` does the above setup and launches opencode for you:
 
 ```bash
 harness tui             # opencode config + plugin, then exec opencode
@@ -86,11 +91,15 @@ so *any* free model fails under them. `build`/`plan`/`orchestrator` include
 `shell` and work. Fix: run free models with a shell-capable agent, or give the
 agent `"bash": "allow"`, or use a paid key for read-only agents.
 
-**The TUI Plugins panel lists only `features.tui` plugins** — expected. The panel
-lists plugins that register TUI client components (`features.tui`); harness
-registers server features only (`features.server: true`) and is verified active
-via `opencode api get /api/plugin` (or `GET /api/plugin` with basic auth against
-`opencode serve`). Its tools/skills/hooks work regardless of the panel.
+**The TUI Plugins panel lists only `features.tui` plugins** — that flag is set
+only when the plugin has a `tui` entrypoint. Harness ships one
+(`plugins/harness/tui.tsx`, a small footer chip on the home screen), so after
+`harness plugin install` (or any install from this version on) harness appears
+in the panel's plugin list as well as the Server section. If you installed an
+older release that dropped a bare `harness.ts`, re-run `harness plugin install`
+— it replaces the single file with the directory layout and removes the stale
+file. Server-side activation can always be verified via `opencode api get
+/api/plugin` (or `GET /api/plugin` with basic auth against `opencode serve`).
 
 **"Update available" even though the GitHub releases page shows nothing newer** —
 opencode's own updater, not the plugin. The update check runs on every TUI
