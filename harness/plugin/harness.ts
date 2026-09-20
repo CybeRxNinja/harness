@@ -158,19 +158,29 @@ const HarnessPlugin = {
       log(`skill seeding failed: ${String(e).slice(0, 120)}`)
     }
 
-    // Preserve durable project facts across session compaction. v2 API:
-    // ctx.session.hook("compaction") mutates input.system before the
-    // summary LLM runs. Anything else (old .on/event names) is ignored.
+    // Preserve durable project facts across session compaction. Documented
+    // v2 hook: returned hooks object with "experimental.session.compacting",
+    // receiving (input, output); output.context[] is appended to the
+    // compaction prompt before the summary LLM runs.
+    let compaction: Record<string, unknown> = {}
     try {
-      await ctx.session.hook("compaction", async (input: any) => {
-        const brief = await memoryBrief(String(input?.sessionID ?? ""), log)
-        if (brief && Array.isArray(input?.system)) {
-          input.system.push({ type: "text", text: brief })
-        }
-      })
+      const probe = await ctx.session?.hook?.("compaction", async () => {})
+      if (probe && typeof (probe as any).dispose === "function") {
+        await (probe as any).dispose()
+      }
+      compaction = {
+        "experimental.session.compacting": async (input: any, output: any) => {
+          const sid = String(input?.sessionID ?? input?.sessionId ?? "")
+          const brief = await memoryBrief(sid, log)
+          if (brief && output && Array.isArray(output.context)) {
+            output.context.push(brief)
+          }
+        },
+      }
     } catch (e) {
       log(`compaction hook skipped: ${String(e).slice(0, 150)}`)
     }
+    return compaction
   },
 }
 
