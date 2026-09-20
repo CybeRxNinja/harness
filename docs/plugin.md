@@ -86,11 +86,25 @@ so *any* free model fails under them. `build`/`plan`/`orchestrator` include
 `shell` and work. Fix: run free models with a shell-capable agent, or give the
 agent `"bash": "allow"`, or use a paid key for read-only agents.
 
-**The plugin doesn't show in the TUI's Plugins panel** — expected. The panel
+**The TUI Plugins panel lists only `features.tui` plugins** — expected. The panel
 lists plugins that register TUI client components (`features.tui`); harness
 registers server features only (`features.server: true`) and is verified active
 via `opencode api get /api/plugin` (or `GET /api/plugin` with basic auth against
 `opencode serve`). Its tools/skills/hooks work regardless of the panel.
+
+**"Update available" even though the GitHub releases page shows nothing newer** —
+opencode's own updater, not the plugin. The update check runs on every TUI
+launch and compares the installed binary against opencode.ai's update service
+(`https://opencode.ai/update/api/...`), which serves the 2.x line (e.g.
+`current=2.0.8 latest=2.0.11`). The GitHub releases page only lists the older
+1.x train (`v1.18.x`), so a real 2.x update can look "unofficial" there. The
+harness plugin has zero influence on this: it is a single auto-loaded `.ts`
+file — the binary, `cli.json`, `service.json`, `auth.json`, the npm cache and
+all update/version state are never touched (verified by an A/B: the logged
+check is byte-identical with the plugin installed vs removed, and the banner
+predates the plugin's first install). Silence it with
+`OPENCODE_DISABLE_AUTOUPDATE=1` (checked by opencode itself), or take the
+update with `opencode upgrade`.
 
 ## Verify
 

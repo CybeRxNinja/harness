@@ -26,6 +26,17 @@ future-host degradation).
   `features.server: true` (server-side only), so the panel doesn't show it even
   though `/api/plugin` reports `{status: active}` and all features work. Panel
   entries would require a TUI client plugin (`@opencode-ai/plugin/tui`).
+- **The "update available" banner is opencode's own updater, unrelated to the
+  plugin.** The check runs on every TUI launch against
+  `https://opencode.ai/update/api/...` and currently reports
+  `current=2.0.8 latest=2.0.11` (2.x lives only on opencode.ai's update
+  service; GitHub releases show the older 1.18.x train, hence the confusion).
+  A/B proof: with the plugin installed vs removed, the logged check is
+  identical; the banner predates the plugin (Sep 17 `2.0.3→2.0.5` vs first
+  plugin install Sep 20). harness writes nothing opencode versions: only
+  `<project>/.opencode/harness/` seeds, `opencode.json` agent merges, and the
+  plugin file itself. Silence with `OPENCODE_DISABLE_AUTOUPDATE=1` (opencode
+  honors it), or `opencode upgrade`.
 
 ## Done
 
