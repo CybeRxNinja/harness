@@ -1,7 +1,11 @@
 // Harness plugin for STOCK opencode v2. No fork, no custom binary.
 // Install: `harness plugin install` copies this file to
 // ~/.config/opencode/plugins/ (auto-loaded, no config edit needed).
-import { tool, type PluginInput } from "@opencode-ai/plugin"
+// Zero runtime imports: the v2.0.8 server resolves plugin imports in an
+// isolated registry (node_modules under ~/.config/opencode is reconciled
+// away), so any value-level import fails load with ResolveMessage.
+// `import type` is erased by Bun and is safe.
+import type { PluginInput } from "@opencode-ai/plugin"
 
 const NEED_PROTO = 6
 const RELAY_PORT = process.env.HARNESS_PORT ?? "8787"
@@ -238,24 +242,24 @@ const HarnessPlugin = {
 
     return {
       tool: {
-        skills_list: tool({
+        skills_list: {
           description: "List available harness skills (name + when-to-use). Call first, then skill_view.",
-          args: {},
+          inputSchema: { type: "object", properties: {} },
           execute: async () => {
             const items = await skillIndex()
             return items.map((s) => `- ${s.name}: ${s.description}`).join("\n") || "(no skills installed)";
           },
-        }),
-        skill_view: tool({
+        },
+        skill_view: {
           description: "Load a harness skill SKILL.md (or a references/ file). Use before doing the task the skill covers.",
-          args: { name: tool.schema.string(), path: tool.schema.string().optional() },
-          execute: async (args) => skillBody(args.name, args.path),
-        }),
-        memory_recall: tool({
+          inputSchema: { type: "object", properties: { name: { type: "string" }, path: { type: "string" } }, required: ["name"] },
+          execute: async (args: any) => skillBody(String(args?.name ?? ""), args?.path ? String(args.path) : undefined),
+        },
+        memory_recall: {
           description: "Recall durable harness facts relevant to a query. Verify before relying.",
-          args: { query: tool.schema.string() },
-          execute: async (args, context) => recallLocal(args.query, context.directory || cwd),
-        }),
+          inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+          execute: async (args: any, context: any) => recallLocal(String(args?.query ?? ""), context?.directory || cwd),
+        },
       },
       "tool.execute.after": async (input: any, output: any) => {
         // Lite RTK: condense oversized tool results in place. Errors and

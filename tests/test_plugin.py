@@ -14,14 +14,16 @@ def test_plugin_files_exist():
     text = Path(files[0]).read_text()
     assert "export default" in text and "experimental.session.compacting" in text
     assert "skills_list" in text and "memory_recall" in text
-    # loader contract lock (opencode v2.0.8 rejects anything else at startup with
-    # "must export a default definition with an id and an effect or setup
-    # function" — and only `effect` is actually invoked; `setup` loads clean
-    # but never runs, verified via marker probe 2026-09-20). Tools must be
-    # built via the tool() helper (raw inputSchema entries are ignored).
+    # loader contract lock (opencode v2.0.8): default-exported object with id +
+    # effect (setup loads clean but is never invoked — marker probe 2026-09-20).
+    # Zero runtime imports: the server resolves plugin imports in an isolated
+    # registry and node_modules is reconciled away, so any value-level import
+    # fails load with ResolveMessage (err_51f4c6d8). Tools are plain objects
+    # with JSON-Schema inputSchema, which the registry accepts natively.
     assert 'id: "harness"' in text and "effect:" in text
     assert "export default HarnessPlugin" in text
-    assert "tool({" in text and "inputSchema" not in text
+    assert "inputSchema" in text
+    assert "\nimport type " in text and "\nimport {" not in text and "\nimport " not in text.replace("\nimport type ", "")
 
 
 def test_plugin_install_idempotent(tmp_path, monkeypatch):
