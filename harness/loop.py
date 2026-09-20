@@ -16,6 +16,24 @@ MODE_TOOLS = {
     "review": {"read", "glob", "grep", "skill_view", "memory"},
 }
 
+def _fresh_history(hist: list[dict]) -> list[dict]:
+    """Drop stale system messages (old modes, old compaction notes, old hints).
+
+    Only the most recent system entry (current state) survives; user/assistant
+    turns pass through untouched. Prevents contradictory directives piling up
+    across mode switches and compactions.
+    """
+    seen_system = False
+    out: list[dict] = []
+    for m in reversed(hist):
+        if m.get("role") == "system":
+            if seen_system:
+                continue
+            seen_system = True
+        out.append(m)
+    return list(reversed(out))
+
+
 SYSTEM = {
     "code": "You are Harness, a senior coding agent. Be concrete. Use tools. Verify with tests. Return summary+files changed.",
     "orchestrator": ("You are the ORCHESTRATOR. Never write product code yourself. Decompose, spawn(category=...) "
@@ -69,11 +87,11 @@ def run_turn(project_root: Path, session: str, user_msg: str, mode: str = "code"
     budgets.update(budget_override or {})
     max_turns = int(budgets.get("max_turns", 25))
     msgs = [{"role": "system", "content": SYSTEM.get(mode, SYSTEM["code"]) + hint}]
-    msgs += history(con, session, 30)
+    msgs += _fresh_history(history(con, session, 30))
     if should_compact(msgs):
         try:
             do_compact(con, cfg, project_root, session, kernel)
-            msgs = [{"role": "system", "content": SYSTEM.get(mode, SYSTEM["code"])}] + history(con, session, 30)
+            msgs = [{"role": "system", "content": SYSTEM.get(mode, SYSTEM["code"])}] + _fresh_history(history(con, session, 30))
         except Exception:
             pass
 

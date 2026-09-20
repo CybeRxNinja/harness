@@ -69,6 +69,18 @@ def _run_worker(root: str, wid: str, prompt: str, name: str, kind: str, model: s
                "Do not ask questions.")
         if kind in ("explore", "librarian"):
             sys += " READ-ONLY: do not propose writes."
+        skill_text = ""
+        if skills:
+            from . import skills as _S
+            parts = []
+            for name in skills[:3]:
+                try:
+                    parts.append(_S.view(project_root, cfg, name)[:2500])
+                except Exception:
+                    continue
+            if parts:
+                skill_text = "\n\nRelevant skills (follow them):\n" + "\n---\n".join(parts)
+                sys += skill_text[:8000]
         try:
             msg = router.chat([{"role": "system", "content": sys},
                                {"role": "user", "content": prompt[:6000]}],
