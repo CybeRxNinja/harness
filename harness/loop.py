@@ -129,7 +129,21 @@ def run_turn(project_root: Path, session: str, user_msg: str, mode: str = "code"
                 res = _exec_tool(name, args, project_root, session, cfg, con, kernel, allowlist, auto_approve, touched)
             except Exception as e:
                 res = f"tool error: {e}"
-            msgs.append({"role": "tool", "content": str(res)[:4000]})
+            text = str(res)
+            ccfg = (cfg.get("compress", {}) or {})
+            if ccfg.get("enabled", True) and len(text) >= int(ccfg.get("threshold", 4000)):
+                from .compress import stacked as _stacked
+                hint = args.get("cmd", args.get("code", name)) if isinstance(args, dict) else name
+                ctext, cstats = _stacked(text, command=str(hint),
+                                         intensity=str(ccfg.get("intensity", "standard")))
+                try:
+                    spill = kernel.runs / f"tool-{name}-{int(time.time()*1000)}.log"
+                    spill.write_text(text[:200000])
+                    trail = f"\n[compressed {cstats['saved_pct']}% by {','.join(cstats['engines'])} ({cstats['filter']}); raw: {spill.name}]"
+                except Exception:
+                    trail = f"\n[compressed {cstats['saved_pct']}% by {','.join(cstats['engines'])} ({cstats['filter']})]"
+                text = ctext + trail
+            msgs.append({"role": "tool", "content": text[:4000]})
         if time.time() - t0 > 600:
             final = "stopped: 10m turn budget"
             break

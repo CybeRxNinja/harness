@@ -89,5 +89,5 @@ install.sh          CLI + plugin installer (no binary)
 ## Docs
 
 - `docs/quickstart.md` `routing.md` `agents.md` `rlm.md` `skills.md` `memory.md` `plugin.md`
-- `docs/gateway.md` `config.md` `security.md` `mcp.md` `tui.md`
+- `docs/gateway.md` `config.md` `security.md` `mcp.md` `tui.md` `compression.md`
 - `AGENTS.md` (agent operating rules), `SOUL.md`, `MEMORY.md`, `CONSTRAINTS.md`

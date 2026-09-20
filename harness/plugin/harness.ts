@@ -256,7 +256,52 @@ const HarnessPlugin = {
           execute: async (args: any) => recallLocal(String(args?.query ?? ""), cwd),
         },
       },
-      "experimental.session.compacting": async (input: any, output: any) => {
+      "tool.execute.after": async (input: any, output: any) => {
+        // Lite RTK: condense oversized tool results in place. Errors and
+        // failures pass through untouched; raw output is already in the
+        // transcript upstream of this hook point.
+        try {
+          const getText = (o: any): string | null => {
+            for (const k of ["result", "content", "output", "text"]) {
+              if (typeof o?.[k] === "string" && o[k].length > 4000) return o[k];
+            }
+            return null;
+          };
+          const setText = (o: any, v: string): boolean => {
+            for (const k of ["result", "content", "output", "text"]) {
+              if (typeof o?.[k] === "string") { o[k] = v; return true; }
+            }
+            return false;
+          };
+          const raw = getText(output);
+          if (!raw) return;
+          if (/Traceback |Error:|Exception:|FAILED|failed|AssertionError|panic:|fatal:/.test(raw)) return;
+          const lines = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").split("\n")
+          const kept: string[] = [];
+          let run: string[] = [];
+          const flush = () => {
+            if (run.length >= 3) { kept.push(run[0], `... [${run.length - 1} repeated lines] ...`); }
+            else kept.push(...run);
+            run = [];
+          };
+          for (const ln of lines) {
+            if (run.length && ln === run[0]) run.push(ln);
+            else { flush(); run = [ln]; }
+          }
+          flush();
+          let out = kept;
+          if (out.length > 48) {
+            const cut = out.length - 44;
+            out = [...out.slice(0, 24), `... [${cut} lines elided] ...`, ...out.slice(-20)];
+          }
+          const before = raw.length, after = out.join("\n").length;
+          if (after < before) {
+            setText(output, out.join("\n") + `
+[condensed ${Math.round(100 * (1 - after / before))}% lite-rtk]`);
+          }
+        } catch { /* never break tool execution */ }
+      },
+            "experimental.session.compacting": async (input: any, output: any) => {
         const sid = String(input?.sessionID ?? input?.sessionId ?? "")
         const brief = await memoryBrief(sid, log)
         if (brief && output && Array.isArray(output.context)) {

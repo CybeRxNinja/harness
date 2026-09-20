@@ -28,6 +28,7 @@ DEFAULT_CONFIG: dict = {
         "ban": [],
     },
     "budgets": {"max_turns": 25, "max_tokens": 120000, "max_cost_usd": 2.0, "max_parallel": 2, "max_depth": 1},
+    "compress": {"enabled": True, "threshold": 4000, "intensity": "standard"},
     "categories": {
         "quick": {"models": ["auto-fastest"], "reasoning": "low", "max_turns": 15},
         "deep": {"models": ["tag:reasoning+min_ctx:32k", "tag:free", "auto-fastest"], "reasoning": "high", "max_turns": 25},
@@ -54,7 +55,7 @@ DEFAULT_CONFIG: dict = {
 }
 
 # Agent-mutable top-level keys. Everything else needs human CLI.
-MUTABLE_TOP = {"model_profile", "router", "budgets", "categories", "agents", "skills", "memory", "mcp", "tui"}
+MUTABLE_TOP = {"model_profile", "router", "budgets", "categories", "agents", "skills", "memory", "mcp", "tui", "compress"}
 
 
 def _strip_jsonc(text: str) -> str:
