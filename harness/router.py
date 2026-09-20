@@ -441,6 +441,8 @@ def _openrouter_tier() -> str:
     ent = s.get("_tier", {})
     if ent.get("at", 0) > time.time() - 86400 and ent.get("tier"):
         return ent["tier"]
+    if os.environ.get("HARNESS_MOCK") == "1":
+        return ent.get("tier", "full")  # hermetic tests: never hit network
     tier = "full"
     key = os.environ.get("OPENROUTER_API_KEY", "")
     if key:
@@ -464,7 +466,6 @@ def _finalize(cands: list[dict], banned: set, parsed: dict) -> list[dict]:
     if not os.environ.get("KILO_API_KEY"):
         out = [c for c in out
                if not (c["provider"] == "kilo" and not c["model"].endswith(":free"))]
-    out = [c for c in cands if f"{c['provider']}/{c['model']}" not in banned]
     # free-tier OpenRouter keys 402 every paid model: keep :free endpoints only.
     # (Other providers unaffected; pins bypass this filter by design.)
     if parsed["kind"] != "pin" and _openrouter_tier() == "free":

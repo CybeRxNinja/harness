@@ -3,8 +3,11 @@ import os
 import select
 import subprocess
 import sys
+from pathlib import Path
 
 os.environ["HARNESS_MOCK"] = "1"
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_mcp_live_pipe_no_deadlock(tmp_path, monkeypatch):
@@ -14,7 +17,7 @@ def test_mcp_live_pipe_no_deadlock(tmp_path, monkeypatch):
     p = subprocess.Popen(
         [sys.executable, "-m", "harness", "--root", str(tmp_path), "mcp"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        cwd="/home/jailbreaker20/Projects/harness")
+        cwd=str(REPO_ROOT))
 
     def ask(mid, method, params=None):
         p.stdin.write((json.dumps({"jsonrpc": "2.0", "id": mid, "method": method,
