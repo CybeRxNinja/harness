@@ -64,15 +64,24 @@ def dispatch(method: str, params: dict, root: Path, cfg: dict):
 
 def serve_stdio(root: str | Path = ".") -> int:
     from .config import load_config
+    import os as _o
     root = Path(root).resolve()
     cfg, _ = load_config(root)
+    trace = None
+    if _o.environ.get("HARNESS_MCP_TRACE"):
+        trace = open(_o.environ["HARNESS_MCP_TRACE"], "a")
+    def log(*a):
+        if trace:
+            trace.write(" ".join(str(x) for x in a) + "\n")
+            trace.flush()
     stdin = sys.stdin.buffer
     stdout = sys.stdout.buffer
-    buf = b""
+
     def handle(raw: bytes) -> None:
         line = raw.strip()
         if not line:
             return
+        log("recv:", line[:200])
         try:
             msg = json.loads(line.decode())
         except Exception:
@@ -86,17 +95,19 @@ def serve_stdio(root: str | Path = ".") -> int:
         except Exception as e:
             resp = {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32603, "message": str(e)[:500]}}
+        log("send id:", mid, method)
         stdout.write((json.dumps(resp) + "\n").encode())
         stdout.flush()
+    # NOTE: readline(), never read(n): read(n) blocks for a full buffer or EOF,
+    # but live MCP clients hold stdin open between messages -> instant deadlock.
     while True:
-        chunk = stdin.read(65536)
-        if not chunk:
+        try:
+            line = stdin.readline()
+        except Exception:
             break
-        buf += chunk
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            handle(line)
-    handle(buf)
+        if not line:
+            break
+        handle(line)
     return 0
 
 
