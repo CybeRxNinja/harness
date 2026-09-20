@@ -538,6 +538,8 @@ def rank(cands: list[dict], cfg: dict, need_tools: bool = False) -> list[dict]:
             continue
         if need_tools and st.get("no_tools"):
             continue
+        if _prov_cooling(c["provider"]):
+            continue
         meta = PROVIDERS.get(c["provider"], {})
         if meta.get("env") and not os.environ.get(meta["env"]):
             # keyless: only anonymous-capable free endpoints may attempt
@@ -566,7 +568,8 @@ def _retry_after_s(e: Exception) -> int:
 
 
 def _record(provider: str, model: str, ms: float, ok: bool, requested: str = "",
-            tools: bool = False, not_found: bool = False, rate_limited: int = 0) -> None:
+            tools: bool = False, not_found: bool = False, rate_limited: int = 0,
+            hard402: bool = False) -> None:
     s = _load_stats()
     key = f"{provider}|{model}"
     st = s.get(key, {"ewma_ms": 3000, "errors": 0})
@@ -580,6 +583,16 @@ def _record(provider: str, model: str, ms: float, ok: bool, requested: str = "",
         st.pop("no_tools", None)  # serves tools again: capability restored
     if not_found and tools:
         st["no_tools"] = True  # 404 on a tool request: route lacks tool support
+    if hard402:
+        # payment-required: cool the whole provider, this model will 402 too
+        consec = ((s.get("_prov402", {}) or {}).get(provider, {}) or {}).get("n", 0) + 1
+        s.setdefault("_prov402", {})[provider] = {
+            "n": consec,
+            "until": time.time() + (600 if consec >= 2 else 60),
+        }
+    elif ok:
+        if "_prov402" in s and provider in s["_prov402"]:
+            del s["_prov402"][provider]  # success clears provider-level stain
     s[key] = st
     if ok and requested:
         recent = s.get("_recent", [])
@@ -587,6 +600,30 @@ def _record(provider: str, model: str, ms: float, ok: bool, requested: str = "",
                        "ms": int(ms), "ts": int(time.time())})
         s["_recent"] = recent[-20:]
     _save_stats(s)
+
+
+def _prov_cooling(provider: str) -> bool:
+    """True while a provider is cooled down after repeated 402s."""
+    import time as _t
+    s = _load_stats()
+    until = ((s.get("_prov402", {}) or {}).get(provider, {}) or {}).get("until", 0)
+    return bool(until and until > _t.time())
+
+
+def _diversify(ordered: list[dict]) -> list[dict]:
+    """Round-robin by provider, preserving score order within each provider.
+
+    Prevents one broken provider from consuming the whole attempt budget.
+    """
+    buckets: dict[str, list[dict]] = {}
+    for c in ordered:
+        buckets.setdefault(c["provider"], []).append(c)
+    out: list[dict] = []
+    while any(buckets.values()):
+        for pname in list(buckets):
+            if buckets[pname]:
+                out.append(buckets[pname].pop(0))
+    return out
 
 
 def recent_routes(limit: int = 10) -> list[dict]:
@@ -653,7 +690,7 @@ def chat_stream(messages: list[dict], model: str = "auto-fastest", cfg: dict | N
         yield b"data: [DONE]\n\n"
         return
     errs: list[str] = []
-    for cand in ordered[: max(1, min(len(ordered), max_attempts))]:
+    for cand in _diversify(ordered)[: max(1, min(len(ordered), max_attempts))]:
         pname, mid = cand["provider"], cand["model"]
         meta = PROVIDERS.get(pname)
         if not meta or meta.get("native"):
@@ -683,8 +720,13 @@ def chat_stream(messages: list[dict], model: str = "auto-fastest", cfg: dict | N
         except Exception as e:  # noqa: BLE001 - failover path
             nf = "404" in str(e)
             ra = _retry_after_s(e) if "429" in str(e) else 0
+            is_free = mid.endswith(":free")
+            # 402 on a FREE route = provider-level trouble; 402 on paid = that
+            # model is out of reach (long model cooldown, no provider stain)
+            paid402 = "402" in str(e) and not is_free
             _record(pname, mid, 5000, False, model, tools=need, not_found=nf,
-                    rate_limited=ra or (60 if "429" in str(e) or "402" in str(e) else 0))
+                    rate_limited=ra or (60 if "429" in str(e) else (1800 if paid402 else 0)),
+                    hard402=("402" in str(e) and is_free))
             errs.append(f"{pname}/{mid}: {str(e)[:100]}")
             continue
     yield f'data: {json.dumps({"error": f"all providers failed for {model!r}: " + "; ".join(errs[:5])})}\n\n'.encode()
@@ -711,7 +753,7 @@ def chat(messages: list[dict], model: str = "auto-fastest", cfg: dict | None = N
         return {"role": "assistant", "content": f"[mock:{model}] echo: {str(last)[:500]}",
                 "_route": {"provider": "mock", "model": model, "mock": True}}
     errs: list[str] = []
-    for cand in ordered[: max(1, min(len(ordered), max_attempts))]:
+    for cand in _diversify(ordered)[: max(1, min(len(ordered), max_attempts))]:
         pname, mid = cand["provider"], cand["model"]
         meta = PROVIDERS.get(pname)
         if not meta or meta.get("native"):
@@ -734,8 +776,13 @@ def chat(messages: list[dict], model: str = "auto-fastest", cfg: dict | None = N
         except Exception as e:  # noqa: BLE001 - failover path
             nf = "404" in str(e)
             ra = _retry_after_s(e) if "429" in str(e) else 0
+            is_free = mid.endswith(":free")
+            # 402 on a FREE route = provider-level trouble; 402 on paid = that
+            # model is out of reach (long model cooldown, no provider stain)
+            paid402 = "402" in str(e) and not is_free
             _record(pname, mid, 5000, False, model, tools=need, not_found=nf,
-                    rate_limited=ra or (60 if "429" in str(e) or "402" in str(e) else 0))
+                    rate_limited=ra or (60 if "429" in str(e) else (1800 if paid402 else 0)),
+                    hard402=("402" in str(e) and is_free))
             errs.append(f"{pname}/{mid}: {str(e)[:100]}")
             continue
     raise RuntimeError(f"all providers failed for {model!r}: " + "; ".join(errs[:5]))

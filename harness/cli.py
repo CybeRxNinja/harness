@@ -324,37 +324,64 @@ def _ensure_serve(root: Path, port: int) -> None:
     raise RuntimeError(f"serve did not come up on :{port} (see {log})")
 
 
-def _find_tui() -> str | None:
-    import glob as _g
+def _find_opencode() -> str | None:
+    """Locate a stock `opencode` binary on PATH. No fork, no AppImage."""
     import shutil as _sh
-    cands = [_sh.which("harness-tui"), str(Path.home() / ".local" / "bin" / "harness-tui")]
-    # AppImages: single-file, no install (case-insensitive; release uses Harness_TUI-*)
-    for pat in ("harness-tui*.AppImage", "Harness_TUI*.AppImage", "*arness*.AppImage"):
-        cands += sorted(_g.glob(str(Path.home() / "Applications" / pat)))
-        cands += sorted(_g.glob(pat))
-    for cand in cands:
-        if cand and Path(cand).exists():
-            return cand
-    return None
-
-
-def _ensure_tmp() -> None:
-    """Bun-compiled TUI materializes native libs under TMPDIR. If it is not
-    writable (full /tmp is the classic failure), fall back to a cache dir."""
-    import tempfile as _t
-    tmp = os.environ.get("TMPDIR", "/tmp")
-    try:
-        with _t.TemporaryFile(dir=tmp):
-            return
-    except Exception:
-        fb = Path.home() / ".cache" / "harness-tmp"
-        fb.mkdir(parents=True, exist_ok=True)
-        os.environ["TMPDIR"] = str(fb)
+    return _sh.which("opencode")
 
 
 def cmd_mcp(args) -> int:
     from .mcp_server import serve_stdio
     return serve_stdio(_root(args))
+
+
+def _plugin_files() -> list[str]:
+    """Absolute path of the shipped v2 plugin module."""
+    from pathlib import Path as _P
+    return [str((_P(__file__).resolve().parent / "plugin" / "harness.ts").resolve())]
+
+
+def install_plugin() -> Path:
+    """Copy the shipped harness.ts server plugin into opencod's auto-loaded
+    plugins dir (~/.config/opencode/plugins/) and drop any legacy v1
+    'harness/plugin' specs from opencod.json. Returns the installed path.
+
+    Stock opencod v2 auto-loads every plugin from that dir, so no config entry
+    is required (the `plugin` array only stores legacy specs we prune here)."""
+    import json as _j
+    import shutil as _sh
+    plugdir = Path.home() / ".config" / "opencode" / "plugins"
+    if os.environ.get("XDG_CONFIG_HOME"):
+        plugdir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins"
+    plugdir.mkdir(parents=True, exist_ok=True)
+    src = Path(__file__).resolve().parent / "plugin" / "harness.ts"
+    if not src.exists():
+        raise FileNotFoundError("plugin source missing from install (dev: run from repo)")
+    dest_file = plugdir / "harness.ts"
+    _sh.copy2(src, dest_file)
+    dest = _opencode_config_path()
+    try:
+        cur = _j.loads(dest.read_text()) if dest.exists() else {}
+    except Exception:
+        cur = {}
+    plugs = cur.setdefault("plugin", [])
+    before = len(plugs)
+    plugs[:] = [p for p in plugs
+                if not (isinstance(p, str) and "harness/plugin" in p)]
+    if len(plugs) != before or not dest.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(_j.dumps(cur, indent=2) + "\n")
+    return dest_file
+
+
+def cmd_plugin(args) -> int:
+    if args.plugin_action == "install":
+        plug = install_plugin()
+        print(f"plugin installed at {plug} (stock opencod v2, no fork needed)")
+    elif args.plugin_action == "path":
+        for spec in _plugin_files():
+            print(spec)
+    return 0
 
 
 def cmd_tui(args) -> int:
@@ -363,28 +390,33 @@ def cmd_tui(args) -> int:
     ensure_seed_skills()
     root = _root(args)
     if args.dry_run:
-        print(f"would: ensure serve :{args.port}, merge {_opencode_config_path()}, exec harness-tui")
+        print(f"would: ensure serve :{args.port}, merge {_opencode_config_path()}, "
+              f"install plugin, exec opencode")
         return 0
     _ensure_serve(root, args.port)
     os.environ["HARNESS_TOKEN"] = ensure_token()
     os.environ.setdefault("HARNESS_URL", f"http://127.0.0.1:{args.port}")
-    _ensure_tmp()
     try:
         cfg_path = ensure_opencode_config()
     except Exception as e:
         print(f"harness: config merge failed ({e}) — continuing", file=sys.stderr)
         cfg_path = _opencode_config_path()
+    try:
+        plug = install_plugin()
+    except Exception as e:
+        print(f"harness: plugin install failed ({e}) — continuing", file=sys.stderr)
+        plug = Path(__file__).resolve().parent / "plugin" / "harness.ts"
     if args.setup_only:
         print(f"export HARNESS_TOKEN={os.environ['HARNESS_TOKEN']}")
         print(f"export HARNESS_URL={os.environ['HARNESS_URL']}")
         return 0
-    binary = _find_tui()
+    binary = _find_opencode()
     if not binary:
-        print("harness-tui binary not found. Get it via:")
-        print("  curl -fsSL https://raw.githubusercontent.com/CybeRxNinja/harness/main/install.sh | bash")
-        print(f"(opencode.json already wired at {cfg_path}; CLI fallback: harness chat)")
+        print("opencode binary not found. Install stock opencode, e.g.:")
+        print("  npm create opencode@latest   (or: npx opencode)")
+        print(f"(opencod.json wired at {cfg_path}; harness plugin at {plug}; CLI fallback: harness chat)")
         return 1
-    print(f"launching {binary} (serve :{args.port}, config {cfg_path})")
+    print(f"launching {binary} (serve :{args.port}, config + plugin wired)")
     os.execvp(binary, [binary])
 
 
@@ -399,7 +431,7 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--model", default="")
     c.add_argument("--auto", action="store_true")
     c.set_defaults(fn=cmd_chat)
-    s = sub.add_parser("serve", help="HTTP gateway (TUI-B talks here)")
+    s = sub.add_parser("serve", help="HTTP gateway (TUI and HTTP talk here)")
     s.add_argument("--port", type=int, default=8787)
     s.add_argument("--expose", action="store_true", help="bind 0.0.0.0 (warning: token auth still required)")
     s.add_argument("--stop", action="store_true", help="stop the running gateway")
@@ -446,7 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
     ro.add_argument("--provider", default="")
     ro.add_argument("--model", default="")
     ro.set_defaults(fn=cmd_router)
-    t = sub.add_parser("tui", help="one command: serve + config + launch harness-tui")
+    t = sub.add_parser("tui", help="serve + opencod config + plugin, then launch opencode")
     t.add_argument("--port", type=int, default=8787)
     t.add_argument("--dry-run", action="store_true")
     t.add_argument("--setup-only", action="store_true",
@@ -454,6 +486,9 @@ def build_parser() -> argparse.ArgumentParser:
     t.set_defaults(fn=cmd_tui)
     mc = sub.add_parser("mcp", help="run harness as an MCP stdio server (skills+memory tools)")
     mc.set_defaults(fn=cmd_mcp)
+    pl = sub.add_parser("plugin", help="opencode plugin (stock opencode, no fork)")
+    pl.add_argument("plugin_action", choices=["install", "path"])
+    pl.set_defaults(fn=cmd_plugin)
     return p
 
 
@@ -462,7 +497,7 @@ def main(argv=None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv and not argv[0].startswith("-") and argv[0] not in (
-            "chat", "serve", "doctor", "config", "skills", "memory", "checkpoint", "plan", "setup", "tui", "router", "mcp"):
+            "chat", "serve", "doctor", "config", "skills", "memory", "checkpoint", "plan", "setup", "tui", "router", "mcp", "plugin"):
         argv = ["chat", argv[0]] + argv[1:]
     args = build_parser().parse_args(argv)
     if not getattr(args, "cmd", None) and not hasattr(args, "fn"):

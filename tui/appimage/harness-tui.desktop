@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=Harness TUI
-Comment=All-in-one AI coding harness (opencode-based TUI driving the harness relay)
-Exec=harness-tui
-Icon=harness-tui
-Type=Application
-Categories=Development;Utility;
-Terminal=true
-StartupWMClass=harness-tui

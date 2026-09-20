@@ -35,8 +35,8 @@ def run(root: Path, verbose: bool = False) -> dict:
         c["router_top"] = r[0] if r else None
     except Exception as e:
         c["router_top"] = f"error: {e}"
-    tui_bin = shutil.which("harness-tui")
-    c["tui_binary"] = tui_bin or "missing (built by CI Releases; CLI fallback active)"
+    oc_bin = shutil.which("opencode")
+    c["opencode_binary"] = oc_bin or "missing (install stock opencod, e.g. `npm create opencode@latest`; CLI fallback: harness chat)"
     if verbose:
         c["budgets"] = cfg.get("budgets")
         c["categories"] = list((cfg.get("categories", {}) or {}).keys())

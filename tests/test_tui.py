@@ -18,18 +18,6 @@ def test_tui_config_merge(tmp_path, monkeypatch):
     assert d2 == d
 
 
-def test_find_tui_prefers_appimage(tmp_path, monkeypatch):
-    from harness import cli
-    home = tmp_path / "home"
-    apps = home / "Applications"
-    apps.mkdir(parents=True)
-    (apps / "harness-tui-x86_64.AppImage").write_text("x")
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr("shutil.which", lambda *a, **k: None)
-    found = cli._find_tui()
-    assert found is not None and found.endswith(".AppImage")
-
-
 def test_relay_baseurl_follows_port(tmp_path, monkeypatch):
     import json
     cfgdir = tmp_path / "cfg"
@@ -47,3 +35,12 @@ def test_relay_baseurl_follows_port(tmp_path, monkeypatch):
     d2 = json.loads((cfgdir / "opencode" / "opencode.json").read_text())
     assert d2["provider"]["harness"]["options"]["apiKey"] == "CUSTOM"
     assert d2["provider"]["harness"]["options"]["baseURL"] == "http://127.0.0.1:8787/v1"
+
+
+def test_find_opencode(tmp_path, monkeypatch):
+    from harness import cli
+    fake = tmp_path / "opencode"
+    fake.write_text("#!/bin/sh\ntrue\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr("shutil.which", lambda *a, **k: str(fake))
+    assert cli._find_opencode() == str(fake)

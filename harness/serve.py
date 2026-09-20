@@ -117,6 +117,16 @@ class Handler(BaseHTTPRequestHandler):
     def _auth(self) -> bool:
         if self.path in ("/health",):
             return True
+        # Localhost is trusted: the gateway binds 127.0.0.1 by default and
+        # opencode v2 does not forward provider apiKey headers for custom
+        # npm providers, so token auth cannot work from the TUI. Any local
+        # process already runs as the user. Non-loopback binds (--expose)
+        # still require the bearer token.
+        try:
+            if self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                return True
+        except Exception:
+            pass
         h = self.headers.get("Authorization", "")
         return h == f"Bearer {self.token}"
 
