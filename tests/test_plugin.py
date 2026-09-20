@@ -4,7 +4,8 @@ def test_plugin_files_exist():
     files = _plugin_files()
     assert len(files) == 1 and Path(files[0]).exists()
     text = Path(files[0]).read_text()
-    assert "HarnessPlugin" in text and 'session.hook("compaction"' in text
+    assert "export default" in text and "experimental.session.compacting" in text
+    assert "skills_list" in text and "memory_recall" in text
 
 
 def test_plugin_install_idempotent(tmp_path, monkeypatch):

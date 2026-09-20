@@ -158,29 +158,112 @@ const HarnessPlugin = {
       log(`skill seeding failed: ${String(e).slice(0, 120)}`)
     }
 
-    // Preserve durable project facts across session compaction. Documented
-    // v2 hook: returned hooks object with "experimental.session.compacting",
-    // receiving (input, output); output.context[] is appended to the
-    // compaction prompt before the summary LLM runs.
-    let compaction: Record<string, unknown> = {}
-    try {
-      const probe = await ctx.session?.hook?.("compaction", async () => {})
-      if (probe && typeof (probe as any).dispose === "function") {
-        await (probe as any).dispose()
+    // Native tools (no MCP hop): read skills + memory straight from disk.
+    // self-contained: works even with the gateway down.
+    const skillIndex = async (): Promise<{ name: string; description: string }[]> => {
+      const out: { name: string; description: string }[] = []
+      const home = process.env.HOME ?? ""
+      const { join, basename } = await import("node:path")
+      const roots = [`${home}/.harness/skills`]
+      for (const root of roots) {
+        const glob = new Bun.Glob("*/SKILL.md")
+        for await (const rel of glob.scan({ cwd: root, absolute: false })) {
+          try {
+            const text = await Bun.file(join(root, rel)).text()
+            const m = text.match(/^---\s*\n([\s\S]*?)\n---/)
+            let name = basename(rel.replace(/\/SKILL\.md$/, "")), desc = ""
+            for (const line of (m?.[1] ?? "").split("\n")) {
+              const i = line.indexOf(":")
+              if (i > 0) {
+                const k = line.slice(0, i).trim(), v = line.slice(i + 1).trim()
+                if (k === "name") name = v
+                if (k === "description") desc = v
+              }
+            }
+            out.push({ name, description: desc.slice(0, 300) || name })
+          } catch { /* skip unreadable */ }
+        }
       }
-      compaction = {
-        "experimental.session.compacting": async (input: any, output: any) => {
-          const sid = String(input?.sessionID ?? input?.sessionId ?? "")
-          const brief = await memoryBrief(sid, log)
-          if (brief && output && Array.isArray(output.context)) {
-            output.context.push(brief)
-          }
-        },
-      }
-    } catch (e) {
-      log(`compaction hook skipped: ${String(e).slice(0, 150)}`)
+      return out
     }
-    return compaction
+    const skillBody = async (name: string, subpath?: string): Promise<string> => {
+      const home = process.env.HOME ?? ""
+      const { join } = await import("node:path")
+      const base = join(home, ".harness", "skills")
+      const glob = new Bun.Glob(`*/${name}/SKILL.md`)
+      for await (const rel of glob.scan({ cwd: base, absolute: false })) {
+        const dir = join(base, rel.replace(/\/SKILL\.md$/, ""))
+        const target = subpath ? join(dir, subpath) : join(dir, "SKILL.md")
+        if (!target.startsWith(dir)) throw new Error("path escapes skill dir")
+        return (await Bun.file(target).text()).slice(0, 12000)
+      }
+      // fall back to bundled seeds inside the pip package
+      const r = await sh(["python3", "-c",
+        "import harness,os; print(os.path.join(os.path.dirname(harness.__file__),'data','skills'))"])
+      if (r.ok) {
+        const g2 = new Bun.Glob(`*/${name}/SKILL.md`)
+        for await (const rel of g2.scan({ cwd: r.text.trim(), absolute: false })) {
+          const dir = join(r.text.trim(), rel.replace(/\/SKILL\.md$/, ""))
+          const target = subpath ? join(dir, subpath) : join(dir, "SKILL.md")
+          if (!target.startsWith(dir)) throw new Error("path escapes skill dir")
+          return (await Bun.file(target).text()).slice(0, 12000)
+        }
+      }
+      throw new Error(`skill not found: ${name}`)
+    }
+    const recallLocal = async (query: string, projectDir: string): Promise<string> => {
+      const { Database } = await import("bun:sqlite").catch(() => ({}) as any)
+      if (!Database) return "(sqlite unavailable)"
+      const hits: string[] = []
+      for (const dbPath of [`${projectDir}/.opencode/harness/sessions.db`,
+                            `${process.env.HOME ?? ""}/.opencode/harness/sessions.db`]) {
+        try {
+          if (!(await Bun.file(dbPath).size)) continue
+          const db = new Database(dbPath, { readonly: true })
+          try {
+            const words = String(query || "").split(/\s+/).filter((w) => w.length > 2).slice(0, 5)
+            const like = words.length ? words.map(() => "text LIKE ?").join(" OR ") : "1=1"
+            const rows = db.query(`SELECT text, source FROM facts WHERE ${like} ORDER BY id DESC LIMIT 5`)
+              .all(...words.map((w) => `%${w}%`)) as any[]
+            for (const r of rows) hits.push(`- [${r.source}] ${String(r.text).slice(0, 200)}`)
+          } finally {
+            db.close()
+          }
+        } catch { /* unreadable db */ }
+        if (hits.length >= 5) break
+      }
+      return hits.join("\n") || "(nothing recalled — verify from the transcript instead)";
+    }
+
+    return {
+      tool: {
+        skills_list: {
+          description: "List available harness skills (name + when-to-use). Call first, then skill_view.",
+          inputSchema: { type: "object", properties: {} },
+          execute: async () => {
+            const items = await skillIndex()
+            return items.map((s) => `- ${s.name}: ${s.description}`).join("\n") || "(no skills installed)";
+          },
+        },
+        skill_view: {
+          description: "Load a harness skill SKILL.md (or a references/ file). Use before doing the task the skill covers.",
+          inputSchema: { type: "object", properties: { name: { type: "string" }, path: { type: "string" } }, required: ["name"] },
+          execute: async (args: any) => skillBody(String(args?.name ?? ""), args?.path ? String(args.path) : undefined),
+        },
+        memory_recall: {
+          description: "Recall durable harness facts relevant to a query. Verify before relying.",
+          inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+          execute: async (args: any) => recallLocal(String(args?.query ?? ""), cwd),
+        },
+      },
+      "experimental.session.compacting": async (input: any, output: any) => {
+        const sid = String(input?.sessionID ?? input?.sessionId ?? "")
+        const brief = await memoryBrief(sid, log)
+        if (brief && output && Array.isArray(output.context)) {
+          output.context.push(brief)
+        }
+      },
+    }
   },
 }
 

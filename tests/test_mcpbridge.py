@@ -42,11 +42,13 @@ def test_mcp_skill_view_and_recall(tmp_path, monkeypatch):
     assert isinstance(by_id[5]["result"]["content"][0]["text"], str)
 
 
-def test_merge_adds_mcp_block(tmp_path, monkeypatch):
+def test_merge_skips_mcp_block(tmp_path, monkeypatch):
+    # opencode gets skills as NATIVE plugin tools; the stdio MCP server is
+    # for non-opencode clients only, so the merge must not add it.
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     from harness.cli import ensure_opencode_config
     ensure_opencode_config()
     import json as _j
     d = _j.loads((tmp_path / "cfg" / "opencode" / "opencode.json").read_text())
-    assert d["mcp"]["harness-skills"]["type"] == "local"
-    assert d["mcp"]["harness-skills"]["command"][-3:] == ["-m", "harness", "mcp"]
+    assert "harness-skills" not in d.get("mcp", {})
+    assert "harness" in d.get("provider", {})

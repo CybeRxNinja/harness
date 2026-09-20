@@ -272,12 +272,15 @@ def ensure_opencode_config() -> str:
         for k, v in spec.items():
             node.setdefault(k, v)
     cur.setdefault("model", "harness/auto-fastest")
-    # harness skills as MCP tools (agent can list/view skills + recall memory)
-    mcp = cur.setdefault("mcp", {})
-    if "harness-skills" not in mcp:
-        mcp["harness-skills"] = {"type": "local",
-                                 "command": [sys.executable, "-m", "harness", "mcp"],
-                                 "enabled": True}
+    # NOTE: no mcp.harness-skills block here on purpose — the plugin exposes
+    # skills_list/skill_view/memory_recall as NATIVE tools (no extra process,
+    # no stdio framing to break). The stdio server (`harness mcp`) remains
+    # for non-opencode MCP clients only.
+    try:
+        if isinstance(cur.get("mcp"), dict) and "harness-skills" in cur["mcp"]:
+            del cur["mcp"]["harness-skills"]
+    except Exception:
+        pass
     dest.write_text(_j.dumps(cur, indent=2) + "\n")
     return str(dest)
 
