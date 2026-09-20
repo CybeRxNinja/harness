@@ -14,6 +14,13 @@ def test_plugin_files_exist():
     text = Path(files[0]).read_text()
     assert "export default" in text and "experimental.session.compacting" in text
     assert "skills_list" in text and "memory_recall" in text
+    # loader contract lock (opencode rejects anything else at startup with
+    # "must export a default definition with an id and an effect or setup
+    # function"): default-exported object with id + setup, tools built via
+    # the tool() helper (raw inputSchema entries are ignored by the registry).
+    assert 'id: "harness"' in text and "setup:" in text
+    assert "export default HarnessPlugin" in text
+    assert "tool({" in text and "inputSchema" not in text
 
 
 def test_plugin_install_idempotent(tmp_path, monkeypatch):

@@ -1,7 +1,7 @@
 // Harness plugin for STOCK opencode v2. No fork, no custom binary.
 // Install: `harness plugin install` copies this file to
 // ~/.config/opencode/plugins/ (auto-loaded, no config edit needed).
-import type { Plugin } from "@opencode-ai/plugin"
+import { tool, type PluginInput } from "@opencode-ai/plugin"
 
 const NEED_PROTO = 6
 const RELAY_PORT = process.env.HARNESS_PORT ?? "8787"
@@ -125,14 +125,15 @@ async function memoryBrief(sessionID: string, log: (m: string) => void): Promise
   }
 }
 
-// Plain object literal: no helper imports needed (Bun erases types;
-// a value-level import would fail when the resolved plugin package differs).
+// V2 shape: the module exports a function that receives ctx and returns
+// hooks. (@opencode-ai/plugin is pinned in ~/.config/opencode/package.json,
+// so the value-level `tool` import above always resolves for local plugins.)
 const HarnessPlugin = {
   id: "harness",
-  setup: async (ctx: any) => {
+  setup: async (ctx: PluginInput) => {
     const log = (m: string) => console.error(`[harness] ${m}`)
-    const cwd = process.cwd()
-    await ensureGateway(cwd)
+    const cwd = ctx.directory || process.cwd()
+    await ensureGateway(cwd, log)
 
     // Seed bundled skills into the opencode skill store so they are usable
     // without a hand-edited config. Provider / agents / MCP are NOT duplicated
@@ -237,24 +238,24 @@ const HarnessPlugin = {
 
     return {
       tool: {
-        skills_list: {
+        skills_list: tool({
           description: "List available harness skills (name + when-to-use). Call first, then skill_view.",
-          inputSchema: { type: "object", properties: {} },
+          args: {},
           execute: async () => {
             const items = await skillIndex()
             return items.map((s) => `- ${s.name}: ${s.description}`).join("\n") || "(no skills installed)";
           },
-        },
-        skill_view: {
+        }),
+        skill_view: tool({
           description: "Load a harness skill SKILL.md (or a references/ file). Use before doing the task the skill covers.",
-          inputSchema: { type: "object", properties: { name: { type: "string" }, path: { type: "string" } }, required: ["name"] },
-          execute: async (args: any) => skillBody(String(args?.name ?? ""), args?.path ? String(args.path) : undefined),
-        },
-        memory_recall: {
+          args: { name: tool.schema.string(), path: tool.schema.string().optional() },
+          execute: async (args) => skillBody(args.name, args.path),
+        }),
+        memory_recall: tool({
           description: "Recall durable harness facts relevant to a query. Verify before relying.",
-          inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-          execute: async (args: any) => recallLocal(String(args?.query ?? ""), cwd),
-        },
+          args: { query: tool.schema.string() },
+          execute: async (args, context) => recallLocal(args.query, context.directory || cwd),
+        }),
       },
       "tool.execute.after": async (input: any, output: any) => {
         // Lite RTK: condense oversized tool results in place. Errors and
@@ -297,11 +298,11 @@ const HarnessPlugin = {
           const before = raw.length, after = out.join("\n").length;
           if (after < before) {
             setText(output, out.join("\n") + `
-[condensed ${Math.round(100 * (1 - after / before))}% lite-rtk]`);
+  [condensed ${Math.round(100 * (1 - after / before))}% lite-rtk]`);
           }
         } catch { /* never break tool execution */ }
       },
-            "experimental.session.compacting": async (input: any, output: any) => {
+      "experimental.session.compacting": async (input: any, output: any) => {
         const sid = String(input?.sessionID ?? input?.sessionId ?? "")
         const brief = await memoryBrief(sid, log)
         if (brief && output && Array.isArray(output.context)) {
