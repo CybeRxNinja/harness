@@ -130,7 +130,7 @@ async function memoryBrief(sessionID: string, log: (m: string) => void): Promise
 // so the value-level `tool` import above always resolves for local plugins.)
 const HarnessPlugin = {
   id: "harness",
-  setup: async (ctx: PluginInput) => {
+  effect: async (ctx: PluginInput) => {
     const log = (m: string) => console.error(`[harness] ${m}`)
     const cwd = ctx.directory || process.cwd()
     await ensureGateway(cwd, log)
