@@ -6,11 +6,12 @@ skills, and memory that survives session compaction.
 ## Install
 
 ```bash
-pip install -e .                       # harness CLI (stdlib-only)
-harness setup                          # gateway token + seed skills
-harness plugin install                 # copies harness.ts -> ~/.config/opencode/plugins/
-opencode                               # stock opencod; the plugin auto-starts the gateway
+pip install git+https://github.com/CybeRxNinja/harness.git   # harness CLI (stdlib-only)
+harness plugin install --from-release plugin-v0.1            # no repo checkout needed
+opencode                                                     # stock opencode; the plugin auto-starts the gateway
 ```
+
+(From a checkout instead: `pip install -e .` then plain `harness plugin install`.)
 
 The plugin file lands at `~/.config/opencode/plugins/harness.ts` and is
 auto-loaded by opencod v2 — no entry in `opencod.json`'s `plugin` array is
