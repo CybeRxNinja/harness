@@ -39,9 +39,9 @@ eval "$(harness tui --setup-only)"   # prep a shell, then run `opencode`
    Bearer `HARNESS_TOKEN`) and injects them as compaction context, so durable
    facts survive the summary step.
 
-## What it does NOT do (those come from opencod.json)
+## What the plugin does NOT do (those come from opencod.json)
 
-Provider/agents/MCP are merged into `~/.config/opencode/opencode.json` by
+Provider/agents are merged into `~/.config/opencode/opencode.json` by
 `harness tui`/`harness setup` (`ensure_opencode_config`), not by the plugin:
 
 - `provider.harness` — the relay (`harness/auto-fastest`, `tag:coding`,
@@ -49,8 +49,22 @@ Provider/agents/MCP are merged into `~/.config/opencode/opencode.json` by
   `http://127.0.0.1:8787/v1`, key `{env:HARNESS_TOKEN}`.
 - `agent` — `orchestrator/ask/debug/review` + native `plan` (pinned to
   `harness/tag:reasoning`).
-- `mcp.harness-skills` — skills/memory MCP tools (`python -m harness mcp`)
-  (`skills_list`, `skill_view`, `memory_recall`, ...).
+
+Skills need no MCP hop: the plugin exposes `skills_list`/`skill_view`/
+`memory_recall` as native opencode tools. The stdio server
+(`harness mcp`) remains for non-opencode MCP clients only.
+
+## Uninstall
+
+```bash
+harness plugin uninstall   # removes plugin file + provider/agents/model (user keys untouched)
+harness serve --stop       # stop the gateway (optional)
+pip uninstall harness      # remove the CLI (optional; AppImage reinstalls on next launch)
+```
+
+Uninstall only removes harness-owned entries (agents whose model points at
+`harness/*`, the default model if it is `harness/*`). Anything you customized
+beyond that is left alone.
 
 ## Verify
 

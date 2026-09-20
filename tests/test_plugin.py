@@ -31,3 +31,10 @@ def test_plugin_install_idempotent(tmp_path, monkeypatch):
                        capture_output=True, text=True, timeout=60,
                        cwd="/home/jailbreaker20/Projects/harness")
     assert r.returncode == 0
+    r = subprocess.run([sys.executable, "-m", "harness", "plugin", "uninstall"],
+                       capture_output=True, text=True, timeout=60,
+                       cwd="/home/jailbreaker20/Projects/harness")
+    assert r.returncode == 0 and "removed provider.harness" in r.stdout
+    d = json.loads((_opencode_config_path()).read_text())
+    assert "harness" not in d.get("provider", {})
+    assert not (_P(_o.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins" / "harness.ts").exists()

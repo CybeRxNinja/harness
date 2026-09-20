@@ -377,10 +377,65 @@ def install_plugin() -> Path:
     return dest_file
 
 
+def uninstall_plugin() -> list[str]:
+    """Remove everything `install` manages: the plugin file plus the merged
+    provider/agents/model/mcp blocks. User-owned keys are never touched.
+    Returns human-readable lines of what was removed."""
+    import json as _j
+    done: list[str] = []
+    plugdir = Path.home() / ".config" / "opencode" / "plugins"
+    if os.environ.get("XDG_CONFIG_HOME"):
+        plugdir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins"
+    target = plugdir / "harness.ts"
+    if target.exists():
+        target.unlink()
+        done.append(f"removed plugin file {target}")
+    dest = _opencode_config_path()
+    try:
+        cur = _j.loads(dest.read_text()) if dest.exists() else {}
+    except Exception:
+        cur = {}
+    changed = False
+    if isinstance(cur.get("provider"), dict) and "harness" in cur["provider"]:
+        del cur["provider"]["harness"]
+        done.append("removed provider.harness")
+        changed = True
+    if isinstance(cur.get("agent"), dict):
+        for name in ("orchestrator", "ask", "debug", "review", "plan"):
+            if name in cur["agent"] and isinstance(cur["agent"][name], dict) \
+                    and str(cur["agent"][name].get("model", "")).startswith("harness/"):
+                del cur["agent"][name]
+                done.append(f"removed agent.{name}")
+                changed = True
+    if str(cur.get("model", "")).startswith("harness/"):
+        cur.pop("model", None)
+        done.append("removed default model (was harness/*)")
+        changed = True
+    if isinstance(cur.get("mcp"), dict) and "harness-skills" in cur["mcp"]:
+        del cur["mcp"]["harness-skills"]
+        done.append("removed mcp.harness-skills")
+        changed = True
+    if changed:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(_j.dumps(cur, indent=2) + "\n")
+    if not done:
+        done.append("nothing harness-owned found")
+    return done
+
+
 def cmd_plugin(args) -> int:
     if args.plugin_action == "install":
         plug = install_plugin()
+        try:
+            ensure_opencode_config()
+        except Exception as e:
+            print(f"harness: provider merge failed ({e}) — continuing", file=sys.stderr)
         print(f"plugin installed at {plug} (stock opencod v2, no fork needed)")
+        print("restart opencode/TUI to load it; gateway starts on demand")
+    elif args.plugin_action == "uninstall":
+        for line in uninstall_plugin():
+            print(line)
+        print("optional: stop gateway (`harness serve --stop`), remove CLI (`pip uninstall harness`)")
     elif args.plugin_action == "path":
         for spec in _plugin_files():
             print(spec)
@@ -490,7 +545,7 @@ def build_parser() -> argparse.ArgumentParser:
     mc = sub.add_parser("mcp", help="run harness as an MCP stdio server (skills+memory tools)")
     mc.set_defaults(fn=cmd_mcp)
     pl = sub.add_parser("plugin", help="opencode plugin (stock opencode, no fork)")
-    pl.add_argument("plugin_action", choices=["install", "path"])
+    pl.add_argument("plugin_action", choices=["install", "uninstall", "path"])
     pl.set_defaults(fn=cmd_plugin)
     return p
 
