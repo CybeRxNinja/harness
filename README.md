@@ -24,7 +24,7 @@ Zero keys needed to start (MOCK/offline mode); add one to go live:
 export OPENROUTER_API_KEY=sk-...   # also: GROQ, CEREBRAS, NVIDIA, GOOGLE, KILO, OPENCODE, OLLAMA_BASE_URL
 ```
 
-First launch from a project dir wires `opencod.json` (provider + agents + MCP)
+First launch from a project dir wires `opencod.json` (provider + agents)
 into `~/.config/opencode/opencode.json` — backed up, never clobbered. The
 gateway is rooted at the current directory; switching directories restarts it
 (sessions persist per directory under `<project>/.opencode/harness/`).
@@ -70,9 +70,9 @@ A single stock-opencod v2 plugin (no fork). Once installed it:
 - on `experimental.session.compacting`, injects a recalled memory brief into the
   compaction summary so durable project facts survive a condensed transcript.
 
-Provider definitions, harness agents, and the `harness-skills` MCP all come from
-`opencod.json` (merged by `harness tui`/`harness setup`); the plugin does not
-duplicate them. See `docs/plugin.md`.
+Provider definitions and harness agents come from
+`opencod.json` (merged by `harness tui`/`harness setup`); skills surface as
+native plugin tools, no MCP hop. See `docs/plugin.md`.
 
 ## Repo layout
 

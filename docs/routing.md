@@ -8,6 +8,17 @@ QoS ranking: `quality × target/(target+ewma) × 0.5^errors`, 60s cooldown after
 requests skip models flagged `no_tools`. Free-tier OpenRouter keys are
 auto-detected (`/v1/auth/key`) and restricted to `:free` endpoints (paid 402s).
 
+## Providers beyond keys
+`opencode` (Zen, `OPENCODE_API_KEY`, base `https://opencode.ai/zen/v1`) and
+`kilo` (`KILO_API_KEY`, base `https://api.kilo.ai/api/gateway`, key optional —
+anonymous `:free` works keyless) are first-class providers with per-provider
+model-ID maps. Attempt ordering is provider-diverse (round-robin by provider,
+score order within) so one dead provider can't eat the whole attempt budget.
+
+402 handling is precise: 402 on a `:free` route stains the whole provider
+(10 min cooldown); 402 on paid routes cools only that model (30 min). Retry-After
+on 429s is honored (capped 300s). Every failure returns the full attempt trail.
+
 ## Free tier (best-of-free first)
 Groups `free-giant/reasoner/glm/coder/coder-qwen/swift/general` map to $0
 endpoints (OpenRouter `:free`, Kilo gateway incl. anonymous, Groq/Cerebras

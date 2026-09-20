@@ -5,7 +5,8 @@ set -euo pipefail
 # bootstrap, seed-skill registration, and session-compaction memory recall
 # inside stock opencod.
 REPO="${HARNESS_REPO:-CybeRxNinja/harness}"
-python3 -m pip install -e . --break-system-packages 2>/dev/null || python3 -m pip install -e . 2>/dev/null || python3 -m pip install .
+python3 -m pip install --break-system-packages "git+https://github.com/${REPO}.git" 2>/dev/null \
+  || python3 -m pip install "git+https://github.com/${REPO}.git"
 mkdir -p ~/.harness
 # Seed global skills, mint the gateway token, and install the server plugin
 # (harness.ts -> ~/.config/opencode/plugins/, auto-loaded by opencod v2).
