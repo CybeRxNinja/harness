@@ -272,6 +272,9 @@ def ensure_opencode_config() -> str:
         for k, v in spec.items():
             node.setdefault(k, v)
     cur.setdefault("model", "harness/auto-fastest")
+    # LSP on unless the user already decided (true enables built-ins;
+    # explicit false/object is always respected).
+    cur.setdefault("lsp", True)
     # NOTE: no mcp.harness-skills block here on purpose — the plugin exposes
     # skills_list/skill_view/memory_recall as NATIVE tools (no extra process,
     # no stdio framing to break). The stdio server (`harness mcp`) remains
