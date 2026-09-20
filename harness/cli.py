@@ -344,6 +344,31 @@ def _plugin_files() -> list[str]:
     return [str((_P(__file__).resolve().parent / "plugin" / "harness.ts").resolve())]
 
 
+def download_plugin(release: str = "latest") -> Path:
+    """Fetch harness.ts from a GitHub release asset into the plugins dir.
+    No repo checkout needed — pairs with the pip/AppImage CLI install."""
+    import json as _j
+    import urllib.request as _u
+    api = ("https://api.github.com/repos/CybeRxNinja/harness/releases/latest"
+           if release in ("latest", "") else
+           f"https://api.github.com/repos/CybeRxNinja/harness/releases/tags/{release}")
+    with _u.urlopen(api, timeout=30) as r:
+        rel = _j.loads(r.read().decode())
+    tag = rel.get("tag_name", release)
+    asset = next((a for a in rel.get("assets", []) if a.get("name") == "harness.ts"), None)
+    if asset is None:
+        raise ValueError(f"no harness.ts asset in release {tag}")
+    plugdir = Path.home() / ".config" / "opencode" / "plugins"
+    if os.environ.get("XDG_CONFIG_HOME"):
+        plugdir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins"
+    plugdir.mkdir(parents=True, exist_ok=True)
+    dest_file = plugdir / "harness.ts"
+    with _u.urlopen(asset["browser_download_url"], timeout=120) as r:
+        dest_file.write_bytes(r.read())
+    print(f"plugin {tag} downloaded to {dest_file}")
+    return dest_file
+
+
 def install_plugin() -> Path:
     """Copy the shipped harness.ts server plugin into opencod's auto-loaded
     plugins dir (~/.config/opencode/plugins/) and drop any legacy v1
@@ -425,7 +450,11 @@ def uninstall_plugin() -> list[str]:
 
 def cmd_plugin(args) -> int:
     if args.plugin_action == "install":
-        plug = install_plugin()
+        if getattr(args, "from_release", ""):
+            download_plugin(args.from_release)
+            plug = _opencode_config_path().parent / "plugins" / "harness.ts"
+        else:
+            plug = install_plugin()
         try:
             ensure_opencode_config()
         except Exception as e:
@@ -546,6 +575,8 @@ def build_parser() -> argparse.ArgumentParser:
     mc.set_defaults(fn=cmd_mcp)
     pl = sub.add_parser("plugin", help="opencode plugin (stock opencode, no fork)")
     pl.add_argument("plugin_action", choices=["install", "uninstall", "path"])
+    pl.add_argument("--from-release", default="",
+                    help="install harness.ts from a GitHub release instead (e.g. --from-release plugin-v0.1, default latest)")
     pl.set_defaults(fn=cmd_plugin)
     return p
 
