@@ -9,6 +9,9 @@ license = { text = "MIT" }
 [project.scripts]
 harness = "harness.cli:main"
 
+[project.optional-dependencies]
+test = ["pytest"]
+
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
