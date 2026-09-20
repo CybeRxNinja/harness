@@ -7,7 +7,7 @@ skills, and memory that survives session compaction.
 
 ```bash
 pip install git+https://github.com/CybeRxNinja/harness.git   # harness CLI (stdlib-only)
-harness plugin install --from-release plugin-v0.1            # no repo checkout needed
+harness plugin install --from-release plugin-v0.2            # no repo checkout needed
 opencode                                                     # stock opencode; the plugin auto-starts the gateway
 ```
 
