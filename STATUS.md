@@ -25,6 +25,32 @@ future-host degradation, the TUI panel surface, and entrypoint parsing).
   stderr. Verified live after install: `ask` and `review` answer with the same
   free model that used to 403.
 
+### 0e. Reworked: TUI panel is a Kilo-style stats sidebar, not a layout change (2026-09-21)
+- The first cut (`session.panel` + chip + sidebar rows) was rejected: it docked a
+  host-owned overlay and rearranged the screen. Recovered the old Kilo-format
+  panel from git history (`tui/plugins/harness-panels.tsx` @ da709be — "Context/
+  Usage/Models/Todo sections, Model/Steps/Cost rows") and rebuilt it inside
+  opencode's **existing** sidebar: no routes, no overlay, no replaced slots.
+- Sections (accordion, one expanded at a time because the sidebar is a short
+  fixed viewport that does not scroll): Context (`9,603 / 1,048,576 (1%)` +
+  cost), Token usage (in/out/reasoning/cache read/cache write/cost), Models
+  (provider groups with available-model counts, then `model steps cost`), Todo,
+  Agents + Skills, Memory. Footer chip shows `harness · 9.6k tok · $0.00` and
+  toggles the sidebar; `ctrl+g` / `/harness` / `/harness-refresh` commands.
+- Live-verified by driving the real TUI in a pty and reconstructing the screen:
+  the panel renders real numbers for a session (9,603 in / 31 out / 1,693
+  reasoning, 1% of a 1,048,576-token window, matching opencode's own readout),
+  and a real SGR mouse click on a collapsed header expands it (Context folds,
+  Token usage opens with its rows).
+- Three real bugs found only by reading the rendered screen: (1) `session.sync()`
+  invalidates the store, so `get()` on the same tick returned nothing — the panel
+  was all empty sections until the reads moved before the syncs; (2) Solid
+  re-runs tracked JSX expressions rather than the render body, so body-computed
+  row arrays froze at the first paint (`window … (limit unknown)`); (3) the
+  sidebar does not scroll, so all-expanded hid the lower sections — hence the
+  accordion. Load failures now surface in the panel itself, because cli-side
+  `console.error` never reaches opencode's log.
+
 ### 0d. Added: harness TUI views — side panel, chip, sidebar rows (2026-09-21)
 - The sidebar renders **only plugin contributions**, so it was genuinely empty
   with nothing claiming `sidebar.content`. `tui.tsx` now contributes: a footer

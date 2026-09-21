@@ -55,46 +55,64 @@ nothing — any other returned value is called as a cleanup function and kills
 plugin activation. The file therefore has no imports and returns nothing; see
 `harness/plugin/README.md` for the full contract.
 
-## TUI views (the side panel)
+## TUI views (a stats panel in the sidebar)
 
-`tui.tsx` is the plugin's TUI half. It contributes:
+`tui.tsx` is the plugin's TUI half. It fills **opencode's existing sidebar** with
+a Kilo-style stats/info panel and adds a small footer chip — it deliberately does
+not rearrange the TUI: no routes, no docked overlay, no replaced slots.
 
-| view | where | what it shows |
+| view | slot | what it shows |
 | --- | --- | --- |
-| chip | `home.footer.status` | `harness · N skills · M facts` — click opens the panel |
-| side panel | `session.panel` | skills + memory views, opened with `ctrl+g` or `/harness` |
-| sidebar rows | `sidebar.content` / `sidebar.footer` | harness summary + a `ctrl+g side panel` hint |
+| chip | `home.footer.status` | `harness · 9.6k tok · $0.00` — click toggles the sidebar (with no session yet it reads `harness · click for stats`, since the skill/fact stores are location-scoped and empty at the default location) |
+| stats panel | `sidebar.content` | the sections below |
+| hint | `sidebar.footer` | `harness · /harness · click a header to fold` |
 
 ```
-ctrl+g          open the harness side panel (palette: "Harness: open panel")
-/harness        same, from the prompt (/hp is an alias)
-/harness-refresh  re-scan skills + memory (/hr)
-s / m           switch between the skills and memory views
-f / esc         fullscreen / close the panel
+ctrl+g              toggle the stats sidebar (palette: "Harness: toggle stats sidebar")
+/harness            same, from the prompt (/hp is an alias)
+/harness-refresh    re-scan everything now (/hr)
+click a header      expand that section (one at a time — accordion)
 ```
 
-The header counts **harness skills only** (the skill store also holds opencode's
-builtins, so "13 skills" above 11 listed rows would read like a bug). Counts
-show `scanning skills + memory…` until the first scan lands.
+The sidebar is a short, fixed viewport (it does not scroll), so exactly one
+section shows its detail rows and the rest keep a one-line headline — every stat
+stays visible at a glance, and a click swaps which one is expanded.
+
+| section | rows | source |
+| --- | --- | --- |
+| header | session id, agent · model | `data.session.get(sid)` |
+| Context | in/out, reasoning, cache, `window 9,603 / 1,048,576 (1%)`, cost | `session.tokens` + the provider's `models[id].limit.context` |
+| Token usage | Input / Output / Reasoning / Cache read / Cache write / Cost | `session.tokens` |
+| Models | per provider: available model count, then `model steps cost` | assistant messages grouped by provider/model |
+| Todo | `○ ◐ ●` + text, this session only | opencode's `todo` table (read-only) |
+| Agents + Skills | the 11 harness skills, then agents | `location.skill` / `location.agent` after `sync()` |
+| Memory | durable facts for the project | the same `sessions.db` the server half uses |
 
 **"The side panel is empty"** — the sidebar renders *only plugin
-contributions*, so with no plugin claiming `sidebar.content` it is genuinely
-empty; harness now fills it (and repeat `harness plugin install` if you are on
-an install from before this shipped). If your opencode hides the sidebar, the
-command palette has `Show sidebar` (`ctrl+x` then `b`). The docked panel is the
-`session.panel` slot: opencode owns its size, focus and full-screen behaviour,
-and keeps narrow terminals full-screen — so on a narrow terminal `f` has no
-effect until there is room for a side panel.
+contributions*, so with nothing claiming `sidebar.content` it is genuinely
+empty; harness now fills it (re-run `harness plugin install` on an older
+install). If your opencode hides the sidebar, the palette has `Show sidebar`
+(`ctrl+x` then `b`). Note opencode puts its own context block at the top of the
+sidebar — ours sits underneath it.
 
 Implementation notes worth keeping (all probed against opencode v2.0.8):
-`ctx.keymap.layer` throws `Keymap.Provider is missing` unless it is called from
-inside a slot's render component, so the commands are registered from the `app`
-slot; state lives in `ctx.storage.memory` (a reactive store — importing
-`solid-js` would load a second instance and break reactivity); and `require` /
-`Bun` are **not** defined in the TUI plugin scope, so file and SQLite access use
-dynamic `import("node:fs")` / `import("bun:sqlite")`. Skills come from
-`ctx.data.location.skill` after `sync()`, facts from the same `sessions.db` the
-server half uses.
+
+- `ctx.keymap.layer` throws `Keymap.Provider is missing` unless called from
+  inside a slot's render component, so commands register from the `app` slot.
+- State lives in `ctx.storage.memory` (a reactive store). Importing `solid-js`
+  would load a second instance and break reactivity.
+- **Solid re-runs tracked JSX expressions, not the render body.** Detail rows are
+  therefore built inside the JSX expression and each closure reads a tracked
+  value; computing the array in the body froze it at the first paint and showed
+  stale stats (`window … (limit unknown)`) forever.
+- **`session.sync()` invalidates the store** and repopulates it asynchronously,
+  so `session.get(sid)` on the same tick returns nothing — read first, sync at
+  the end (that produced a panel of empty sections at first).
+- `require` and `Bun` are **not** defined in the TUI plugin scope; file and
+  SQLite access use dynamic `import("node:fs")` / `import("bun:sqlite")`.
+- Counts are harness-only for skills (the store also holds opencode's builtins,
+  so “13 skills” above 11 listed rows reads like a bug), and a failed load is
+  shown in the panel because cli-side `console.error` never reaches the log.
 
 ## What the plugin does NOT do (those come from opencode.json)
 

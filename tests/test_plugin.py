@@ -508,46 +508,68 @@ def test_plugin_files_exist():
     assert not re.search(r"^\s*import\s+(type\s+)?[{\*\w]", tui, re.M), "TUI plugin must not use static imports"
 
 
-def test_tui_plugin_panel_surface():
-    """The TUI entrypoint: footer chip, side panel, sidebar rows, commands.
+def test_tui_plugin_is_a_sidebar_panel_not_a_layout_change():
+    """The TUI entrypoint fills opencode's EXISTING sidebar with the stats panel.
 
     Contract notes these lock (all probed live against opencode v2.0.8):
       * `sidebar.content` renders only plugin contributions — an install that
         registers nothing there leaves the sidebar empty.
       * `keymap.layer` throws "Keymap.Provider is missing" unless it is called
-        from inside a slot's render component, so the commands are registered
-        from the `app` slot.
+        from inside a slot's render component, so commands register from the
+        `app` slot.
+      * Data stores are lazy: `sync()` must be called before `list()` yields
+        anything, and session stats come from `data.session.get(sid)`.
       * state comes from `ctx.storage.memory` (a reactive store); importing
-        solid-js would load a second instance and break reactivity, and the
-        server-side plugin registry cannot resolve static specifiers.
+        solid-js would load a second instance and break reactivity.
       * `require` and `Bun` are NOT defined in the TUI plugin scope, so file and
         sqlite access must go through dynamic `import()`.
     """
     from harness.cli import _plugin_files
     tui = Path(_plugin_files()[1]).read_text()
 
-    # footer chip stays, and is now clickable -> opens the panel
-    assert 'append: "home.footer.status"' in tui
-    assert "onMouseDown" in tui
-
-    # side panel: a named contribution + the command that opens it
-    assert 'append: "session.panel"' in tui
-    assert "panel?.open?.(PANEL)" in tui, "the panel must be opened by name"
-    assert "panel?.name !== PANEL" in tui, "render only for our own panel"
-    assert "toggleFullscreen" in tui and "panel?.close?.()" in tui
-
-    # sidebar (empty without a plugin row) + its footer
+    # the panel lives in the sidebar the TUI already has
     assert 'append: "sidebar.content"' in tui
     assert 'append: "sidebar.footer"' in tui
 
-    # commands: palette + slash, registered from a slot because keymap needs the
-    # Provider; keys are panel-scoped so they cannot hijack the prompt
+    # and nothing here rearranges opencode: no docked session panel (host-owned
+    # overlay), no routes, no slot replacement
+    assert "session.panel" not in tui, "the stats panel must not dock an overlay"
+    assert "router.register" not in tui, "no custom routes"
+    assert not re.search(r"\breplace:\s*\"", tui), "append only; never take over a slot"
+
+    # footer chip: headline stats, click toggles the sidebar it lives in
+    assert 'append: "home.footer.status"' in tui
+    assert "onMouseDown" in tui
+    assert 'dispatch?.("session.sidebar.toggle")' in tui
+
+    # commands: palette + slash, registered from a slot (keymap needs the Provider)
     assert "keymap?.layer" in tui and 'bind: "ctrl+g"' in tui
     assert 'slash: { name: "harness", aliases: ["hp"] }' in tui
-    assert 'bind: "m"' in tui and 'bind: "escape"' in tui
+    assert 'slash: { name: "harness-refresh", aliases: ["hr"] }' in tui
 
-    # data sources: the seeded skill store, plus facts read off disk
-    assert "data?.location?.skill" in tui
+    # the Kilo sections, all of them
+    for name, title in (("context", "Context"), ("usage", "Token usage"), ("models", "Models"),
+                        ("todo", "Todo"), ("agents", "Agents + Skills"), ("memory", "Memory")):
+        assert f'name="{name}"' in tui and f'title="{title}"' in tui, f"{name}/{title}"
+
+    # accordion: the sidebar viewport is short and does not scroll, so exactly
+    # one section shows details and the rest keep a one-line headline
+    assert "const isOpen = (name: string) => view.open === name" in tui
+    assert 'd.open = d.open === props.name ? "" : props.name' in tui
+    # every detail closure must read a tracked value (see the Rows docstring)
+    assert tui.count("void view.rev") >= 8, tui.count("void view.rev")
+
+    # the context window comes from the provider's model limits
+    assert "provEntry?.models?.[modelName]" in tui and "limit?.context" in tui
+
+    # stat sources: session tokens/cost, messages for the model step rows, the
+    # lazily-synced location stores, todos from opencode's DB, facts from ours
+    assert "data_?.session?.get?.(sessionID)" in tui
+    assert "data_?.session?.message?.list?.(sessionID)" in tui
+    for store in ("model", "provider", "agent", "skill"):
+        assert f"store?.{store}?.sync?.(loc)" in tui and f"store?.{store}?.list?.(loc)" in tui, store
+    assert "SELECT content, status FROM todo WHERE session_id" in tui
+    assert "SELECT text FROM facts ORDER BY id DESC" in tui
     assert 'await import("node:fs")' in tui and 'await import("bun:sqlite")' in tui
 
     # reactive view state without a signal import, and a cleanup function
@@ -556,14 +578,28 @@ def test_tui_plugin_panel_surface():
     assert not re.search(r"^\s*import\s+(type\s+)?[{\*\w]", tui, re.M), "TUI plugin must not use static imports"
 
 
-def test_plugin_side_panel_counts_only_harness_skills():
-    """The panel lists harness-* skills, so its count must be the harness count —
-    a header reading "13 skills" above 11 listed rows reads like a bug (the
-    store also holds 2 builtin skills)."""
+def test_tui_panel_counts_and_repaints():
+    """Two bugs found by reading the rendered screen:
+
+    1. The header counted every skill in the store (13, including opencode's
+       builtins) above the 11 harness rows actually listed — so the count is
+       filtered to harness-* at load time.
+    2. The stats rows live in a plain object, so a store update that changed no
+       tracked value did not repaint the panel: it kept the snapshot painted
+       before the first load ("no tokens reported yet") even after the data
+       arrived. A revision counter the render reads fixes that.
+    """
     from harness.cli import _plugin_files
     tui = Path(_plugin_files()[1]).read_text()
-    assert "d.skills = data.skills.filter(isHarness).length" in tui
-    assert "const harnessSkills = () => data.skills.filter(isHarness)" in tui
+    assert "s.startsWith(HARNESS_PREFIX)" in tui, "count harness skills only"
+    assert "d.rev = Number(d.rev ?? 0) + 1" in tui, "loads must notify the store"
+    assert "view.rev === 0 || loading" in tui, "the render must read the revision"
+    # Solid re-runs tracked JSX expressions, not the render body: detail rows must
+    # be built inside the JSX expression, or they freeze at the first paint
+    assert "{(props.lines().length ? props.lines() : [props.empty]).map" in tui
+    # a failed load surfaces in the panel (cli-side console.error is not logged)
+    assert 'd.note = notes[0] ?? ""' in tui
+    assert "view.note ? cut(view.note, 46)" in tui
 
 
 # Parses each entrypoint with Bun's transpiler (JSX-aware, no module
