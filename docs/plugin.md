@@ -8,7 +8,7 @@ no relay: models always come from **your** opencode providers.
 
 ```bash
 pip install git+https://github.com/CybeRxNinja/harness.git   # harness CLI (stdlib-only)
-harness plugin install --from-release plugin-v0.2            # no repo checkout needed
+harness plugin install --from-release latest                 # no repo checkout needed
 opencode                                                     # stock opencode; the plugin auto-loads
 ```
 
@@ -81,15 +81,22 @@ beyond that is left alone.
 
 ## Troubleshooting
 
-**"OpenCode's free tier can only be used from within OpenCode"** — this is
-zen/opencode's server-side gate, not a plugin bug. The free-tier endpoint
-accepts a request only if its tool list advertises a tool literally named
-`shell` (verified by replaying captured requests: `shell` present → 200,
-renamed/fake tool or only read tools → `FreeTierError`). Agents whose
-`permission.bash` is `deny` (e.g. the built-in `ask`) never get a shell tool,
-so *any* free model fails under them. `build`/`plan`/`orchestrator` include
-`shell` and work. Fix: run free models with a shell-capable agent, or give the
-agent `"bash": "allow"`, or use a paid key for read-only agents.
+**"OpenCode's free tier can only be used from within OpenCode"** — zen's
+server-side gate, not a plugin bug. The free-tier endpoint accepts a request
+only if its tool list advertises a tool literally named `shell` (verified by
+replaying captured requests: `shell` present → 200, renamed/fake tool or only
+read tools → `FreeTierError`). opencode only advertises `shell` when the
+agent's `permission.bash` is not `deny`, so **any** agent that denies bash —
+including a read-only one — makes every free model 403.
+
+Harness used to ship its read-only agents (`ask`, `review`) with
+`"bash": "deny"`, which is why free models failed under them. They now use
+`"bash": "ask"`: the shell tool is advertised (so free models work) while
+commands still need per-command approval, and `edit: deny` keeps writes off.
+`harness plugin install` migrates an existing install (the old `deny` value is
+rewritten to `ask` and reported on stderr); an agent of your own is never
+touched. If a custom agent still trips this, use a shell-capable agent, set
+`"bash": "ask"` on it, or use a paid key.
 
 **The TUI Plugins panel lists only `features.tui` plugins** — that flag is set
 only when the plugin has a `tui` entrypoint. Harness ships one
@@ -100,6 +107,15 @@ older release that dropped a bare `harness.ts`, re-run `harness plugin install`
 — it replaces the single file with the directory layout and removes the stale
 file. Server-side activation can always be verified via `opencode api get
 /api/plugin` (or `GET /api/plugin` with basic auth against `opencode serve`).
+
+Releases publish both entrypoints as assets — `server.ts` (same file as
+`harness.ts`, under its installed name), `harness.ts` (kept for older CLIs) and
+`tui.tsx` — added by `.github/workflows/release.yml` on any `plugin-v*` tag.
+`--from-release latest` resolves the newest `plugin-v*` release rather than
+GitHub's `releases/latest`, which is just the most recently published release
+(the repo also publishes TUI binary releases with no plugin assets). Releases
+before this one shipped `harness.ts` only: the install then has no `tui.tsx`,
+and the CLI says so on stderr instead of failing silently.
 
 **"Update available" even though the GitHub releases page shows nothing newer** —
 opencode's own updater, not the plugin. The update check runs on every TUI

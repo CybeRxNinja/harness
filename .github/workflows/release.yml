@@ -1,0 +1,65 @@
+name: release
+# Publishing a `plugin-v*` tag attaches the plugin entrypoints to a GitHub
+# release so `harness plugin install --from-release` works with no checkout.
+# BOTH entrypoints must ship: opencode sets features.tui (and therefore lists
+# the plugin in the TUI Plugins panel) only when a plugin directory has a `tui`
+# entrypoint — a release carrying server.ts alone installs server-only and the
+# plugin silently stays out of the panel. server.ts is the harness.ts source
+# under its installed name; harness.ts is kept as an asset for older CLIs.
+on:
+  push:
+    tags: ["plugin-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e ".[test]"
+      # Gate the release on the plugin tests: entrypoint contract, loader shape,
+      # tool visibility and the install layout.
+      - run: python -m pytest -q tests/test_plugin.py tests/test_agents.py
+        env:
+          HARNESS_MOCK: "1"
+      - name: Collect assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp harness/plugin/harness.ts dist/server.ts
+          cp harness/plugin/harness.ts dist/harness.ts   # legacy asset name
+          cp harness/plugin/tui.tsx dist/tui.tsx
+          test -s dist/server.ts && test -s dist/tui.tsx
+          grep -q 'export default' dist/server.ts
+          grep -q 'ui.slot' dist/tui.tsx   # TUI entrypoint must register a slot
+          ls -l dist
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/server.ts dist/harness.ts dist/tui.tsx --clobber
+          else
+            gh release create "$TAG" dist/server.ts dist/harness.ts dist/tui.tsx \
+              --title "Harness plugin $TAG (stock opencode v2)" \
+              --generate-notes
+          fi
+      - name: Verify the published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" --json assets \
+            --jq '.assets[].name' | sort > /tmp/published.txt
+          printf 'harness.ts\nserver.ts\ntui.tsx\n' > /tmp/expected.txt
+          if ! diff -u /tmp/expected.txt /tmp/published.txt; then
+            echo "::error::release $GITHUB_REF_NAME is missing plugin assets"
+            exit 1
+          fi

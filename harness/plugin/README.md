@@ -1,8 +1,22 @@
 # Harness opencode plugin (v2 API, stock opencode, no fork)
 
-Single file `harness.ts`, default-exported `{ id, setup }`. Installed by
-`harness plugin install` into `~/.config/opencode/plugins/` (auto-discovered by
-opencode v2 — no `opencode.json` entry needed). Zero imports.
+Two sources shipped as one plugin **directory**:
+
+| source | installs as | entrypoint |
+| --- | --- | --- |
+| `harness.ts` | `plugins/harness/server.ts` | default-exported `{ id, setup }` — skills, tools, hooks |
+| `tui.tsx` | `plugins/harness/tui.tsx` | TUI entrypoint (`setup(ctx)` → `ctx.ui.slot`) — the footer chip |
+
+Installed by `harness plugin install` into `~/.config/opencode/plugins/`
+(auto-discovered by opencode v2 — no `opencode.json` entry needed). Zero
+imports in either file.
+
+The directory form is not cosmetic: opencode probes a plugin *directory* for
+`server.*` and `tui.*` entrypoints, and it sets `features.tui` (the flag the
+TUI's Plugins panel filters on) only when a `tui` entrypoint exists. A bare
+`harness.ts` is server-only and shows solely under the panel's Server section.
+Release assets must therefore include **both** `server.ts` and `tui.tsx`; see
+`.github/workflows/release.yml`.
 
 ## Loader contract (verified against opencode v2.0.8)
 

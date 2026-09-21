@@ -13,11 +13,11 @@
       }
     },
     "ask": {
-      "description": "Answers from the codebase. No writes.",
+      "description": "Answers from the codebase. No writes (shell commands need approval).",
       "mode": "primary",
       "permission": {
         "edit": "deny",
-        "bash": "deny",
+        "bash": "ask",
         "task": "deny"
       }
     },
@@ -33,7 +33,7 @@
       "mode": "primary",
       "permission": {
         "edit": "deny",
-        "bash": "deny"
+        "bash": "ask"
       }
     },
     "plan": {

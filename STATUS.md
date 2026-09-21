@@ -8,8 +8,37 @@
 > activation. See `harness/plugin/README.md` and `harness/plugin/harness.ts`.
 
 All changes are in the working tree, **uncommitted**. Nothing has been pushed yet.
-`python -m pytest -q` → **48 passed** (plugin feature matrix now also locks
+`python -m pytest -q` → **54 passed** (plugin feature matrix now also locks
 future-host degradation).
+
+### 0b. Fixed: the free-tier error came from harness's own agents (2026-09-21)
+- The gate needs a tool named `shell`; harness shipped `ask` and `review` with
+  `permission.bash: "deny"`, which removes that tool — so **harness's own
+  read-only agents made every zen free model 403**. Reproduced live with
+  throwaway agents: `bash: deny` → `FreeTierError`, `bash: ask` → works. The
+  newest user failure (2026-09-21T04:40Z, `agent: ask`, model
+  `muse-spark-1.3-contributor-free`) matches exactly.
+- Both agents now use `bash: "ask"`: the shell tool is advertised (free models
+  work) while commands need per-command approval; `edit: deny` still blocks
+  writes. `ensure_opencode_config` migrates an existing install (rewrites only
+  the harness-shipped `deny`, never a user's own agent) and reports it on
+  stderr. Verified live after install: `ask` and `review` answer with the same
+  free model that used to 403.
+
+### 0c. Fixed: the release download shipped no TUI entrypoint (2026-09-21)
+- `releases/latest` is whichever release was published most recently, and the
+  repo also publishes `tui-v*` binary releases with no plugin assets — while
+  `plugin-v0.2` (the newest plugin release) shipped **only `harness.ts`**. So
+  `--from-release latest` installed `server.ts` with no `tui.tsx`: a server-only
+  plugin that never appears in the TUI Plugins panel. This is the same symptom
+  the directory layout was meant to fix, arriving from the release channel.
+- `download_plugin` now resolves the newest `plugin-v*` release (numeric
+  compare, drafts skipped, `releases/latest` only as a fallback), accepts
+  `0.3` / `v0.3` / `plugin-v0.3`, and says so on stderr when a release has no
+  `tui.tsx` instead of silently installing server-only.
+- `.github/workflows/release.yml` publishes on any `plugin-v*` tag: gates on the
+  plugin/agent tests, then attaches `server.ts`, `harness.ts` (legacy asset
+  name) and `tui.tsx`, and verifies the published asset list afterwards.
 
 ## Done
 
@@ -18,10 +47,10 @@ future-host degradation).
   requests against `https://opencode.ai/inference/openai/v1/responses` shows the
   free endpoint requires a tool literally named `shell` in the request
   (build+shell → 200; renamed shell, fake edit, or read-only tool lists →
-  `FreeTierError`). The built-in `ask` agent sets `permission.bash: deny`, so it
-  never advertises `shell` and fails under ANY zen free model. `build`/
-  `plan`/`orchestrator` (shell allowed) work. Fixes: use a shell-capable agent,
-  set `"bash": "allow"` on the agent, or use a paid key for read-only agents.
+  `FreeTierError`). The harness-merged `ask` agent sets
+  `permission.bash: deny`, so it never advertised `shell` and failed under ANY
+  zen free model. `build`/`plan`/`orchestrator` (shell allowed) worked. Fixed in
+  0b above (agents now use `bash: ask` + a migration).
 - **The TUI Plugins panel lists only `features.tui` plugins — now satisfied.**
   The flag is set only for plugins with a `tui` entrypoint, so the single-file
   install could never appear in the panel's list (only under Server). The

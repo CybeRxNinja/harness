@@ -217,6 +217,21 @@ def ensure_opencode_config() -> str:
         node = agents.setdefault(name, {})
         for k, v in spec.items():
             node.setdefault(k, v)
+    # Migration for upgraders: the read-only agents used to ship
+    # permission.bash = "deny". opencode only advertises its `shell` tool when
+    # bash is not denied, and zen's free-tier gate rejects any request whose
+    # tool list has no `shell` (403 "OpenCode's free tier can only be used from
+    # within OpenCode") — so every free model failed under `ask`/`review`.
+    # `edit: deny` still blocks writes; bash now prompts per command instead of
+    # disappearing entirely. Only the harness-shipped value is rewritten: a
+    # user-chosen bash setting is left alone.
+    migrated = []
+    for _name in ("ask", "review"):
+        _node = agents.get(_name)
+        _perm = _node.get("permission") if isinstance(_node, dict) else None
+        if isinstance(_perm, dict) and _perm.get("bash") == "deny" and _perm.get("edit") == "deny":
+            _perm["bash"] = "ask"
+            migrated.append(_name)
     # Legacy relay cleanup for upgraders: provider.harness and harness/* model
     # pins are removed (agents inherit the user default now). User-owned keys
     # are never touched.
@@ -243,6 +258,12 @@ def ensure_opencode_config() -> str:
             del cur["mcp"]["harness-skills"]
     except Exception:
         pass
+    if migrated:
+        print(
+            f"harness: agent {', '.join(migrated)}: bash deny -> ask (a denied shell tool "
+            "trips zen's free-tier gate; shell commands now need approval)",
+            file=sys.stderr,
+        )
     dest.write_text(_j.dumps(cur, indent=2) + "\n")
     return str(dest)
 
@@ -293,20 +314,75 @@ def _remove_legacy_single_file(plugdir: Path) -> Path | None:
     return None
 
 
+PLUGIN_RELEASE_PREFIX = "plugin-v"
+
+
+def _tag_version(tag: str) -> tuple[int, ...]:
+    """`plugin-v0.10` -> (0, 10); non-numeric tags sort below real versions."""
+    import re as _re
+    nums = _re.findall(r"\d+", str(tag).replace(PLUGIN_RELEASE_PREFIX, ""))
+    return tuple(int(n) for n in nums) or (-1,)
+
+
+def _pick_plugin_release(releases: list[dict]) -> dict | None:
+    """Newest plugin release out of GitHub's release list.
+
+    Plugin releases are tagged `plugin-v*`. The repo also publishes TUI binary
+    releases (`tui-v*`) and `releases/latest` is simply the most recently
+    published one — a TUI release has no plugin assets, so "latest" must mean
+    "newest plugin-v*", not "whatever GitHub calls latest".
+    """
+    plug = [r for r in releases
+            if isinstance(r, dict)
+            and str(r.get("tag_name", "")).startswith(PLUGIN_RELEASE_PREFIX)
+            and not r.get("draft")]
+    if not plug:
+        return None
+    return max(plug, key=lambda r: _tag_version(str(r.get("tag_name", ""))))
+
+
+def _plugin_asset_urls(assets: dict) -> tuple[str | None, str | None]:
+    """(server, tui) asset URLs. Older releases shipped only `harness.ts`."""
+    return (assets.get("server.ts") or assets.get("harness.ts"),
+            assets.get("tui.tsx") or assets.get("tui.ts"))
+
+
+def _plugin_release_tag(release: str) -> str | None:
+    """None for "latest"; else normalise `0.3` / `v0.3` / `plugin-v0.3`."""
+    if release in ("latest", ""):
+        return None
+    if str(release).startswith("plugin-"):
+        return str(release)
+    return f"{PLUGIN_RELEASE_PREFIX}{str(release).lstrip('v')}"
+
+
 def download_plugin(release: str = "latest") -> Path:
     """Fetch the plugin entrypoints from a GitHub release into the plugins dir.
-    Writes <plugins>/harness/{server.ts,tui.tsx}; `harness.ts` is accepted as
-    the server asset for older releases. No repo checkout needed."""
+
+    Writes <plugins>/harness/{server.ts,tui.tsx} — both entrypoints, so the TUI
+    plugin list includes harness (see _install_dir). `harness.ts` is accepted as
+    the server asset for older releases. No repo checkout needed.
+    """
     import json as _j
+    import urllib.error as _ue
     import urllib.request as _u
-    api = ("https://api.github.com/repos/CybeRxNinja/harness/releases/latest"
-           if release in ("latest", "") else
-           f"https://api.github.com/repos/CybeRxNinja/harness/releases/tags/{release}")
-    with _u.urlopen(api, timeout=30) as r:
-        rel = _j.loads(r.read().decode())
-    tag = rel.get("tag_name", release)
+    api = "https://api.github.com/repos/CybeRxNinja/harness/releases"
+    tag = _plugin_release_tag(release)
+    if tag is None:
+        with _u.urlopen(f"{api}?per_page=100", timeout=30) as r:
+            rel = _pick_plugin_release(_j.loads(r.read().decode()))
+        if rel is None:  # no plugin-* release yet: fall back to GitHub's latest
+            with _u.urlopen(f"{api}/latest", timeout=30) as r:
+                rel = _j.loads(r.read().decode())
+    else:
+        try:
+            with _u.urlopen(f"{api}/tags/{tag}", timeout=30) as r:
+                rel = _j.loads(r.read().decode())
+        except _ue.HTTPError as e:
+            raise ValueError(f"no release {tag} (HTTP {e.code})") from None
+    tag = rel.get("tag_name", tag)
     assets = {a.get("name"): a["browser_download_url"] for a in rel.get("assets", [])}
-    server_url = assets.get("server.ts") or assets.get("harness.ts")
+    server_url, tui_url = _plugin_asset_urls(assets)
     if server_url is None:
         raise ValueError(f"no server.ts/harness.ts asset in release {tag}")
     plugdir = _plugins_dir()
@@ -314,10 +390,15 @@ def download_plugin(release: str = "latest") -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     with _u.urlopen(server_url, timeout=120) as r:
         (dest_dir / "server.ts").write_bytes(r.read())
-    tui_url = assets.get("tui.tsx") or assets.get("tui.ts")
     if tui_url:
         with _u.urlopen(tui_url, timeout=120) as r:
             (dest_dir / "tui.tsx").write_bytes(r.read())
+    else:
+        (dest_dir / "tui.tsx").unlink(missing_ok=True)
+        print(f"harness: release {tag} has no tui.tsx — server-only install; the "
+              "TUI Plugins panel will list harness under Server only "
+              "(re-run with --from-release latest once a newer release ships it)",
+              file=sys.stderr)
     _remove_legacy_single_file(plugdir)
     print(f"plugin {tag} downloaded to {dest_dir}")
     return dest_dir
@@ -522,7 +603,8 @@ def build_parser() -> argparse.ArgumentParser:
     pl = sub.add_parser("plugin", help="opencode plugin (stock opencode, no fork)")
     pl.add_argument("plugin_action", choices=["install", "uninstall", "path"])
     pl.add_argument("--from-release", default="",
-                    help="install harness.ts from a GitHub release instead (e.g. --from-release plugin-v0.1, default latest)")
+                    help="install the plugin from a GitHub release instead of this checkout "
+                         "(e.g. --from-release 0.3, plugin-v0.3, or default latest = newest plugin-v*)")
     pl.set_defaults(fn=cmd_plugin)
     return p
 

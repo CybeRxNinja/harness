@@ -355,6 +355,123 @@ console.log(JSON.stringify(out))
 """
 
 
+def test_plugin_release_selection():
+    """`latest` must mean newest `plugin-v*`, not whatever GitHub calls latest.
+
+    The repo also publishes TUI binary releases (`tui-v*`) with no plugin
+    assets; `releases/latest` follows publication order, so blindly trusting it
+    makes `--from-release latest` resolve to a release that has no plugin files.
+    """
+    from harness.cli import (_pick_plugin_release, _plugin_asset_urls,
+                             _plugin_release_tag, _tag_version)
+
+    rels = [
+        {"tag_name": "tui-v0.25", "published_at": "2026-09-21T00:00:00Z", "assets": []},
+        {"tag_name": "plugin-v0.2", "assets": []},
+        {"tag_name": "plugin-v0.9", "assets": []},
+        {"tag_name": "plugin-v0.10", "assets": []},
+        {"tag_name": "plugin-v0.11", "draft": True, "assets": []},
+    ]
+    assert _pick_plugin_release(rels)["tag_name"] == "plugin-v0.10"
+    assert _pick_plugin_release([{"tag_name": "tui-v0.25", "assets": []}]) is None
+    assert _tag_version("plugin-v0.10") > _tag_version("plugin-v0.9")
+
+    # asset names: current release ships server.ts + tui.tsx; releases from
+    # before the TUI entrypoint shipped harness.ts alone
+    assert _plugin_asset_urls({"server.ts": "s", "tui.tsx": "t"}) == ("s", "t")
+    assert _plugin_asset_urls({"harness.ts": "s", "tui.ts": "t"}) == ("s", "t")
+    assert _plugin_asset_urls({}) == (None, None)
+
+    # tag spellings users type by hand
+    assert _plugin_release_tag("latest") is None and _plugin_release_tag("") is None
+    for spelling in ("0.3", "v0.3", "plugin-v0.3"):
+        assert _plugin_release_tag(spelling) == "plugin-v0.3"
+
+
+class _FakeResp:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def __enter__(self) -> "_FakeResp":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+def _fake_release_http(monkeypatch, rel: dict, bodies: dict) -> list:
+    """Serve the release list / tag lookup + asset downloads from memory."""
+    import urllib.request
+    seen: list[str] = []
+
+    def fake_urlopen(url, timeout=None):
+        url = str(url)
+        seen.append(url)
+        if "/releases?" in url:
+            return _FakeResp(json.dumps([rel]).encode())
+        if "/releases/latest" in url or "/releases/tags/" in url:
+            return _FakeResp(json.dumps(rel).encode())
+        for name, body in bodies.items():
+            if url.endswith(name):
+                return _FakeResp(body)
+        raise AssertionError(f"unexpected url {url}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return seen
+
+
+def test_plugin_download_writes_both_entrypoints(tmp_path, monkeypatch):
+    """The release install must land server.ts AND tui.tsx.
+
+    tui.tsx is what sets features.tui; a server-only install is exactly the
+    "harness only shows under Server in the Plugins panel" symptom.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    rel = {"tag_name": "plugin-v9.9", "assets": [
+        {"name": "server.ts", "browser_download_url": "https://x/server.ts"},
+        {"name": "tui.tsx", "browser_download_url": "https://x/tui.tsx"},
+    ]}
+    seen = _fake_release_http(monkeypatch, rel, {
+        "server.ts": b"// server entrypoint",
+        "tui.tsx": b"// tui entrypoint",
+    })
+    from harness.cli import download_plugin
+    dest = download_plugin("latest")
+    assert (dest / "server.ts").read_text() == "// server entrypoint"
+    assert (dest / "tui.tsx").read_text() == "// tui entrypoint"
+    assert dest.name == "harness" and dest.parent.name == "plugins"
+    assert any("/releases?" in u for u in seen), "latest must list releases, not trust /latest"
+
+
+def test_plugin_download_legacy_release_and_missing_tui(tmp_path, monkeypatch, capsys):
+    """An old release (harness.ts only) installs the server entrypoint and says
+    plainly that the TUI entrypoint is missing instead of failing silently."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    rel = {"tag_name": "plugin-v0.2", "assets": [
+        {"name": "harness.ts", "browser_download_url": "https://x/harness.ts"},
+    ]}
+    _fake_release_http(monkeypatch, rel, {"harness.ts": b"// legacy server"})
+    from harness.cli import download_plugin
+    dest = download_plugin("0.2")
+    assert (dest / "server.ts").read_text() == "// legacy server"
+    assert not (dest / "tui.tsx").exists()
+    assert "no tui.tsx" in capsys.readouterr().err
+
+
+def test_plugin_download_rejects_assetless_release(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    rel = {"tag_name": "plugin-v9.9", "assets": [
+        {"name": "Harness_TUI-x86_64.AppImage", "browser_download_url": "https://x/app"},
+    ]}
+    _fake_release_http(monkeypatch, rel, {})
+    from harness.cli import download_plugin
+    with pytest.raises(ValueError, match="no server.ts/harness.ts asset"):
+        download_plugin("latest")
+
+
 def test_plugin_files_exist():
     from harness.cli import _plugin_files
     files = _plugin_files()
