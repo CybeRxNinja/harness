@@ -55,6 +55,47 @@ nothing — any other returned value is called as a cleanup function and kills
 plugin activation. The file therefore has no imports and returns nothing; see
 `harness/plugin/README.md` for the full contract.
 
+## TUI views (the side panel)
+
+`tui.tsx` is the plugin's TUI half. It contributes:
+
+| view | where | what it shows |
+| --- | --- | --- |
+| chip | `home.footer.status` | `harness · N skills · M facts` — click opens the panel |
+| side panel | `session.panel` | skills + memory views, opened with `ctrl+g` or `/harness` |
+| sidebar rows | `sidebar.content` / `sidebar.footer` | harness summary + a `ctrl+g side panel` hint |
+
+```
+ctrl+g          open the harness side panel (palette: "Harness: open panel")
+/harness        same, from the prompt (/hp is an alias)
+/harness-refresh  re-scan skills + memory (/hr)
+s / m           switch between the skills and memory views
+f / esc         fullscreen / close the panel
+```
+
+The header counts **harness skills only** (the skill store also holds opencode's
+builtins, so "13 skills" above 11 listed rows would read like a bug). Counts
+show `scanning skills + memory…` until the first scan lands.
+
+**"The side panel is empty"** — the sidebar renders *only plugin
+contributions*, so with no plugin claiming `sidebar.content` it is genuinely
+empty; harness now fills it (and repeat `harness plugin install` if you are on
+an install from before this shipped). If your opencode hides the sidebar, the
+command palette has `Show sidebar` (`ctrl+x` then `b`). The docked panel is the
+`session.panel` slot: opencode owns its size, focus and full-screen behaviour,
+and keeps narrow terminals full-screen — so on a narrow terminal `f` has no
+effect until there is room for a side panel.
+
+Implementation notes worth keeping (all probed against opencode v2.0.8):
+`ctx.keymap.layer` throws `Keymap.Provider is missing` unless it is called from
+inside a slot's render component, so the commands are registered from the `app`
+slot; state lives in `ctx.storage.memory` (a reactive store — importing
+`solid-js` would load a second instance and break reactivity); and `require` /
+`Bun` are **not** defined in the TUI plugin scope, so file and SQLite access use
+dynamic `import("node:fs")` / `import("bun:sqlite")`. Skills come from
+`ctx.data.location.skill` after `sync()`, facts from the same `sessions.db` the
+server half uses.
+
 ## What the plugin does NOT do (those come from opencode.json)
 
 Agents are merged into `~/.config/opencode/opencode.json` by

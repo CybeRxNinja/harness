@@ -508,6 +508,100 @@ def test_plugin_files_exist():
     assert not re.search(r"^\s*import\s+(type\s+)?[{\*\w]", tui, re.M), "TUI plugin must not use static imports"
 
 
+def test_tui_plugin_panel_surface():
+    """The TUI entrypoint: footer chip, side panel, sidebar rows, commands.
+
+    Contract notes these lock (all probed live against opencode v2.0.8):
+      * `sidebar.content` renders only plugin contributions — an install that
+        registers nothing there leaves the sidebar empty.
+      * `keymap.layer` throws "Keymap.Provider is missing" unless it is called
+        from inside a slot's render component, so the commands are registered
+        from the `app` slot.
+      * state comes from `ctx.storage.memory` (a reactive store); importing
+        solid-js would load a second instance and break reactivity, and the
+        server-side plugin registry cannot resolve static specifiers.
+      * `require` and `Bun` are NOT defined in the TUI plugin scope, so file and
+        sqlite access must go through dynamic `import()`.
+    """
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+
+    # footer chip stays, and is now clickable -> opens the panel
+    assert 'append: "home.footer.status"' in tui
+    assert "onMouseDown" in tui
+
+    # side panel: a named contribution + the command that opens it
+    assert 'append: "session.panel"' in tui
+    assert "panel?.open?.(PANEL)" in tui, "the panel must be opened by name"
+    assert "panel?.name !== PANEL" in tui, "render only for our own panel"
+    assert "toggleFullscreen" in tui and "panel?.close?.()" in tui
+
+    # sidebar (empty without a plugin row) + its footer
+    assert 'append: "sidebar.content"' in tui
+    assert 'append: "sidebar.footer"' in tui
+
+    # commands: palette + slash, registered from a slot because keymap needs the
+    # Provider; keys are panel-scoped so they cannot hijack the prompt
+    assert "keymap?.layer" in tui and 'bind: "ctrl+g"' in tui
+    assert 'slash: { name: "harness", aliases: ["hp"] }' in tui
+    assert 'bind: "m"' in tui and 'bind: "escape"' in tui
+
+    # data sources: the seeded skill store, plus facts read off disk
+    assert "data?.location?.skill" in tui
+    assert 'await import("node:fs")' in tui and 'await import("bun:sqlite")' in tui
+
+    # reactive view state without a signal import, and a cleanup function
+    assert "storage?.memory" in tui
+    assert "return () => {" in tui
+    assert not re.search(r"^\s*import\s+(type\s+)?[{\*\w]", tui, re.M), "TUI plugin must not use static imports"
+
+
+def test_plugin_side_panel_counts_only_harness_skills():
+    """The panel lists harness-* skills, so its count must be the harness count —
+    a header reading "13 skills" above 11 listed rows reads like a bug (the
+    store also holds 2 builtin skills)."""
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+    assert "d.skills = data.skills.filter(isHarness).length" in tui
+    assert "const harnessSkills = () => data.skills.filter(isHarness)" in tui
+
+
+# Parses each entrypoint with Bun's transpiler (JSX-aware, no module
+# resolution). A broken tui.tsx is otherwise only visible as a WARN in
+# opencode's log ("plugin operation failed … stage=read") with nothing in the
+# UI — the plugin simply does not load and the sidebar/panel stay empty.
+TRANSPILE = r"""
+const results: any[] = []
+for (const p of process.argv.slice(2)) {
+  try {
+    const code = await Bun.file(p).text()
+    const js = new Bun.Transpiler({ loader: "tsx" }).transformSync(code)
+    results.push({ file: p, ok: true, bytes: js.length, error: null })
+  } catch (e: any) {
+    results.push({ file: p, ok: false, bytes: 0, error: String(e?.message ?? e) })
+  }
+}
+console.log(JSON.stringify(results))
+"""
+
+
+@pytest.mark.skipif(BUN is None, reason="bun is not installed")
+def test_plugin_entrypoints_parse(tmp_path):
+    """Both entrypoints must parse: the TUI compiles tui.tsx with its own
+    pipeline, so a syntax error takes the whole TUI half of the plugin down."""
+    from harness.cli import _plugin_files
+    script = tmp_path / "transpile.ts"
+    script.write_text(TRANSPILE)
+    r = subprocess.run([BUN, "run", str(script), *_plugin_files()],
+                       capture_output=True, text=True, timeout=120, cwd=str(REPO_ROOT))
+    assert r.returncode == 0, r.stderr[-2000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert len(out) == 2, out
+    for entry in out:
+        assert entry["ok"], f"{entry['file']} failed to parse: {entry['error']}"
+        assert entry["bytes"] > 500, entry
+
+
 @pytest.mark.skipif(BUN is None, reason="bun is not installed")
 def test_plugin_features(tmp_path):
     from harness.cli import _plugin_files

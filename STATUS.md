@@ -8,8 +8,8 @@
 > activation. See `harness/plugin/README.md` and `harness/plugin/harness.ts`.
 
 All changes are in the working tree, **uncommitted**. Nothing has been pushed yet.
-`python -m pytest -q` → **54 passed** (plugin feature matrix now also locks
-future-host degradation).
+`python -m pytest -q` → **57 passed** (plugin feature matrix now also locks
+future-host degradation, the TUI panel surface, and entrypoint parsing).
 
 ### 0b. Fixed: the free-tier error came from harness's own agents (2026-09-21)
 - The gate needs a tool named `shell`; harness shipped `ask` and `review` with
@@ -24,6 +24,33 @@ future-host degradation).
   the harness-shipped `deny`, never a user's own agent) and reports it on
   stderr. Verified live after install: `ask` and `review` answer with the same
   free model that used to 403.
+
+### 0d. Added: harness TUI views — side panel, chip, sidebar rows (2026-09-21)
+- The sidebar renders **only plugin contributions**, so it was genuinely empty
+  with nothing claiming `sidebar.content`. `tui.tsx` now contributes: a footer
+  chip (`harness · N skills · M facts`, click opens the panel), a **side panel**
+  (`session.panel`, opened by `ctrl+g` / `/harness` / palette) with skills and
+  memory views (`s`/`m` switch, `f` fullscreen, `esc` close), and sidebar
+  content + footer rows. Verified in a real pty-driven TUI: the sidebar shows
+  `harness / 11 skills · 0 facts / ctrl+g side panel`, the panel lists all 11
+  harness skills with descriptions, and the memory tab reports "no durable facts
+  yet" when the DB is empty.
+- The header counts harness skills only — the store also holds opencode's
+  builtins, so the first cut said "13 skills" above 11 listed rows (caught by
+  reading the rendered screen, now `d.skills = data.skills.filter(isHarness)`),
+  and counts read `scanning skills + memory…` until the async scan lands
+  instead of a wrong `0`.
+- Contract facts established by probing the running TUI (each one broke a
+  naive implementation): `ctx.keymap.layer` throws `Keymap.Provider is missing`
+  outside a slot's render component (commands are registered from the `app`
+  slot); `ctx.storage.memory` is the reactive store (importing `solid-js` loads
+  a second instance); `require`/`Bun` are undefined in the TUI scope while
+  dynamic `import("node:fs")`/`import("bun:sqlite")` work; `session.panel` is
+  host-owned and stays full-screen on narrow terminals.
+- New CI guard: `test_plugin_entrypoints_parse` transpiles both entrypoints with
+  `Bun.Transpiler`. A broken `tui.tsx` is otherwise silent in the UI (only a WARN
+  in opencode's log, plugin count 13 -> 12, sidebar/panel just empty) — verified
+  by deliberately breaking the installed file and watching the log.
 
 ### 0c. Fixed: the release download shipped no TUI entrypoint (2026-09-21)
 - `releases/latest` is whichever release was published most recently, and the
