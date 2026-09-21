@@ -8,8 +8,62 @@
 > activation. See `harness/plugin/README.md` and `harness/plugin/harness.ts`.
 
 All changes are in the working tree, **uncommitted**. Nothing has been pushed yet.
-`python -m pytest -q` → **57 passed** (plugin feature matrix now also locks
+`python -m pytest -q` → **114 passed** (plugin feature matrix now also locks
 future-host degradation, the TUI panel surface, and entrypoint parsing).
+
+### 0f. Audit pass: every component tested, four silent defects fixed (2026-09-21)
+- **Coverage was the finding.** A stdlib tracer over the whole suite (no
+  pytest-cov available) showed whole modules no test ever executed, and the
+  write path barely touched: `doctor.py` 0%, `mcp_server.py` 0%, `tools.py` 28%,
+  `mcp.py` 30%, `loop.py` 33%, `store.py` 39%. Six new test modules
+  (`test_doctor`, `test_cli`, `test_loop`, `test_mcp`, `test_mcp_server`,
+  `test_rlm`, plus glob/edit/store cases) took the suite 57 → 114 tests and:
+  `tools` 28 → 88%, `store` 39 → 76%, `mcp` 30 → 85%, `mcp_server` 0 → 53%,
+  `doctor` 0 → 83%, `loop` 33 → 67%, `rlm` 44 → 51%, `cli` 42% (all subcommands
+  now covered). The TS entrypoints stay out of that measure: they are covered by
+  the Bun transpile test and the live smoke, not by the Python tracer.
+- **Bug: `harness doctor` reported a healthy install as missing.** It checked
+  the legacy single-file `plugins/harness.ts` and the pre-migration
+  `.harness/sessions.db`, so a correct install showed \"missing (run: harness
+  plugin install)\" and `db_mb` was always 0.0. Both now read the real layout
+  (`plugin_status()` reports server+tui / server-only / legacy / missing, and a
+  missing plugin flips `ok: false`). opencode's paths moved into `paths.py`
+  (`opencode_config_dir` / `opencode_plugins_dir` / `plugin_install_dir`), which
+  the CLI used to recompute in three different ways.
+- **Bug: `harness config set --scope project` silently did nothing.** It wrote
+  `state_dir(root)/harness.jsonc` = `.opencode/harness/harness.jsonc`, but
+  `load_config` reads `.opencode/harness.jsonc`. Both scopes now write exactly
+  where the loader reads (one helper, `paths.project_config_file`), a user-only
+  key is refused for project scope up front (the loader strips those, so the
+  write looked successful), and the dead `old_data if False else …` / no-op
+  validation in `set_value` became a real structural check.
+- **Bug: `harness checkpoint restore` could not restore.** The snapshot patch is
+  the forward diff, and `git apply` on a tree that had moved on since failed
+  with \"patch does not apply\" — which the command printed as its *result* and
+  exited 0. Restore now resets the patch's files to HEAD and re-applies the
+  snapshot (verified against a real git repo: save at v2, edit to v3, restore,
+  read v2), failures exit 1, and `has_content()` makes `checkpoint save` warn
+  when it captured nothing (no git repo and no touched files).
+- **Bug: `tools.glob` matched nested paths for a bare `*`** (fnmatch turns `*`
+  into `.*`), so the `glob` tool returned every file under the project; a
+  slashless pattern now matches file names at the top level and `**/*.py`
+  recurses. `glob`/`grep` also share one walker (component-wise skip of
+  `.git`/`.opencode`/`.harness`, sorted output, no `foo.gitlab` false skip).
+- **Bug: a timed-out MCP server poisoned the next call.** The reader thread
+  stays parked on `readline()`, so its late reply was returned to whichever
+  call came next (one answer behind). Timeouts now drop and kill the process;
+  the timeout is env-tunable (`HARNESS_MCP_TIMEOUT`, 15s default) so tests do
+  not sleep. Non-JSON replies come back stripped, and `mcp.call`'s unused
+  `import select` is gone.
+- **Bug: `skills_list` was denied in plan/ask/review** while `skill_view` was
+  allowed, so the model could not discover skill names. The restricted modes now
+  build from one `READ_ONLY_TOOLS` set that includes it.
+- Simplifications: dropped the redundant `_LOCK` semaphore in `rlm.py` (the
+  2-worker pool is already the limit) and its unused `READ_ONLY` map; dropped
+  `delete_subagent`'s unused `project_root`; removed `loop.run_turn`'s unused
+  imports; renamed the compression `hint` that shadowed the recalled-memory
+  `hint`; mcp server frames documented as readline-only (a `read(n)` deadlocks
+  against a live client) and locked by a live stdio round-trip test.
 
 ### 0b. Fixed: the free-tier error came from harness's own agents (2026-09-21)
 - The gate needs a tool named `shell`; harness shipped `ask` and `review` with

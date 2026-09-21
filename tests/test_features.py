@@ -92,7 +92,7 @@ def test_spawn_contract(root, cfg):
     names = {w["name"] for w in rlm.list_subagents(con)}
     assert {"w1", "w2"} <= names
     assert rlm.inbox(con)
-    rlm.delete_subagent(con, root, h["rlm_child_id"])
+    rlm.delete_subagent(con, h["rlm_child_id"])
     assert h["rlm_child_id"] not in {w["id"] for w in rlm.list_subagents(con)}
     con.close()
 

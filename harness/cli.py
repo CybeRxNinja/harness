@@ -123,9 +123,17 @@ def cmd_checkpoint(args) -> int:
     from . import checkpoints as C
     root = _root(args)
     if args.ck_action == "save":
-        print(C.checkpoint(root))
+        snap = C.checkpoint(root)
+        print(snap)
+        if not C.has_content(snap):
+            print("warning: nothing captured (no git diff and no touched files) — "
+                  "this snapshot cannot restore anything", file=sys.stderr)
     else:
-        print(C.restore(root, args.snap))
+        try:
+            print(C.restore(root, args.snap))
+        except (FileNotFoundError, RuntimeError) as e:
+            print(f"harness: {e}", file=sys.stderr)
+            return 1
     return 0
 
 
@@ -169,8 +177,8 @@ def cmd_setup(args) -> int:
 
 
 def _opencode_config_path() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-    return Path(base) / "opencode" / "opencode.json"
+    from .paths import opencode_config_dir
+    return opencode_config_dir() / "opencode.json"
 
 
 def _bundled_opencode_json() -> dict:
@@ -288,10 +296,8 @@ def _plugin_files() -> list[str]:
 
 def _plugins_dir() -> Path:
     """opencode's auto-loaded plugins dir (~/.config/opencode/plugins)."""
-    plugdir = Path.home() / ".config" / "opencode" / "plugins"
-    if os.environ.get("XDG_CONFIG_HOME"):
-        plugdir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins"
-    return plugdir
+    from .paths import opencode_plugins_dir
+    return opencode_plugins_dir()
 
 
 def _install_dir(plugdir: Path) -> Path:
@@ -498,7 +504,8 @@ def cmd_plugin(args) -> int:
     if args.plugin_action == "install":
         if getattr(args, "from_release", ""):
             download_plugin(args.from_release)
-            plug = _opencode_config_path().parent / "plugins" / "harness"
+            from .paths import plugin_install_dir
+            plug = plugin_install_dir()
         else:
             plug = install_plugin()
         try:

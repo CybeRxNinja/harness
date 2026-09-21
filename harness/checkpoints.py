@@ -33,7 +33,37 @@ def checkpoint(root: Path, touched: list[str] | None = None) -> str:
     return str(dest)
 
 
+def has_content(snap: str | Path) -> bool:
+    """True when a snapshot actually captured something restorable.
+
+    Without a git diff and without touched files a snapshot holds only its note
+    file — reporting that path as a checkpoint would claim safety it does not
+    have.
+    """
+    d = Path(snap)
+    return (d / "changes.patch").exists() or any(p.name != "note.txt" for p in d.iterdir())
+
+
+def _patch_paths(patch: Path) -> list[str]:
+    """Repo-relative paths a `git diff` patch touches."""
+    out: list[str] = []
+    for line in patch.read_text(errors="replace").splitlines():
+        if line.startswith("diff --git "):
+            path = line.split(" b/", 1)[-1].strip()
+            if path and path != "/dev/null":
+                out.append(path)
+    return out
+
+
 def restore(root: Path, snap: str) -> str:
+    """Put the project back to the state the snapshot captured.
+
+    A snapshot is `HEAD + the changes present when it was taken`, so restoring
+    means: reset the touched files to HEAD, then re-apply the snapshot patch.
+    Applying the patch forward onto a mutated tree fails with "patch does not
+    apply" — the old code returned that error text and exited 0, so a restore
+    could silently do nothing.
+    """
     s = Path(snap)
     if not s.exists():
         # allow short id
@@ -43,7 +73,16 @@ def restore(root: Path, snap: str) -> str:
             raise FileNotFoundError(f"no snapshot {snap}")
         s = match[-1]
     patch = s / "changes.patch"
-    if patch.exists():
-        r = subprocess.run(["git", "apply", str(patch)], cwd=root, capture_output=True, text=True, timeout=15)
-        return r.stdout[-2000:] + r.stderr[-2000:] or "patched"
-    return f"shadow at {s} (manual copy back; files: {[x.name for x in s.iterdir()][:10]})"
+    if not patch.exists():
+        files = [x.name for x in s.iterdir()]
+        raise RuntimeError(
+            f"snapshot {s.name} has no patch (nothing was captured); files: {files[:10]}")
+    paths = _patch_paths(patch)
+    if paths:
+        subprocess.run(["git", "checkout", "HEAD", "--", *paths],
+                       cwd=root, capture_output=True, text=True, timeout=15)
+    applied = subprocess.run(["git", "apply", str(patch)],
+                             cwd=root, capture_output=True, text=True, timeout=15)
+    if applied.returncode != 0:
+        raise RuntimeError(f"restore failed: {applied.stderr.strip()[:300] or 'git apply error'}")
+    return f"restored {len(paths) or 1} file(s) from {s.name}"

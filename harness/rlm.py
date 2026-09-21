@@ -1,7 +1,10 @@
-"""RLM spawn/mailbox. category XOR subagent_type. max_parallel=2, depth=1 (v0)."""
+"""RLM spawn/mailbox. category XOR subagent_type. max_parallel=2, depth=1 (v0).
+
+The pool itself is the concurrency limit (`max_workers=2`), so there is no
+second semaphore to keep in sync with it.
+"""
 from __future__ import annotations
 
-import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -10,9 +13,6 @@ from pathlib import Path
 from .paths import state_dir
 
 _POOL = ThreadPoolExecutor(max_workers=2)
-_LOCK = threading.Semaphore(2)
-
-READ_ONLY = {"write": False, "edit": False, "shell": False}
 
 
 def spawn(con, cfg: dict, project_root: Path, prompt: str, name: str,
@@ -57,10 +57,6 @@ def _run_worker(root: str, wid: str, prompt: str, name: str, kind: str, model: s
     project_root = Path(root)
     con = connect(project_root)
     cfg, _ = load_config(project_root)
-    if not _LOCK.acquire(blocking=False):
-        con.execute("UPDATE workers SET status=? WHERE id=?", ("queued", wid))
-        con.commit()
-        _LOCK.acquire()
     try:
         con.execute("UPDATE workers SET status=? WHERE id=?", ("running", wid))
         con.commit()
@@ -94,10 +90,6 @@ def _run_worker(root: str, wid: str, prompt: str, name: str, kind: str, model: s
                     (name, "parent", "parent", content[:4000], int(time.time())))
         con.commit()
     finally:
-        try:
-            _LOCK.release()
-        except Exception:
-            pass
         con.close()
 
 
@@ -106,7 +98,8 @@ def list_subagents(con) -> list[dict]:
     return [{"id": r[0], "name": r[1], "kind": r[2], "model": r[3], "status": r[4]} for r in rows]
 
 
-def delete_subagent(con, project_root: Path, wid: str) -> None:
+def delete_subagent(con, wid: str) -> None:
+    """Forget a worker row (its files under workers/<id>/ stay for the log)."""
     con.execute("DELETE FROM workers WHERE id=?", (wid,))
     con.commit()
 

@@ -13,7 +13,7 @@ import shutil
 import time
 from pathlib import Path
 
-from .paths import state_dir
+from .paths import project_config_file
 
 USER_ONLY_KEYS = ("secrets", "token", "trusted_project_dirs", "mcp_env_allowlist", "security")
 
@@ -98,7 +98,7 @@ def load_config(project_dir: str | Path = ".") -> tuple[dict, dict]:
     chain: list[Path] = []
     cur = proj
     while True:
-        cand = cur / ".opencode" / "harness.jsonc"
+        cand = project_config_file(cur)
         if cand.exists():
             chain.append(cand)
         if cur == home or cur == cur.parent or cur == Path("/"):
@@ -137,34 +137,56 @@ def get(cfg: dict, path: str):
 
 
 def set_value(project_dir: str | Path, path: str, value, scope: str = "user") -> str:
-    """Validate, backup, write atomically. Returns unified diff text."""
+    """Validate, backup, write atomically. Returns a one-line diff summary.
+
+    Both scopes write exactly where load_config() reads: the user file
+    (~/.harness/harness.jsonc) and the project file
+    (<root>/.opencode/harness.jsonc).
+    """
     _check_mutable(path)
     if scope not in ("user", "project"):
         raise ValueError("scope must be user|project")
-    dest = (user_dir() if scope == "user" else state_dir(Path(project_dir).resolve())) / "harness.jsonc"
+    top = path.split(".")[0]
+    if scope == "project" and top in USER_ONLY_KEYS:
+        # load_config() strips these from the project layer, so accepting the
+        # write here would look like it worked and change nothing
+        raise PermissionError(f"{top!r} is user-only; use --scope user")
+    dest = project_config_file(project_dir) if scope == "project" else user_dir() / "harness.jsonc"
     dest.parent.mkdir(parents=True, exist_ok=True)
     old_data = _load_jsonc(dest) if dest.exists() else {}
     if dest.exists():
         bdir = dest.parent / "backups"
         bdir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(dest, bdir / f"harness-{int(time.time())}.jsonc")
-    # apply nested set on a copy of effective file data
+
     parts = path.split(".")
     node = old_data
     for p in parts[:-1]:
         node = node.setdefault(p, {})
         if not isinstance(node, dict):
             raise ValueError(f"cannot descend into non-object at {p}")
-    node[parts[-1]] = value
-    # validate by merging over defaults (raises on structural breakage)
-    merged = _deep_merge(json.loads(json.dumps(DEFAULT_CONFIG)), old_data if scope == "project" else _deep_merge(old_data, {}))
-    # light structural validation
-    if not isinstance(merged.get("budgets", {}).get("max_parallel", 2), int):
-        raise ValueError("budgets.max_parallel must be int")
+    data = _apply(old_data, parts, value)
+
+    # validate the result as it will be read (defaults + this file)
+    _validate(_deep_merge(json.loads(json.dumps(DEFAULT_CONFIG)), data))
     tmp = dest.with_suffix(".tmp")
-    tmp.write_text(json.dumps(old_data if False else _apply(old_data, parts, value), indent=2) + "\n")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
     tmp.rename(dest)
     return diff_text(path, value)
+
+
+def _validate(cfg: dict) -> None:
+    """Structural checks on the merged config — the last gate before a write."""
+    budgets = cfg.get("budgets") or {}
+    for key in ("max_turns", "max_tokens", "max_parallel", "max_depth"):
+        if key in budgets and not isinstance(budgets[key], int):
+            raise ValueError(f"budgets.{key} must be an int")
+    if "max_cost_usd" in budgets and not isinstance(budgets["max_cost_usd"], (int, float)):
+        raise ValueError("budgets.max_cost_usd must be a number")
+    if not isinstance(cfg.get("categories") or {}, dict):
+        raise ValueError("categories must be an object")
+    if not isinstance(cfg.get("mcp", {}).get("servers", {}) or {}, dict):
+        raise ValueError("mcp.servers must be an object")
 
 
 def _apply(data: dict, parts: list[str], value) -> dict:

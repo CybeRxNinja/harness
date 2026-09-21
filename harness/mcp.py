@@ -2,12 +2,36 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import threading
 import time
-from pathlib import Path
 
 _procs: dict[str, subprocess.Popen] = {}
 _last_used: dict[str, float] = {}
+
+
+def _timeout() -> float:
+    """Seconds to wait for a reply (env-tunable so tests do not sleep 15s)."""
+    try:
+        return float(os.environ.get("HARNESS_MCP_TIMEOUT", "15"))
+    except ValueError:
+        return 15.0
+
+
+def _drop(server: str) -> None:
+    """Forget a server process, killing it if it is still alive.
+
+    Used on timeout: the reader thread is parked on readline(), so keeping the
+    process would hand that late reply to the NEXT call — one answer behind.
+    """
+    proc = _procs.pop(server, None)
+    _last_used.pop(server, None)
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
 def servers(cfg: dict) -> dict:
@@ -50,9 +74,7 @@ def call(cfg: dict, server: str, tool: str, args: dict, auto_approve: bool = Fal
         assert proc.stdin and proc.stdout
         proc.stdin.write(json.dumps({"tool": tool, "args": args}) + "\n")
         proc.stdin.flush()
-        import select
-        # simple blocking read with timeout via communicate-free readline in thread
-        import threading
+        # one-line reply, read on a thread so a wedged server cannot hang us
         line: list[str] = []
         def _read():
             try:
@@ -61,13 +83,16 @@ def call(cfg: dict, server: str, tool: str, args: dict, auto_approve: bool = Fal
                 pass
         t = threading.Thread(target=_read, daemon=True)
         t.start()
-        t.join(timeout=15)
+        t.join(timeout=_timeout())
         if not line or not line[0]:
-            raise TimeoutError("mcp server timeout (15s)")
+            _drop(server)
+            raise TimeoutError(f"mcp server timeout ({_timeout()}s)")
         try:
             return json.loads(line[0])
         except Exception:
-            return {"output": line[0][:4000]}
+            # not JSON: hand back the raw line (stripped, so the model does not
+            # have to reason about the frame's trailing newline)
+            return {"output": line[0].strip()[:4000]}
     except PermissionError:
         raise
     except Exception as e:

@@ -7,13 +7,16 @@ from pathlib import Path
 from . import models as backend
 from .kernel import Kernel
 
+# Restricted modes are read-only. `skills_list` belongs in every set that
+# allows `skill_view`: without it the model has to guess skill names.
+READ_ONLY_TOOLS = {"read", "glob", "grep", "skill_view", "skills_list", "memory"}
 MODE_TOOLS = {
     "code": None,  # all
     "orchestrator": None,
-    "plan": {"read", "glob", "grep", "skill_view", "memory", "config_get"},
-    "ask": {"read", "glob", "grep", "skill_view", "memory"},
+    "plan": READ_ONLY_TOOLS | {"config_get"},
+    "ask": READ_ONLY_TOOLS,
     "debug": None,
-    "review": {"read", "glob", "grep", "skill_view", "memory"},
+    "review": READ_ONLY_TOOLS,
 }
 
 def _fresh_history(hist: list[dict]) -> list[dict]:
@@ -55,11 +58,8 @@ def run_turn(project_root: Path, session: str, user_msg: str, mode: str = "code"
              budget_override: dict | None = None) -> dict:
     from .config import load_config
     from .store import connect, ensure_session, add_message, history
-    from . import tools as T
-    from . import skills as S
-    from . import memory as M
-    from . import rlm as R
-    from . import mcp as MCP
+    from . import memory as M  # recall hint
+    from . import rlm as R  # inbox flush
     from .compact import should_compact, compact as do_compact
 
     cfg = cfg or load_config(project_root)[0]
@@ -135,8 +135,8 @@ def run_turn(project_root: Path, session: str, user_msg: str, mode: str = "code"
             ccfg = (cfg.get("compress", {}) or {})
             if ccfg.get("enabled", True) and len(text) >= int(ccfg.get("threshold", 4000)):
                 from .compress import stacked as _stacked
-                hint = args.get("cmd", args.get("code", name)) if isinstance(args, dict) else name
-                ctext, cstats = _stacked(text, command=str(hint),
+                label = args.get("cmd", args.get("code", name)) if isinstance(args, dict) else name
+                ctext, cstats = _stacked(text, command=str(label),
                                          intensity=str(ccfg.get("intensity", "standard")))
                 try:
                     spill = kernel.runs / f"tool-{name}-{int(time.time()*1000)}.log"

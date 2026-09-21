@@ -32,6 +32,15 @@ type Rec = Record<string, any>
 
 const STATE = "harness.sidebar.state"
 const HARNESS_PREFIX = "harness-"
+const POLL_MS = 8000
+
+/**
+ * opencode's skill store namespaces the seeded skills (`harness-spec-driven-
+ * development`), but the sidebar is 46 columns wide and the namespace is the
+ * same for every row — so the row shows the skill itself (`spec-driven-
+ * development`). Only the display is shortened; ids keep the prefix.
+ */
+const shortSkill = (id: unknown) => String(id ?? "").replace(/^harness-/, "")
 const ROW_LIMIT = 6
 
 const log = (m: string) => console.error(`[harness tui] ${m}`)
@@ -127,7 +136,7 @@ const HarnessTui = {
     // Reactive view state (section open flags). storage.memory is a reactive
     // [store, update] pair: clicking a header writes to it and the sidebar
     // repaints. Without it the panel still renders, just cannot collapse.
-    let view: Rec = { ...defaultSections(), sessionID: "", skills: 0, agents: 0, todos: 0, models: 0, rev: 0 }
+    let view: Rec = { ...defaultSections(), sessionID: "", skills: 0, agents: 0, todos: 0, models: 0, rev: 0, scanning: false }
     let setView: ((fn: (draft: Rec) => void) => void) | null = null
     try {
       const pair = ctx.storage?.memory?.(STATE, { initial: { ...defaultSections() } })
@@ -167,6 +176,11 @@ const HarnessTui = {
     let fs: any = null
     let sessionID = ""
     let loading = false
+    // Timestamp of the last slot render. This entrypoint is loaded in the
+    // long-lived server process as well, where no slot ever renders — an
+    // instance that polls forever with nobody watching is pure background
+    // churn, so the poll below stands down when nothing has been drawn.
+    let lastRender = 0
 
     const location = () => {
       try {
@@ -227,15 +241,92 @@ const HarnessTui = {
       }
     }
 
-    const load = async () => {
+    let scanned = false
+
+    /**
+     * The slow half of a scan: the session's assistant messages (Models rows),
+     * the lazily-synced location stores (agents/skills/providers/models) and the
+     * context-window limit. A `provider.sync()` can block on the network and
+     * none of it changes between messages, so it runs when the session changes,
+     * on the first load and on `/harness-refresh` — not on the 8s poll, which
+     * only needs the counters that move during a turn.
+     */
+    const scanSlow = async (loc: any, data_: Rec): Promise<void> => {
+      const store = data_?.location
+
+      // Model rows: assistant messages grouped by provider -> model, with the
+      // step count (Kilo shows Model / Steps / Cost per provider group).
+      const msgs = sessionID ? asArray(data_?.session?.message?.list?.(sessionID)) : []
+      const byProv = new Map<string, Map<string, { steps: number; cost: number }>>()
+      for (const m of msgs) {
+        const role = m?.role ?? m?.type
+        if (role !== "assistant") continue
+        const prov = String(m?.providerID ?? m?.model?.providerID ?? modelProvider(m?.model) ?? "unknown")
+        const name = shortModel(modelId(m?.model) || data.model)
+        if (!byProv.has(prov)) byProv.set(prov, new Map())
+        const inner = byProv.get(prov)!
+        const cur = inner.get(name) ?? { steps: 0, cost: 0 }
+        cur.steps += 1
+        cur.cost += Number(m?.cost ?? 0)
+        inner.set(name, cur)
+      }
+
+      // Location stores ARE lazy: they need sync first or list() is empty.
+      await Promise.all([
+        Promise.resolve(store?.model?.sync?.(loc)).catch(() => {}),
+        Promise.resolve(store?.provider?.sync?.(loc)).catch(() => {}),
+        Promise.resolve(store?.agent?.sync?.(loc)).catch(() => {}),
+        Promise.resolve(store?.skill?.sync?.(loc)).catch(() => {}),
+      ])
+      const provs = asArray(store?.provider?.list?.(loc))
+      const models = asArray(store?.model?.list?.(loc))
+      data.providers = provs.map((p: Rec) => String(p?.id ?? p?.name ?? "")).filter(Boolean).slice(0, ROW_LIMIT)
+
+      const [provId, modelName] = splitModel(data.model)
+      const provEntry = provs.find((p: Rec) => String(p?.id ?? p?.name ?? "") === provId)
+      const fromProvider = provEntry?.models?.[modelName] ??
+        Object.values(provEntry?.models ?? {}).find((m: Rec) => String(m?.id ?? "").endsWith(modelName))
+      const match = models.find((m: Rec) => {
+        const id = String(m?.id ?? m?.name ?? "")
+        return id === data.model || id === modelName || (modelName && id.endsWith(modelName))
+      })
+      const limit = fromProvider?.limit?.context ?? match?.limit?.context ?? match?.limits?.context
+      data.contextLimit = Number(limit ?? 0) || 0
+
+      const steps: Rec[] = []
+      for (const [prov, used] of byProv) {
+        const available = Object.keys(provs.find((p: Rec) => String(p?.id ?? p?.name ?? "") === prov)?.models ?? {}).length
+        steps.push({ row: available ? `${prov} · ${available} models` : prov, kind: "provider" })
+        for (const [name, e] of used) {
+          steps.push({ row: `  ${name} ${e.steps} ${e.cost ? `$${e.cost.toFixed(4)}` : "–"}`, kind: "row" })
+        }
+      }
+      if (!steps.length) steps.push({ row: "(no steps in this session yet)", kind: "row" })
+      data.steps = steps
+
+      data.agents = asArray(store?.agent?.list?.(loc)).map((a: Rec) => String(a?.name ?? a?.id ?? "")).filter(Boolean)
+      data.skills = asArray(store?.skill?.list?.(loc))
+        .map((s: Rec) => String(s?.id ?? s?.name ?? ""))
+        .filter((s: string) => s.startsWith(HARNESS_PREFIX))
+    }
+
+    const load = async (full = false) => {
       if (loading) return
       loading = true
+      // "scanning…" is driven by a REACTIVE flag, never by the plain `loading`
+      // guard: read inside a tracked JSX expression (where it is not reactive),
+      // a plain variable reports whatever it happened to hold at that repaint —
+      // which is how the placeholder ended up stuck on screen next to fully
+      // loaded stats. The flag is cleared in the same state update that bumps
+      // `rev`, so the placeholder can never outlive its scan.
+      patch((d) => {
+        d.scanning = true
+      })
       const notes: string[] = []
       try {
         const loc = location()
         const directory: string = loc?.directory ?? process.cwd?.() ?? "."
         const data_ = ctx.data
-        const store = data_?.location
 
         // Read the session FIRST. `session.sync()` invalidates the store and
         // re-populates it asynchronously, so `get()` on the same tick after a
@@ -250,60 +341,14 @@ const HarnessTui = {
         data.title = String(session?.title ?? "")
         data.model = modelId(session?.model)
 
-        // Model rows: assistant messages grouped by provider -> model, with the
-        // step count (Kilo shows Model / Steps / Cost per provider group).
-        const msgs = sessionID ? asArray(data_?.session?.message?.list?.(sessionID)) : []
-        const byProv = new Map<string, Map<string, { steps: number; cost: number }>>()
-        for (const m of msgs) {
-          const role = m?.role ?? m?.type
-          if (role !== "assistant") continue
-          const prov = String(m?.providerID ?? m?.model?.providerID ?? modelProvider(m?.model) ?? "unknown")
-          const name = shortModel(modelId(m?.model) || data.model)
-          if (!byProv.has(prov)) byProv.set(prov, new Map())
-          const inner = byProv.get(prov)!
-          const cur = inner.get(name) ?? { steps: 0, cost: 0 }
-          cur.steps += 1
-          cur.cost += Number(m?.cost ?? 0)
-          inner.set(name, cur)
+        // Slow sources only when they can have changed: session change, first
+        // load, or an explicit refresh (see scanSlow).
+        if (full || !scanned) {
+          await scanSlow(loc, data_)
+          scanned = true
         }
-        // Location stores ARE lazy: they need sync first or list() is empty.
-        await Promise.all([
-          Promise.resolve(store?.model?.sync?.(loc)).catch(() => {}),
-          Promise.resolve(store?.provider?.sync?.(loc)).catch(() => {}),
-          Promise.resolve(store?.agent?.sync?.(loc)).catch(() => {}),
-          Promise.resolve(store?.skill?.sync?.(loc)).catch(() => {}),
-        ])
-        const provs = asArray(store?.provider?.list?.(loc))
-        const models = asArray(store?.model?.list?.(loc))
-        data.providers = provs.map((p: Rec) => String(p?.id ?? p?.name ?? "")).filter(Boolean).slice(0, ROW_LIMIT)
 
-        const [provId, modelName] = splitModel(data.model)
-        const provEntry = provs.find((p: Rec) => String(p?.id ?? p?.name ?? "") === provId)
-        const fromProvider = provEntry?.models?.[modelName] ??
-          Object.values(provEntry?.models ?? {}).find((m: Rec) => String(m?.id ?? "").endsWith(modelName))
-        const match = models.find((m: Rec) => {
-          const id = String(m?.id ?? m?.name ?? "")
-          return id === data.model || id === modelName || (modelName && id.endsWith(modelName))
-        })
-        const limit = fromProvider?.limit?.context ?? match?.limit?.context ?? match?.limits?.context
-        data.contextLimit = Number(limit ?? 0) || 0
-
-        const steps: Rec[] = []
-        for (const [prov, used] of byProv) {
-          const available = Object.keys(provs.find((p: Rec) => String(p?.id ?? p?.name ?? "") === prov)?.models ?? {}).length
-          steps.push({ row: available ? `${prov} · ${available} models` : prov, kind: "provider" })
-          for (const [name, e] of used) {
-            steps.push({ row: `  ${name} ${e.steps} ${e.cost ? `$${e.cost.toFixed(4)}` : "–"}`, kind: "row" })
-          }
-        }
-        if (!steps.length) steps.push({ row: "(no steps in this session yet)", kind: "row" })
-        data.steps = steps
-
-        data.agents = asArray(store?.agent?.list?.(loc)).map((a: Rec) => String(a?.name ?? a?.id ?? "")).filter(Boolean)
-        data.skills = asArray(store?.skill?.list?.(loc))
-          .map((s: Rec) => String(s?.id ?? s?.name ?? ""))
-          .filter((s: string) => s.startsWith(HARNESS_PREFIX))
-        // Everything above the session reads is location-scoped, so it works on
+        // The rows below are location-scoped, so they work on
         // the home screen too (no session yet) — that is what keeps the footer
         // chip from claiming "0 skills" before your first message.
         data.todos = sessionID ? await readTodos(sessionID) : []
@@ -330,6 +375,7 @@ const HarnessTui = {
           // does not reach opencode's log, so a silent catch would leave only
           // an empty-looking panel to debug
           d.note = notes[0] ?? ""
+          d.scanning = false
           // The rows above are plain objects, not reactive: bump a counter the
           // render reads so the store notifies and the panel repaints with the
           // freshly loaded stats. Without this the panel keeps the snapshot it
@@ -345,14 +391,24 @@ const HarnessTui = {
       const next = String(sid ?? "")
       if (!next || next === sessionID) return
       sessionID = next
-      void load()
+      void load(true) // a new session invalidates every slow source
     }
 
-    void load() // first load runs once a session id arrives from the slot
+    /** Every slot render goes through here: it marks the panel as on-screen. */
+    const rendered = (props: Rec) => {
+      lastRender = Date.now()
+      noteSession(props?.sessionID)
+    }
+
+    void load(true) // first load runs once a session id arrives from the slot
     let timer: any = null
     try {
-      // token/cost counters move during a turn; a slow poll keeps them honest
-      timer = setInterval(() => void load(), 8000)
+      // Token/cost counters move during a turn; the cheap pass keeps them
+      // honest without re-syncing the location stores every few seconds.
+      timer = setInterval(() => {
+        if (lastRender === 0 || Date.now() - lastRender > POLL_MS * 4) return
+        void load()
+      }, POLL_MS)
     } catch (e) {
       log(`poll unavailable: ${short(e)}`)
     }
@@ -382,7 +438,7 @@ const HarnessTui = {
       ctx.ui.slot({
         append: "home.footer.status",
         render: (props: Rec) => {
-          noteSession(props?.sessionID)
+          rendered(props)
           return (
             <box onMouseDown={toggleSidebar}>
               <text fg={th.muted}>{headline()}</text>
@@ -399,7 +455,7 @@ const HarnessTui = {
       ctx.ui.slot({
         append: "app",
         render: (props: Rec) => {
-          noteSession(props?.sessionID)
+          rendered(props)
           try {
             ctx.keymap?.layer?.(() => ({
               mode: "global",
@@ -421,7 +477,7 @@ const HarnessTui = {
                   palette: true,
                   slash: { name: "harness-refresh", aliases: ["hr"] },
                   run: async () => {
-                    await load()
+                    await load(true) // the refresh command re-scans everything
                     try {
                       ctx.ui.toast?.show?.({
                         title: "harness",
@@ -492,7 +548,7 @@ const HarnessTui = {
       ctx.ui.slot({
         append: "sidebar.content",
         render: (props: Rec) => {
-          noteSession(props?.sessionID)
+          rendered(props)
           try {
             // Every closure below starts with a tracked read (view.rev) — see
             // the note on Rows() for why that is required.
@@ -508,12 +564,15 @@ const HarnessTui = {
               const t = data.tokens
               const cache = t?.cache ?? {}
               if (!t) return ["(no tokens reported yet — send a message)"]
+              // Four rows is the budget: header + six section headlines + an
+              // open section has to fit the sidebar's fixed viewport (it does
+              // not scroll), or the sections below fall off the bottom and look
+              // missing. The window/percentage already sits in the summary, so
+              // the model + agent identity takes its row instead.
               return [
+                `${shortModel(data.model) || "model —"} · agent ${data.agent || "—"}`,
                 `input ${fmt(t.input)} · output ${fmt(t.output)}`,
                 `reasoning ${fmt(t.reasoning)} · cache ${fmt(cache.read)}/${fmt(cache.write)}`,
-                data.contextLimit > 0
-                  ? `window ${fmt(t.input)} / ${fmt(data.contextLimit)} (${pct()}%)`
-                  : `window ${fmt(t.input)} tokens (limit unknown)`,
                 `cost $${Number(data.cost ?? 0).toFixed(4)}`,
               ]
             }
@@ -522,12 +581,12 @@ const HarnessTui = {
               const t = data.tokens
               const cache = t?.cache ?? {}
               if (!t) return []
+              // paired so the section stays inside the four-row budget (Kilo
+              // lists each counter separately; the numbers are identical)
               return [
-                `Input ${fmt(t.input)}`,
-                `Output ${fmt(t.output)}`,
+                `Input ${fmt(t.input)} · Output ${fmt(t.output)}`,
                 `Reasoning ${fmt(t.reasoning)}`,
-                `Cache read ${fmt(cache.read)}`,
-                `Cache write ${fmt(cache.write)}`,
+                `Cache read ${fmt(cache.read)} · write ${fmt(cache.write)}`,
                 `Cost $${Number(data.cost ?? 0).toFixed(4)}`,
               ]
             }
@@ -546,20 +605,16 @@ const HarnessTui = {
             const agentRows = (): string[] => {
               void view.rev
               return [
-                ...data.skills.slice(0, 5).map((s) => `▪ ${s}`),
+                ...data.skills.slice(0, 5).map((s) => `▪ ${shortSkill(s)}`),
                 ...data.agents.slice(0, 3).map((a) => `◦ ${a}`),
               ]
             }
             return (
               <box flexDirection="column">
+                {/* one header row: the agent/model identity moved into the
+                    Context rows, so the header costs one line instead of two */}
                 <text fg={view.note ? th.warn : th.accent}>
                   {view.note ? cut(view.note, 46) : `harness · ${view.sessionID || "no session"}`}
-                </text>
-                <text fg={th.muted}>
-                  {cut(
-                    [data.agent || "agent —", shortModel(data.model) || "model —"].join(" · "),
-                    46,
-                  )}
                 </text>
 
                 <Section
@@ -622,7 +677,7 @@ const HarnessTui = {
                 </Section>
 
                 {data.notes.length ? <text fg={th.warn}>{cut(data.notes[0], 46)}</text> : null}
-                {view.rev === 0 || loading ? <text fg={th.muted}>scanning…</text> : null}
+                {view.scanning ? <text fg={th.muted}>scanning skills · memory · todos…</text> : null}
               </box>
             )
           } catch (e) {
@@ -632,7 +687,7 @@ const HarnessTui = {
       })
       ctx.ui.slot({
         append: "sidebar.footer",
-        render: () => <text fg={th.muted}>harness · /harness · click a header to fold</text>,
+        render: () => <text fg={th.muted}>harness · /harness · click header</text>,
       })
     } catch (e) {
       log(`sidebar slots failed: ${short(e)}`)
@@ -654,7 +709,10 @@ const HarnessTui = {
  * as one-line headlines). `rev` is bumped on every load to trigger a repaint.
  */
 function defaultSections(): Rec {
-  return { open: "context", rev: 0 }
+  // nothing expanded by default: the sidebar viewport is short, so six
+  // one-line headlines are guaranteed to fit where an expanded section would
+  // push the last sections off the bottom (nothing scrolls).
+  return { open: "", rev: 0, scanning: false }
 }
 
 export default HarnessTui

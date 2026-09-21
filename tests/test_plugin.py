@@ -579,7 +579,7 @@ def test_tui_plugin_is_a_sidebar_panel_not_a_layout_change():
 
 
 def test_tui_panel_counts_and_repaints():
-    """Two bugs found by reading the rendered screen:
+    """Three bugs found by reading the rendered screen:
 
     1. The header counted every skill in the store (13, including opencode's
        builtins) above the 11 harness rows actually listed — so the count is
@@ -588,12 +588,35 @@ def test_tui_panel_counts_and_repaints():
        tracked value did not repaint the panel: it kept the snapshot painted
        before the first load ("no tokens reported yet") even after the data
        arrived. A revision counter the render reads fixes that.
+    3. The in-flight placeholder read the plain `loading` guard from inside a
+       tracked expression, so it reported whatever that variable held at the
+       last repaint — leaving "scanning…" on screen next to loaded stats. The
+       placeholder is now driven by a reactive `scanning` flag that is cleared
+       in the same update that bumps `rev`.
     """
     from harness.cli import _plugin_files
     tui = Path(_plugin_files()[1]).read_text()
     assert "s.startsWith(HARNESS_PREFIX)" in tui, "count harness skills only"
     assert "d.rev = Number(d.rev ?? 0) + 1" in tui, "loads must notify the store"
-    assert "view.rev === 0 || loading" in tui, "the render must read the revision"
+    assert "view.rev === 0 || loading" not in tui, (
+        "the placeholder must not read the non-reactive loading guard"
+    )
+    assert "{view.scanning ?" in tui
+    assert "d.scanning = true" in tui and "d.scanning = false" in tui, "cleared per load"
+    # the slow sources (location-store syncs, the message walk, the context
+    # limit) must not re-run on the 8s poll: a blocking provider.sync() every
+    # few seconds is what kept the placeholder on screen
+    assert "const scanSlow = async (loc: any, data_: Rec)" in tui
+    assert "if (full || !scanned) {" in tui and "await scanSlow(loc, data_)" in tui
+    assert "void load(true)" in tui and "await load(true)" in tui
+    # the poll stands down when nothing has been drawn: the same entrypoint is
+    # loaded in the long-lived server process, where no slot ever renders
+    assert "lastRender === 0 || Date.now() - lastRender > POLL_MS * 4" in tui
+    assert tui.count("rendered(props)") == 3, "every slot render marks the panel on-screen"
+    # skill rows drop the shared namespace — the sidebar is 46 columns wide and
+    # "harness-" repeats on every one of the 11 rows
+    assert 'replace(/^harness-/, "")' in tui
+    assert "▪ ${shortSkill(s)}" in tui
     # Solid re-runs tracked JSX expressions, not the render body: detail rows must
     # be built inside the JSX expression, or they freeze at the first paint
     assert "{(props.lines().length ? props.lines() : [props.empty]).map" in tui

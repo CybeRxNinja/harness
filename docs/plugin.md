@@ -65,7 +65,7 @@ not rearrange the TUI: no routes, no docked overlay, no replaced slots.
 | --- | --- | --- |
 | chip | `home.footer.status` | `harness · 9.6k tok · $0.00` — click toggles the sidebar (with no session yet it reads `harness · click for stats`, since the skill/fact stores are location-scoped and empty at the default location) |
 | stats panel | `sidebar.content` | the sections below |
-| hint | `sidebar.footer` | `harness · /harness · click a header to fold` |
+| hint | `sidebar.footer` | `harness · /harness · click header` |
 
 ```
 ctrl+g              toggle the stats sidebar (palette: "Harness: toggle stats sidebar")
@@ -74,19 +74,27 @@ ctrl+g              toggle the stats sidebar (palette: "Harness: toggle stats si
 click a header      expand that section (one at a time — accordion)
 ```
 
-The sidebar is a short, fixed viewport (it does not scroll), so exactly one
-section shows its detail rows and the rest keep a one-line headline — every stat
-stays visible at a glance, and a click swaps which one is expanded.
+The sidebar is a short, fixed viewport that does not scroll — about **11 rows**
+in a normal terminal — so the layout is budgeted: one header row, six one-line
+headlines, and at most four detail rows for whichever section is open. That is
+why **nothing is expanded by default**: with Context open the last sections were
+pushed off the bottom and looked missing (they were unreachable, since the
+viewport cannot scroll). Click a header to fold/unfold.
 
 | section | rows | source |
 | --- | --- | --- |
-| header | session id, agent · model | `data.session.get(sid)` |
-| Context | in/out, reasoning, cache, `window 9,603 / 1,048,576 (1%)`, cost | `session.tokens` + the provider's `models[id].limit.context` |
-| Token usage | Input / Output / Reasoning / Cache read / Cache write / Cost | `session.tokens` |
+| header | session id (the agent · model moved into Context) | `data.session.get(sid)` |
+| Context | `model · agent`, in/out, reasoning · cache, cost | `session.tokens` + the provider's `models[id].limit.context` |
+| Token usage | Input · Output, Reasoning, Cache read · write, Cost | `session.tokens` |
 | Models | per provider: available model count, then `model steps cost` | assistant messages grouped by provider/model |
 | Todo | `○ ◐ ●` + text, this session only | opencode's `todo` table (read-only) |
 | Agents + Skills | the 11 harness skills, then agents | `location.skill` / `location.agent` after `sync()` |
 | Memory | durable facts for the project | the same `sessions.db` the server half uses |
+
+Skill rows drop the shared namespace: the store names them
+`harness-spec-driven-development` (that is their id), and the row shows
+`spec-driven-development` because the sidebar is 46 columns wide and every row
+would repeat `harness-`.
 
 **"The side panel is empty"** — the sidebar renders *only plugin
 contributions*, so with nothing claiming `sidebar.content` it is genuinely
@@ -113,6 +121,21 @@ Implementation notes worth keeping (all probed against opencode v2.0.8):
 - Counts are harness-only for skills (the store also holds opencode's builtins,
   so “13 skills” above 11 listed rows reads like a bug), and a failed load is
   shown in the panel because cli-side `console.error` never reaches the log.
+- **The in-flight placeholder reads a reactive flag, never the `loading` guard.**
+  `loading` is a plain variable, so a tracked expression reports whatever it held
+  at that repaint — that is how `scanning…` stayed on screen next to fully
+  loaded stats. `view.scanning` is set when a scan starts and cleared in the same
+  state update that bumps `rev`, so the placeholder cannot outlive its scan.
+- **The 8s poll stands down when nothing is on screen.** opencode loads this
+  entrypoint in the long-lived server process too, where no slot ever renders;
+  polling there meant a session message walk + four store syncs + two SQLite
+  reads every 8s with nobody watching. Every slot render stamps `lastRender`,
+  and the poll skips once nothing has rendered for ~32s (it resumes the moment
+  the panel is drawn again). What a scan reads: session tokens/cost/agent/model,
+  the session's assistant messages (Models rows), the lazily-synced location
+  stores (skill/agent/model/provider), opencode's `todo` table and the harness
+  facts DB — measured at ~4ms warm, which is why the placeholder is the thing
+  worth watching, not the cost.
 
 ## What the plugin does NOT do (those come from opencode.json)
 

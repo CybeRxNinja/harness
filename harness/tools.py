@@ -60,38 +60,54 @@ def edit(root: Path, path: str, old: str, new: str, hash_id: str = "") -> str:
     return "ok"
 
 
-def glob(root: Path, pattern: str, limit: int = 50) -> list[str]:
-    out: list[str] = []
+SKIP_DIRS = frozenset({".git", ".opencode", ".harness"})
+
+
+def _walk(root: Path):
+    """Yield project files, skipping VCS and harness state dirs (glob+grep)."""
     for dirpath, _, files in os.walk(root):
-        if ".git" in dirpath or ".opencode" in dirpath or ".harness" in dirpath:
+        if SKIP_DIRS & set(Path(dirpath).parts):
             continue
         for f in files:
-            rel = os.path.relpath(os.path.join(dirpath, f), root)
-            if fnmatch.fnmatch(rel, pattern):
-                out.append(rel)
-                if len(out) >= limit:
-                    return out
-    return out
+            yield Path(dirpath) / f
+
+
+def glob(root: Path, pattern: str, limit: int = 50) -> list[str]:
+    """Shell-like glob with deterministic, sorted results.
+
+    A pattern without `/` matches file NAMES, so `*` is the top level and
+    `**/*.py` is how you recurse. (fnmatch alone would translate `*` to `.*`,
+    letting a bare `*` swallow every nested file.)
+    """
+    top_only = "/" not in pattern
+    hits = []
+    for fp in _walk(root):
+        rel = os.path.relpath(fp, root)
+        if top_only:
+            if "/" in rel:
+                continue  # `*` is the top level; `**/*.py` is how you recurse
+            if fnmatch.fnmatch(fp.name, pattern):
+                hits.append(rel)
+        elif fnmatch.fnmatch(rel, pattern):
+            hits.append(rel)
+    return sorted(hits)[:limit]
 
 
 def grep(root: Path, pattern: str, include: str = "*", limit: int = 40) -> list[str]:
+    """Regex search by file NAME; returns `path:line:text`, sorted by location."""
     rx = re.compile(pattern)
-    out: list[str] = []
-    for dirpath, _, files in os.walk(root):
-        if ".git" in dirpath or ".opencode" in dirpath or ".harness" in dirpath:
+    hits: list[tuple[str, int, str]] = []
+    for fp in _walk(root):
+        if not fnmatch.fnmatch(fp.name, include):
             continue
-        for f in files:
-            if not fnmatch.fnmatch(f, include):
+        try:
+            if fp.stat().st_size > 300_000:
                 continue
-            fp = Path(dirpath) / f
-            try:
-                if fp.stat().st_size > 300_000:
-                    continue
-                for i, line in enumerate(fp.read_text(errors="replace").splitlines(), 1):
-                    if rx.search(line):
-                        out.append(f"{os.path.relpath(fp, root)}:{i}:{line[:200]}")
-                        if len(out) >= limit:
-                            return out
-            except Exception:
-                continue
-    return out
+            text = fp.read_text(errors="replace")
+        except Exception:
+            continue  # unreadable: skip the file, keep searching
+        for i, line in enumerate(text.splitlines(), 1):
+            if rx.search(line):
+                hits.append((os.path.relpath(fp, root), i, line[:200]))
+    hits.sort(key=lambda h: (h[0], h[1]))
+    return [f"{p}:{i}:{t}" for p, i, t in hits[:limit]]
