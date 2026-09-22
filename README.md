@@ -41,7 +41,7 @@ and the live smoke) and re-runnable locally:
 | entrypoints never break a boot | `tests/test_plugin.py` transpiles both files with `Bun.Transpiler`; bad `setup()` returns are pinned by tests |
 | 197 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
 
-Latest release: **[`plugin-v0.5`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.5)**
+Latest release: **[`plugin-v0.5.1`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.5.1)**
 — verified end-to-end by installing *from the release* (`harness plugin
 install --from-release latest` → byte-identical assets → live smoke `SMOKE OK`).
 
