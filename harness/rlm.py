@@ -1,7 +1,22 @@
-"""RLM spawn/mailbox. category XOR subagent_type. max_parallel=2, depth=1 (v0).
+"""RLM spawn/mailbox. category XOR subagent_type. max_parallel, max_depth.
 
-The pool itself is the concurrency limit (`max_workers=2`), so there is no
-second semaphore to keep in sync with it.
+The pool IS the concurrency limit, so there is no second semaphore to keep in
+sync with it (one was removed for exactly that reason). It is now sized from
+`budgets.max_parallel` instead of a hardcoded 2, and grows a new executor when
+the configured width changes.
+
+Lifecycle, and why each piece exists:
+
+  queued    -> spawn admitted, row written, work submitted
+  running   -> the worker thread picked it up
+  done      -> result.md written and the summary posted to the mailbox
+  error     -> the backend raised; the message is kept in result.md
+  timeout   -> the backend exceeded `budgets.worker_timeout_s`
+  stale     -> the row still claims queued/running long after its last update
+               (the thread died; nothing will ever finish it)
+
+Workers always talk back through the mailbox and `workers/<id>/result.md` —
+never as a return value — so a parent turn never blocks on a child.
 """
 from __future__ import annotations
 
@@ -12,7 +27,44 @@ from pathlib import Path
 
 from .paths import state_dir
 
-_POOL = ThreadPoolExecutor(max_workers=2)
+_POOLS: dict[int, ThreadPoolExecutor] = {}
+SUBAGENT_TYPES = ("explore", "librarian", "plan-consultant", "plan-reviewer",
+                  "code-reviewer", "test-engineer", "security-auditor")
+# Valid `category` intents are config-driven (config.intents) because the
+# orchestrator may name its own; the subagent list is fixed by the spawn
+# contract in AGENTS.md.
+TERMINAL = ("done", "error", "timeout")
+
+
+def is_terminal(status: str) -> bool:
+    """True when a worker has reached a status nothing will move it out of.
+
+    `stale` is deliberately not terminal: it is a computed verdict for a row
+    that still claims to be running.
+    """
+    return str(status) in TERMINAL
+
+
+def pool(max_parallel: int | None = None) -> ThreadPoolExecutor:
+    """The shared executor, one per configured width.
+
+    `None` means the default (2); an explicit `0` means serial, not "default" —
+    a config that says zero workers must not silently run two.
+    """
+    width = 2 if max_parallel is None else max(1, int(max_parallel))
+    ex = _POOLS.get(width)
+    if ex is None:
+        ex = ThreadPoolExecutor(max_workers=width, thread_name_prefix="harness-worker")
+        _POOLS[width] = ex
+    return ex
+
+
+def _budgets(cfg: dict) -> dict:
+    return (cfg.get("budgets", {}) or {})
+
+
+def worker_timeout(cfg: dict) -> int:
+    return int(_budgets(cfg).get("worker_timeout_s", 600))
 
 
 def spawn(con, cfg: dict, project_root: Path, prompt: str, name: str,
@@ -22,14 +74,16 @@ def spawn(con, cfg: dict, project_root: Path, prompt: str, name: str,
         raise ValueError("rlm.spawn requires name")
     if bool(category) == bool(subagent_type):
         raise ValueError("pass exactly one of category|subagent_type")
-    if category and "/" in str(category):
-        raise ValueError("category takes intent (quick/deep/...), not provider/model")
-    if subagent_type and subagent_type not in (
-            "explore", "librarian", "plan-consultant", "plan-reviewer",
-            "code-reviewer", "test-engineer", "security-auditor"):
+    if category:
+        if "/" in str(category):
+            raise ValueError("category takes intent (quick/deep/...), not provider/model")
+        from .config import intents
+        valid = intents(cfg)
+        if str(category) not in valid:
+            raise ValueError(f"unknown category: {category} (valid: {', '.join(valid)})")
+    if subagent_type and subagent_type not in SUBAGENT_TYPES:
         raise ValueError(f"unknown subagent_type: {subagent_type}")
-    max_depth = (cfg.get("budgets", {}) or {}).get("max_depth", 1)
-    if max_depth < 1:
+    if _budgets(cfg).get("max_depth", 1) < 1:
         raise RuntimeError("nested spawn disabled (max_depth)")
     wid = "w_" + uuid.uuid4().hex[:8]
     # Workers inherit the user's configured opencode default model.
@@ -41,61 +95,159 @@ def spawn(con, cfg: dict, project_root: Path, prompt: str, name: str,
     sdir = state_dir(project_root) / "workers" / wid
     sdir.mkdir(parents=True, exist_ok=True)
     (sdir / "prompt.md").write_text(f"# {name}\n\n{prompt}\n")
-    con.execute("INSERT INTO workers(id,session,name,category,model,status,cost,updated) VALUES(?,?,?,?,?,?,?,?)",
+    con.execute("INSERT INTO workers(id,session,name,category,model,status,cost,updated) "
+                "VALUES(?,?,?,?,?,?,?,?)",
                 (wid, "", name, category or subagent_type, model, "queued", 0.0, int(time.time())))
     con.commit()
-    _POOL.submit(_run_worker, str(project_root), wid, prompt, name, category or subagent_type, model,
-                 load_skills or [], budget or {})
-    return {"rlm_child_id": wid, "name": name, "session_dir": str(sdir), "model": model, "status": "queued"}
+    pool(_budgets(cfg).get("max_parallel", 2)).submit(
+        _run_worker, str(project_root), wid, prompt, name, category or subagent_type,
+        model, load_skills or [], budget or {})
+    return {"rlm_child_id": wid, "name": name, "session_dir": str(sdir),
+            "model": model, "status": "queued"}
+
+
+def _mark(con, wid: str, status: str) -> None:
+    con.execute("UPDATE workers SET status=?, updated=? WHERE id=?",
+                (status, int(time.time()), wid))
+    con.commit()
 
 
 def _run_worker(root: str, wid: str, prompt: str, name: str, kind: str, model: str,
                 skills: list[str], budget: dict) -> None:
-    from .store import connect
-    from . import models as _backend
-    from .config import load_config
+    """One worker's whole life. Every exit path leaves a terminal status."""
     project_root = Path(root)
-    con = connect(project_root)
-    cfg, _ = load_config(project_root)
+    sdir = state_dir(project_root) / "workers" / wid
+    from .store import connect
+    con = None
     try:
-        con.execute("UPDATE workers SET status=? WHERE id=?", ("running", wid))
-        con.commit()
-        # Read-only kinds get a constrained prompt; workers return summary+diff only.
-        sys = ("You are a focused subagent. Answer with SUMMARY + DIFF only, <=4k tokens. "
-               "Do not ask questions.")
-        if kind in ("explore", "librarian"):
-            sys += " READ-ONLY: do not propose writes."
-        skill_text = ""
-        if skills:
-            from . import skills as _S
-            parts = []
-            for name in skills[:3]:
-                try:
-                    parts.append(_S.view(project_root, cfg, name)[:2500])
-                except Exception:
-                    continue
-            if parts:
-                skill_text = "\n\nRelevant skills (follow them):\n" + "\n---\n".join(parts)
-                sys += skill_text[:8000]
+        con = connect(project_root)
+        _mark(con, wid, "running")
+        from .config import load_config
+        cfg, _ = load_config(project_root)
+        sys = _system_prompt(project_root, cfg, kind, skills)
+        from . import models as _backend
         try:
             msg = _backend.chat([{"role": "system", "content": sys},
                                  {"role": "user", "content": prompt[:6000]}],
                                 model=model, cfg=cfg, workdir=project_root)
             content = str(msg.get("content", ""))[:4000]
+            status = "done"
+        except RuntimeError as e:
+            # the backend's own timeout comes back as RuntimeError
+            content = f"worker failed: {e}"
+            status = "timeout" if "timed out" in str(e) else "error"
         except Exception as e:
             content = f"worker failed: {e}"
-        (state_dir(project_root) / "workers" / wid / "result.md").write_text(content)
-        con.execute("UPDATE workers SET status=? WHERE id=?", ("done", wid))
-        con.execute("INSERT INTO mailbox(sender,receiver,receiver_role,content,ts) VALUES(?,?,?,?,?)",
-                    (name, "parent", "parent", content[:4000], int(time.time())))
+            status = "error"
+        _write_result(sdir, name, model, status, content)
+        _mark(con, wid, status)
+        from . import memory as M
+        M.save_fact(con, f"{kind} worker {name} {status}: {content[:300]}", "worker")
+        con.execute("INSERT INTO mailbox(sender,receiver,receiver_role,content,ts,delivered) "
+                    "VALUES(?,?,?,?,?,0)", (name, "parent", "parent", content[:4000], int(time.time())))
         con.commit()
+    except Exception as e:
+        # connect()/config load failed: without this the row stays `queued`
+        _write_result(sdir, name, model, "error", f"worker could not start: {e}")
+        if con is not None:
+            try:
+                _mark(con, wid, "error")
+            except Exception:
+                pass
     finally:
-        con.close()
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
 
 
-def list_subagents(con) -> list[dict]:
-    rows = con.execute("SELECT id,name,category,model,status FROM workers ORDER BY rowid DESC LIMIT 20").fetchall()
-    return [{"id": r[0], "name": r[1], "kind": r[2], "model": r[3], "status": r[4]} for r in rows]
+def _system_prompt(project_root: Path, cfg: dict, kind: str, skills: list[str]) -> str:
+    sys = ("You are a focused subagent. Answer with SUMMARY + DIFF only, <=4k tokens. "
+           "Do not ask questions.")
+    if kind in ("explore", "librarian"):
+        sys += " READ-ONLY: do not propose writes."
+    if not skills:
+        return sys
+    from . import skills as _S
+    parts = []
+    for name in skills[:3]:
+        try:
+            parts.append(_S.view(project_root, cfg, name)[:2500])
+        except Exception:
+            continue
+    if parts:
+        sys += ("\n\nRelevant skills (follow them):\n" + "\n---\n".join(parts))[:8000]
+    return sys
+
+
+def _write_result(sdir: Path, name: str, model: str, status: str, content: str) -> None:
+    try:
+        sdir.mkdir(parents=True, exist_ok=True)
+        (sdir / "result.md").write_text(
+            f"# {name} [{status}] model={model}\n\n{content}\n")
+    except Exception:
+        pass
+
+
+def list_subagents(con, stale_after_s: int | None = None) -> list[dict]:
+    """Recent workers, newest first. Rows still claiming to run long after their
+    last update are reported as `stale` — a dead thread never finishes its own
+    row, and a status that never changes is worse than an honest failure."""
+    now = int(time.time())
+    rows = con.execute(
+        "SELECT id,name,category,model,status,updated,cost FROM workers "
+        "ORDER BY rowid DESC LIMIT 20").fetchall()
+    out: list[dict] = []
+    for wid, name, kind, model, status, updated, cost in rows:
+        if status in ("queued", "running") and stale_after_s:
+            if updated and now - int(updated) > stale_after_s:
+                status = "stale"
+        out.append({"id": wid, "name": name, "kind": kind, "model": model,
+                    "status": status, "updated": updated, "cost": cost})
+    return out
+
+
+def prune_stale(con, older_than_s: int = 3600) -> int:
+    """Persist the stale verdict for workers that stopped reporting."""
+    cutoff = int(time.time()) - int(older_than_s)
+    cur = con.execute(
+        "UPDATE workers SET status='stale' WHERE status IN ('queued','running') "
+        "AND updated < ? AND updated > 0", (cutoff,))
+    con.commit()
+    return int(cur.rowcount or 0)
+
+
+def result(con, wid: str, limit: int = 4000) -> str:
+    """A worker's result file, as text (or why there is not one yet)."""
+    row = con.execute("SELECT name,status,updated FROM workers WHERE id=?", (wid,)).fetchone()
+    if not row:
+        return f"unknown worker {wid}"
+    name, status, _updated = row
+    # the DB sits at <root>/.opencode/harness/sessions.db, so its parent IS the
+    # state dir that holds workers/<id>/result.md
+    try:
+        state = Path(con.execute("PRAGMA database_list").fetchone()[2]).parent
+        return (state / "workers" / wid / "result.md").read_text()[:limit]
+    except Exception:
+        return f"{name} [{status}]: no result yet (it may still be running)"
+
+
+def wait(con, wid: str, timeout_s: float = 60.0, interval: float = 0.1) -> dict:
+    """Block until a worker reaches a terminal status (or the timeout)."""
+    deadline = time.time() + max(0.0, timeout_s)
+    while True:
+        row = con.execute("SELECT name,status,updated FROM workers WHERE id=?",
+                          (wid,)).fetchone()
+        if not row:
+            return {"id": wid, "status": "unknown"}
+        name, status, updated = row
+        if status in TERMINAL:
+            return {"id": wid, "name": name, "status": status, "updated": updated}
+        if time.time() >= deadline:
+            return {"id": wid, "name": name, "status": status, "updated": updated,
+                    "waited_out": True}
+        time.sleep(interval)
 
 
 def delete_subagent(con, wid: str) -> None:
@@ -105,12 +257,27 @@ def delete_subagent(con, wid: str) -> None:
 
 
 def send(con, sender: str, content: str, receiver_role: str = "parent", receiver_name: str = "") -> None:
-    con.execute("INSERT INTO mailbox(sender,receiver,receiver_role,content,ts) VALUES(?,?,?,?,?)",
+    con.execute("INSERT INTO mailbox(sender,receiver,receiver_role,content,ts,delivered) "
+                "VALUES(?,?,?,?,?,0)",
                 (sender, receiver_name or receiver_role, receiver_role, content[:4000], int(time.time())))
     con.commit()
 
 
-def inbox(con, role: str = "parent", limit: int = 5) -> list[dict]:
-    rows = con.execute("SELECT sender,content FROM mailbox WHERE receiver_role=? ORDER BY id DESC LIMIT ?",
-                       (role, limit)).fetchall()
-    return [{"from": s, "content": c[:1000]} for s, c in rows]
+def inbox(con, role: str = "parent", limit: int = 5, mark_delivered: bool = True) -> list[dict]:
+    """Undelivered messages for `role`, newest first.
+
+    Delivered messages are marked so a parent that flushes its inbox every turn
+    does not re-append the same child completion forever (it used to).
+    """
+    rows = con.execute(
+        "SELECT id,sender,content FROM mailbox WHERE receiver_role=? AND delivered=0 "
+        "ORDER BY id DESC LIMIT ?", (role, limit)).fetchall()
+    out = [{"from": s, "content": c[:1000], "id": i} for i, s, c in rows]
+    if out and mark_delivered:
+        try:
+            con.execute("UPDATE mailbox SET delivered=1 WHERE id IN ("
+                        + ",".join("?" * len(rows)) + ")", tuple(i for i, _, _ in rows))
+            con.commit()
+        except Exception:
+            pass
+    return out

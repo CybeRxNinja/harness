@@ -127,12 +127,19 @@ def chat(messages: list[dict], model: str = "", cfg: dict | None = None,
     accepted for call-site compatibility and ignored: the user's model runs
     with the user's opencode settings."""
     cfg = cfg or {}
-    resolved = resolve_model(model, cfg)
     if os.environ.get("HARNESS_MOCK") == "1":
+        # Mock mode is documented as offline/hermetic, so it must not require a
+        # configured model: a missing default made every mock run (including
+        # the whole worker lifecycle) fail at resolve_model instead.
+        try:
+            resolved = resolve_model(model, cfg)
+        except RuntimeError:
+            resolved = model or "mock/model"
         last = messages[-1].get("content", "") if messages else ""
         return {"role": "assistant",
                 "content": f"[mock:{resolved}] echo: {str(last)[:500]}",
                 "_route": {"provider": "opencode", "model": resolved, "mock": True}}
+    resolved = resolve_model(model, cfg)
     binary = shutil.which("opencode")
     if not binary:
         raise RuntimeError("opencode binary not found on PATH — install stock "

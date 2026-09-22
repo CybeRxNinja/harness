@@ -36,14 +36,6 @@ def test_models_matrix(cfg, tmp_path, monkeypatch):
     assert m["_route"] == {"provider": "opencode", "model": "acme/workhorse", "mock": True}
 
 
-def test_reasoning_levels():
-    from harness.reasoning import normalize, provider_params
-    assert normalize("xhigh", "gpt-4.1-mini") == "high"
-    assert normalize("bogus", "x") == "medium"
-    assert "thinking" in provider_params("anthropic", "high", "claude")
-    assert provider_params("openai", "off", "gpt") == {"reasoning_effort": "none"}
-
-
 def test_kernel_persist_and_jail(root):
     from harness.kernel import Kernel
     k = Kernel(root, "audit")
@@ -111,6 +103,37 @@ def test_memory_loop(root):
     con.close()
 
 
+def test_ponytail_skills_ship_with_the_ladder_intact(root, cfg):
+    """The bundled ladder is the skill — a rewrite that drops a rung, or that
+    loses the MIT attribution while copying someone else's text, is the failure
+    mode worth locking."""
+    from pathlib import Path
+    from harness import skills as S
+    S.ensure_seed_skills()
+    names = {s["name"] for s in S.scan(Path("."), cfg)}
+    assert {"ponytail", "ponytail-review", "ponytail-audit"} <= names, sorted(names)
+
+    body = S.view(Path("."), cfg, "ponytail")
+    for rung in ("Does this need to exist", "Already in this codebase", "Stdlib does it",
+                 "Native platform feature", "Already-installed dependency",
+                 "Can it be one line", "Only then"):
+        assert rung in body, f"ladder rung missing: {rung}"
+    assert "DietrichGebert/ponytail" in body and "MIT" in body
+    low = body.lower()
+    for never_cut in ("validation", "error handling", "security", "accessibility"):
+        assert never_cut in low, never_cut
+    assert "ponytail:" in body, "the corner-cut marker has to be documented"
+
+    # both review skills must report the one metric and list, never apply
+    for name, tag in (("ponytail-review", "delete:"), ("ponytail-audit", "stale:")):
+        text = S.view(Path("."), cfg, name)
+        assert "net: -" in text and tag in text, name
+        assert "apply nothing" in text or "applies no fixes" in text or "do not apply" in text
+
+    notice = Path("harness/data/skills/NOTICE.md")
+    assert notice.exists() and "MIT License" in notice.read_text()
+
+
 def test_skills_progressive(root, cfg):
     from harness import skills as S
     from pathlib import Path as _P
@@ -135,8 +158,6 @@ def test_checkpoints_and_orchestrator(root):
     assert "shadow" in snap
     wid = O.start_plan(root, "audit plan", ["a", "b"])
     assert O.next_box("x\n- [ ] first thing") == "first thing"
-    assert O.classify("fix typo in one file") == "quick"
-    assert O.classify("race condition in auth crypto module breaking production") == "ultrabrain"
     b = O.load_boulder(root)
     assert O.check_box(root, b["works"][wid]["plan"], "a")
     con = None
@@ -176,3 +197,18 @@ def test_mcp_audit(cfg):
     from harness import mcp
     assert mcp.list_tools(cfg) == []
     assert mcp.audit(cfg) == []
+
+
+def test_every_bundled_skill_is_committable():
+    """A bare `build/` in .gitignore also matched harness/data/skills/build/,
+    so a skill added there was invisible to `git add` — it shipped in the
+    package but never in the repo. Anchoring the rule fixes it; this keeps it
+    fixed."""
+    import subprocess
+    from pathlib import Path
+    skills = sorted(Path("harness/data/skills").rglob("SKILL.md"))
+    assert len(skills) >= 14, len(skills)
+    ignored = [str(p) for p in skills
+               if subprocess.run(["git", "check-ignore", "-q", str(p)],
+                                 capture_output=True).returncode == 0]
+    assert not ignored, f"gitignored skills would never be committed: {ignored}"

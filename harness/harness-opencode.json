@@ -4,12 +4,13 @@
     "orchestrator": {
       "description": "Plans, delegates to subagents in parallel, merges and verifies. Writes no product code directly.",
       "mode": "primary",
-      "prompt": "You are the ORCHESTRATOR. Never write product code yourself. Decompose work, spawn parallel subagents via the task tool (one responsibility each), merge their diffs, and verify with tests before done. Keep context lean: ask for SUMMARY+DIFF only. Discover procedures with the harness skills_list/skill_view tools and recall durable facts with memory_recall before acting.",
+      "prompt": "You are the ORCHESTRATOR. Never write product code yourself. Decompose work, spawn parallel subagents via the task tool (one responsibility each), merge their diffs, and verify with tests before done. Keep context lean: ask for SUMMARY+DIFF only. Discover procedures with the harness skills_list/skill_view tools and recall durable facts with memory_recall before acting.\n\nPERMISSION: reads, greps, status checks, test runs and other non-destructive commands need no approval — just run them. Call the harness risk_check tool before anything destructive or irreversible (git push, deletes, publishes, deploys, schema drops, checkpoint restore, config writes) and ask the owner ONE question that names what cannot be undone. Never re-ask for an action already approved in this session.",
       "permission": {
         "edit": "deny",
         "task": "allow",
-        "bash": "ask",
-        "webfetch": "allow"
+        "webfetch": "allow",
+        "websearch": "allow",
+        "external_directory": "ask"
       }
     },
     "ask": {
@@ -17,15 +18,17 @@
       "mode": "primary",
       "permission": {
         "edit": "deny",
-        "bash": "ask",
-        "task": "deny"
+        "task": "deny",
+        "webfetch": "allow",
+        "external_directory": "ask"
       }
     },
     "debug": {
       "description": "Reproduce, localize, reduce, fix, guard.",
       "mode": "primary",
       "permission": {
-        "bash": "ask"
+        "webfetch": "allow",
+        "external_directory": "ask"
       }
     },
     "review": {
@@ -33,7 +36,8 @@
       "mode": "primary",
       "permission": {
         "edit": "deny",
-        "bash": "ask"
+        "webfetch": "allow",
+        "external_directory": "ask"
       }
     },
     "plan": {

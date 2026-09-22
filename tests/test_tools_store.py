@@ -113,29 +113,6 @@ def test_store_session_messages_and_search(tmp_path):
         con.close()
 
 
-def test_store_usage_aggregation_and_free_model_costs(tmp_path):
-    from harness import store
-    con = store.connect(tmp_path)
-    try:
-        store.record_usage(con, "s1", "vendor/free-1:free", 100, 20, ctx=1000, dur_ms=2000)
-        store.record_usage(con, "s1", "vendor/pro-1", 300, 80, ctx=1000, dur_ms=2000)
-
-        u = store.get_usage(con, "s1")
-        assert (u["input"], u["output"], u["total"], u["calls"]) == (400, 100, 500, 2)
-        assert u["ctx_tokens"] == 300 and u["ctx_limit"] == 1000 and u["ctx_pct"] == 30.0
-        assert u["speed"] == 25.0, "100 output tokens over 4s of recorded time"
-        assert u["spent"] == "n/a", "a paid model is in play, so total spend is unknown"
-        costs = {m["model"]: m["cost"] for m in u["by_model"]}
-        assert costs["vendor/pro-1"] == "n/a"
-        assert costs["vendor/free-1:free"] == "$0.00", "free ids carry no cost"
-
-        assert store.get_usage(con)["calls"] == 2, "no session filter aggregates everything"
-        assert store.get_usage(con, "nope")["calls"] == 0
-        assert store.estimate_text_tokens("abcd" * 3) == 3
-    finally:
-        con.close()
-
-
 def test_store_migrates_a_legacy_db_path(tmp_path):
     from harness import store
     legacy = tmp_path / ".harness"

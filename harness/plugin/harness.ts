@@ -175,12 +175,10 @@ async function readSkill(skill: Rec, subpath?: string): Promise<string> {
   return `skill body unavailable for ${label} (no readable path: ${skillPath || "none"})`
 }
 
-/** Candidate DBs for durable facts: project-local first (see harness/paths.py). */
-function factDbs(projectDir: string): string[] {
-  const home = process.env.HOME ?? ""
-  return [`${projectDir}/.opencode/harness/sessions.db`, `${home}/.opencode/harness/sessions.db`].filter(
-    (p) => p && !p.startsWith("/.opencode"),
-  )
+// Project-local only: a $HOME probe here recalled a different project's facts
+// (state_dir() in harness/paths.py is always <root>/.opencode/harness).
+function factDb(projectDir: string): string {
+  return `${projectDir}/.opencode/harness/sessions.db`
 }
 
 /**
@@ -206,22 +204,20 @@ async function facts(
   const hits: string[] = []
   const where = mode === "recent" ? "1=1" : patterns.map(() => "text LIKE ?").join(" OR ")
   const params = mode === "recent" ? [] : patterns.map((p) => `%${p}%`)
-  for (const dbPath of factDbs(projectDir)) {
+  try {
+    const dbPath = factDb(projectDir)
+    if (!(await Bun.file(dbPath).exists())) return []
+    const db = new Database(dbPath, { readonly: true })
     try {
-      if (!(await Bun.file(dbPath).exists())) continue
-      const db = new Database(dbPath, { readonly: true })
-      try {
-        const rows = db
-          .query(`SELECT text, source FROM facts WHERE ${where} ORDER BY id DESC LIMIT ?`)
-          .all(...params, limit) as any[]
-        for (const r of rows) hits.push(`- [${r.source}] ${String(r.text).slice(0, 200)}`)
-      } finally {
-        db.close()
-      }
-    } catch {
-      /* unreadable db */
+      const rows = db
+        .query(`SELECT text, source FROM facts WHERE ${where} ORDER BY id DESC LIMIT ?`)
+        .all(...params, limit) as any[]
+      for (const r of rows) hits.push(`- [${r.source}] ${String(r.text).slice(0, 200)}`)
+    } finally {
+      db.close()
     }
-    if (hits.length >= limit) break
+  } catch {
+    /* unreadable db */
   }
   return hits
 }

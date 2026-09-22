@@ -53,10 +53,11 @@ def test_no_agent_denies_bash():
         )
 
 
-def test_legacy_bash_deny_is_migrated(tmp_path, monkeypatch):
-    """Installs made before this fix carry bash deny in opencode.json; the merge
-    must repair the harness-shipped value (setdefault alone would not) while
-    leaving a user's own agent alone."""
+def test_legacy_bash_policy_is_regenerated(tmp_path, monkeypatch):
+    """Pre-existing installs carry a bare `bash: "deny"` or `"ask"` in
+    opencode.json; the merge must replace the harness-shipped string with the
+    generated risk map (setdefault alone would not) while leaving a user's own
+    agent, and a user's own permission object, untouched."""
     import json
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     from harness.cli import _opencode_config_path, ensure_opencode_config
@@ -74,10 +75,33 @@ def test_legacy_bash_deny_is_migrated(tmp_path, monkeypatch):
         }
     }))
     ensure_opencode_config()
+    from harness import risk
     d = json.loads(dest.read_text())
-    assert d["agent"]["ask"]["permission"]["bash"] == "ask", d["agent"]["ask"]
-    assert d["agent"]["review"]["permission"]["bash"] == "ask", d["agent"]["review"]
-    # read-only intent survives: edits stay denied
+    for name in ("ask", "review"):
+        bash = d["agent"][name]["permission"]["bash"]
+        assert isinstance(bash, dict), (name, bash)
+        # exactly the classifier's policy: no drift between the rule the model
+        # is told about and the rule opencode enforces
+        assert bash == risk.bash_permission_map(), name
+        assert bash["*"] == "allow" and bash["git push"] == "ask"
+    # read-only intent survives: edits stay denied, never a prompt
     assert d["agent"]["ask"]["permission"]["edit"] == "deny"
-    # a user's own agent is never rewritten
+    # a user's own agent is never touched
     assert d["agent"]["mine"]["permission"]["bash"] == "deny", d["agent"]["mine"]
+
+
+def test_second_merge_is_a_no_op_and_a_user_object_survives(tmp_path, monkeypatch):
+    """Re-running the merge must not churn the file, and a permission object the
+    user wrote themselves must never be replaced by the generated map."""
+    import json
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg2"))
+    from harness.cli import _opencode_config_path, ensure_opencode_config
+    dest = _opencode_config_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps({
+        "agent": {"orchestrator": {"permission": {"bash": {"*": "deny", "git status *": "allow"}}}}}))
+    ensure_opencode_config()
+    first = json.loads(dest.read_text())
+    assert first["agent"]["orchestrator"]["permission"]["bash"] == {"*": "deny", "git status *": "allow"}
+    ensure_opencode_config()
+    assert json.loads(dest.read_text()) == first

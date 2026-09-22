@@ -1,8 +1,10 @@
-"""doctor: env, disk, db, opencode binary, user model, plugin checks."""
+"""doctor: env, disk, db, opencode binary, user model, plugin, memory, workers."""
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import sys
+import time
 from pathlib import Path
 
 ENTRYPOINTS = ("server.ts", "tui.tsx")
@@ -42,6 +44,53 @@ def _project_db(root: Path) -> Path | None:
     return old if old.exists() else None
 
 
+def _readonly(db: Path, sql: str, args: tuple = ()) -> list:
+    """Query without touching the state dir or running migrations.
+
+    `store.connect()` mkdirs and migrates; a reporting command must not write.
+    """
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            return con.execute(sql, args).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return []
+
+
+def memory_status(root: Path) -> dict:
+    """The lessons file people actually read, plus the fact count behind recall."""
+    from .memory import memory_file
+    path = memory_file(root)
+    try:
+        lines = len(path.read_text().splitlines()) if path.exists() else 0
+    except Exception:
+        lines = -1
+    facts = 0
+    db = _project_db(root)
+    if db:
+        rows = _readonly(db, "SELECT COUNT(*) FROM facts")
+        facts = int(rows[0][0]) if rows else 0
+    return {"file": str(path), "lines": lines, "facts": facts}
+
+
+def worker_status(root: Path, cfg: dict | None = None) -> dict:
+    """Worker rows by lifecycle state. `stale` is the interesting one: a row
+    that still claims queued/running long after its last update is a thread that
+    died, and it must be visible rather than silent."""
+    db = _project_db(root)
+    if not db:
+        return {"total": 0, "unfinished": 0, "stale": 0}
+    from . import rlm
+    limit = rlm.worker_timeout(cfg or {}) * 2
+    rows = _readonly(db, "SELECT status, updated FROM workers")
+    now = int(time.time())
+    unfinished = [r for r in rows if not rlm.is_terminal(str(r[0]))]
+    stale = [r for r in unfinished if now - int(r[1] or 0) > limit]
+    return {"total": len(rows), "unfinished": len(unfinished), "stale": len(stale)}
+
+
 def run(root: Path, verbose: bool = False) -> dict:
     from .config import load_config
     out: dict = {"ok": True, "checks": {}}
@@ -68,7 +117,18 @@ def run(root: Path, verbose: bool = False) -> dict:
     c["plugin"] = status
     if not healthy:
         out["ok"] = False
+    c["memory"] = memory_status(root)
+    c["workers"] = worker_status(root, cfg)
     if verbose:
+        from . import risk
+        from .config import intents
         c["budgets"] = cfg.get("budgets")
-        c["categories"] = list((cfg.get("categories", {}) or {}).keys())
+        c["categories"] = intents(cfg)
+        c["permissions"] = {
+            "shell_default": "allow",
+            "ask_when_destructive": len([v for v in risk.bash_permission_map().values()
+                                         if v == "ask"]),
+            "destructive_rules": len(risk.DESTRUCTIVE_RULES),
+            "sensitive_paths": len(risk.SENSITIVE_PATH_RULES),
+        }
     return out

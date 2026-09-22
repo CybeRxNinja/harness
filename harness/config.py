@@ -17,39 +17,46 @@ from .paths import project_config_file
 
 USER_ONLY_KEYS = ("secrets", "token", "trusted_project_dirs", "mcp_env_allowlist", "security")
 
+# Every key here is read by code. Keys that nothing read (a per-agent `tools`
+# matrix, `tui.theme`/`side_width`, `mcp.max_servers`, `security.allow_remote_sec`
+# and a per-category `reasoning`/`max_turns` payload) are gone: config a user can
+# set that changes nothing is worse than no config, because it reads as a knob.
 DEFAULT_CONFIG: dict = {
-    "model_profile": "capable",
-    "budgets": {"max_turns": 25, "max_tokens": 120000, "max_cost_usd": 2.0, "max_parallel": 2, "max_depth": 1},
+    # only a `provider/model` id here does anything (HARNESS_MODEL); every agent
+    # otherwise inherits the user's opencode default model
+    "model_profile": "",
+    "budgets": {"max_turns": 25, "max_tokens": 120000, "max_cost_usd": 2.0,
+                "max_parallel": 2, "max_depth": 1, "worker_timeout_s": 600},
     "compress": {"enabled": True, "threshold": 4000, "intensity": "standard"},
-    "categories": {
-        "quick": {"reasoning": "low", "max_turns": 15},
-        "deep": {"reasoning": "high", "max_turns": 25},
-        "ultrabrain": {"reasoning": "max", "max_turns": 30},
-        "visual": {"reasoning": "medium", "max_turns": 20},
-        "writing": {"reasoning": "medium", "max_turns": 15},
-        "unspecified-low": {"reasoning": "low", "max_turns": 15},
-        "unspecified-high": {"reasoning": "high", "max_turns": 25},
-    },
-    "agents": {
-        "explore": {"reasoning": "low", "tools": {"write": False, "edit": False, "shell": False}},
-        "librarian": {"reasoning": "low", "tools": {"write": False, "edit": False, "shell": False}},
-        "plan-consultant": {"reasoning": "high"},
-        "plan-reviewer": {"reasoning": "high"},
-        "code-reviewer": {"reasoning": "medium", "tools": {"shell": False}},
-        "test-engineer": {"reasoning": "medium", "tools": {"shell": True}},
-        "security-auditor": {"reasoning": "high", "tools": {"shell": False}},
-    },
-    "skills": {"write_approval": True, "disabled": ["reverse-*"], "external_dirs": ["~/.agents/skills"], "create_dir": ""},
-    "memory": {"enabled": True, "cap_lines": 200, "retention_days": 30},
-    "mcp": {"servers": {}, "max_servers": 10},
-    "tui": {"theme": "dark", "side_width": 28},
-    "security": {"allow_remote_sec": False, "shell_allowlist": ["git", "pytest", "python", "python3", "npm", "npx", "rg", "grep", "ls", "cat", "bun", "node", "uv"]},
+    # the valid spawn intents; rlm.spawn validates against this list, so a typo
+    # is a refused spawn instead of a worker with an unknown kind
+    "categories": ["quick", "deep", "ultrabrain", "visual", "writing",
+                   "unspecified-low", "unspecified-high"],
+    "skills": {"write_approval": True, "disabled": ["reverse-*"],
+               "external_dirs": ["~/.agents/skills"], "create_dir": ""},
+    "memory": {"enabled": True, "cap_lines": 200, "retention_days": 30,
+               "max_facts": 2000},
+    "mcp": {"servers": {}},
+    "security": {"shell_allowlist": ["git", "pytest", "python", "python3", "npm",
+                                      "npx", "rg", "grep", "ls", "cat", "bun",
+                                      "node", "uv"]},
 }
 
 # Agent-mutable top-level keys. Everything else needs human CLI.
 # NOTE: there is intentionally no "router" section (retired) and no model
 # chains: every agent inherits the user's configured opencode default model.
-MUTABLE_TOP = {"model_profile", "budgets", "categories", "agents", "skills", "memory", "mcp", "tui", "compress"}
+MUTABLE_TOP = {"model_profile", "budgets", "categories", "skills", "memory",
+               "mcp", "compress"}
+
+# The intent list, with the legacy dict shape (categories.<name>.{reasoning,
+# max_turns}) still accepted so an existing harness.jsonc keeps loading.
+def intents(cfg: dict) -> list[str]:
+    cats = cfg.get("categories")
+    if isinstance(cats, dict):
+        return sorted(cats)
+    if isinstance(cats, (list, tuple)):
+        return [str(c) for c in cats]
+    return list(DEFAULT_CONFIG["categories"])
 
 
 def _strip_jsonc(text: str) -> str:
@@ -183,8 +190,11 @@ def _validate(cfg: dict) -> None:
             raise ValueError(f"budgets.{key} must be an int")
     if "max_cost_usd" in budgets and not isinstance(budgets["max_cost_usd"], (int, float)):
         raise ValueError("budgets.max_cost_usd must be a number")
-    if not isinstance(cfg.get("categories") or {}, dict):
-        raise ValueError("categories must be an object")
+    cats = cfg.get("categories")
+    if cats is not None and not isinstance(cats, (list, dict)):
+        raise ValueError("categories must be a list of intent names")
+    if "worker_timeout_s" in budgets and not isinstance(budgets["worker_timeout_s"], int):
+        raise ValueError("budgets.worker_timeout_s must be an int")
     if not isinstance(cfg.get("mcp", {}).get("servers", {}) or {}, dict):
         raise ValueError("mcp.servers must be an object")
 

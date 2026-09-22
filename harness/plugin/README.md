@@ -53,18 +53,21 @@ Provider / agents are still merged into `opencode.json` by
 `ensure_opencode_config` — the plugin does not duplicate them, and agents carry
 no model pins: they inherit your opencode default model.
 
-## TUI contract (tui.tsx, probed against opencode v2.0.8)
+## TUI contract (tui.tsx, probed against opencode 2.0.11)
 
 | target | what harness contributes |
 | --- | --- |
-| `home.footer.status` | `harness · N skills · M facts`, click opens the panel |
-| `session.panel` | the side panel: skills + memory views (renders only when `panel.name` is ours) |
-| `sidebar.content` / `sidebar.footer` | harness summary + `ctrl+g side panel` hint |
+| `home.footer.status` | `harness · 9.6k tok · $0.00`, click toggles the sidebar |
+| `sidebar.content` | the stats rows: Window / Tokens / Models / Todo / Skills / Agents / Memory, each click-to-expand |
+| `sidebar.footer` | `harness · click a row` |
 | `app` | the `app` slot hosts the `ctx.keymap.layer` call (see below) |
 
-Opened by `ctrl+g`, `/harness` (alias `/hp`), or the palette entry
-"Harness: open panel"; the panel's own keys are panel-scoped, so they cannot
-hijack the prompt.
+Rows follow opencode's own geometry (label `flexGrow` + value `flexShrink 0`, so
+values pin right at any width), use its own theme keys (`text.base` for labels,
+`text.muted` for values) and its own numbers (total tokens = in + out +
+reasoning + cache), and there is no "Context" row because opencode already
+renders one. Opened by `ctrl+g`, `/harness` (alias `/hp`), or the sidebar toggle;
+`/harness-refresh` (`/hr`) re-scans.
 
 Traps found by probing the running TUI — do not "simplify" these away:
 
@@ -72,8 +75,24 @@ Traps found by probing the running TUI — do not "simplify" these away:
   `Keymap.Provider is missing`; it must be called from inside a slot's render
   component, which is why the commands are registered from the `app` slot.
 - **No signals import.** State is `ctx.storage.memory(key, {initial})`, a
-  reactive `[store, update]` pair whose writes repaint the slots. Importing
-  `solid-js` would load a second instance and break reactivity.
+  reactive `[store, update]` pair. Importing `solid-js` would load a second
+  instance and break reactivity.
+- **A store write does NOT repaint the screen by itself.** Reads track (the slot
+  re-renders, `rev` 0 → 4 on a real session) but nothing tells opencode to redraw
+  the sidebar, so the panel kept its first paint — all zeros with a `⋯` that never
+  cleared. After every state write, call `ctx.renderer.requestRender()` **deferred
+  through `setTimeout(…, 0)`**: asking for a render from inside the update a
+  render is already applying is how a repaint goes re-entrant. `ctx.theme.text`
+  is `{base, muted, action, formfield, feedback}` — `text.default`/`text.subdued`
+  are from a different version and resolve to `undefined`, i.e. rows in a fallback
+  colour.
+- **A store `sync()` can block on the network**, so every scan is time-boxed
+  (`settle(p, SCAN_MS)`) and a `full` load requested while one is in flight is
+  queued (`pendingFull`) rather than dropped — the session id arrives with the
+  first slot render, exactly while the setup-time load is running.
+- **There is no todo store** (`data.session.todo` and `data.location.todo` are
+  `undefined`), so the session's todo list is read read-only from opencode's own
+  SQLite db and degrades to "none" if that schema changes.
 - **`require` and `Bun` are undefined** in the TUI plugin scope. File and SQLite
   access go through dynamic `import("node:fs")` / `import("bun:sqlite")`
   (`Bun.file` is *not* available here, unlike in server.ts).

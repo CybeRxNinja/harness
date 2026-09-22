@@ -8,8 +8,10 @@ lives under `.opencode/harness/`.
 - `harness tui` ensures opencode config + plugin, then execs `opencode`
   (auto-detected on `PATH`). `--setup-only` only ensures setup and prints
   paths (then run `opencode` yourself).
-- `harness plugin path` prints the shipped `harness.ts`; `harness plugin install`
-  copies it to `~/.config/opencode/plugins/` (auto-loaded by opencode v2).
+- `harness plugin path` prints both shipped entrypoints (`harness.ts`, `tui.tsx`);
+  `harness plugin install` copies them to `~/.config/opencode/plugins/harness/`
+  (auto-loaded by opencode v2). A bare `harness.ts` is server-only and never
+  appears in the TUI plugin list, which filters on `features.tui`.
 - Agents `orchestrator/ask/debug/review` + native `plan` come from
   `opencode.json` (merged by setup) with no model pins — they inherit your
   configured default model.

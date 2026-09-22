@@ -13,8 +13,12 @@ def test_restricted_modes_are_read_only(tmp_path):
     for mode in ("plan", "ask", "review"):
         for tool in ("write", "edit", "shell", "py", "spawn", "config_set"):
             assert not _allowed(mode, tool), f"{mode} must not allow {tool}"
-        for tool in ("read", "glob", "grep", "skill_view", "skills_list", "memory"):
+        for tool in ("read", "glob", "grep", "skill_view", "skills_list", "memory",
+                     "risk_check"):
             assert _allowed(mode, tool), f"{mode} should allow {tool}"
+        # classifying an action is read-only, so no mode may be denied it:
+        # without it the model can only ask the human about a grep
+        assert _allowed(mode, "risk_check")
 
     # only plan may read config; and the free modes allow everything
     assert _allowed("plan", "config_get") and not _allowed("ask", "config_get")
@@ -103,13 +107,26 @@ def test_full_turn_in_mock_mode(tmp_path, monkeypatch):
 
 
 def test_turn_without_a_model_reports_it(tmp_path, monkeypatch):
-    monkeypatch.setenv("HARNESS_MOCK", "1")
+    """The real backend needs a model configured; the error must name the fix."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.delenv("HARNESS_MOCK", raising=False)
     monkeypatch.delenv("HARNESS_MODEL", raising=False)
     from harness.loop import run_turn
 
     out = run_turn(tmp_path, "s2", "hi", mode="code")
     assert out["content"].startswith("no model:") and out["touched"] == []
+
+
+def test_mock_mode_needs_no_model(tmp_path, monkeypatch):
+    """HARNESS_MOCK is the offline path: it never calls a model, so requiring
+    one to be configured made every mock turn fail at resolve_model instead."""
+    monkeypatch.setenv("HARNESS_MOCK", "1")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.delenv("HARNESS_MODEL", raising=False)
+    from harness.loop import run_turn
+
+    out = run_turn(tmp_path, "s3", "hi", mode="code")
+    assert out["content"].startswith("[mock") and out["touched"] == []
 
 
 def test_compression_hint_does_not_leak_into_the_recall_hint(tmp_path, monkeypatch):

@@ -8,8 +8,6 @@ import sys
 import uuid
 from pathlib import Path
 
-from .paths import state_dir
-
 
 def _root(args) -> Path:
     return Path(getattr(args, "root", ".")).resolve()
@@ -68,6 +66,7 @@ def cmd_skills(args) -> int:
         for p in list_pending(con):
             print(f"{p['id']} {p['kind']} {p['name']} — {p['gist']}")
     elif args.skills_action in ("approve", "reject"):
+        from .memory import memory_file as _memory_file
         ids = [int(x) for x in args.ids] if args.ids != ["all"] else [
             r[0] for r in con.execute("SELECT id FROM pending").fetchall()]
         for pid in ids:
@@ -85,7 +84,10 @@ def cmd_skills(args) -> int:
                     con.commit()
                     print(f"approved {pid}")
                 else:
-                    ok = approve(con, pid, state_dir(root) / "MEMORY.md")
+                    # MEMORY.md at the project root is the file AGENTS.md's
+                    # precedence chain reads; writing <state>/MEMORY.md (as this
+                    # used to) put approved lessons somewhere nothing read.
+                    ok = approve(con, pid, _memory_file(root))
                     print(f"{'approved' if ok else 'missing'} {pid}")
             else:
                 con.execute("DELETE FROM pending WHERE id=?", (pid,))
@@ -106,15 +108,29 @@ def cmd_memory(args) -> int:
     elif args.memory_action == "save":
         print("saved", M.save_fact(con, args.text, "cli"))
     elif args.memory_action == "refine":
-        # stage lesson from last assistant message (evidence-backed: needs session text)
+        # Stage one evidence excerpt from the session's latest assistant turn.
+        # Two staged excerpts for the same lesson name is what auto-promotes it
+        # into MEMORY.md (see memory.auto_refine) — so a single run stages, and
+        # the memory capture that runs every turn is what accumulates evidence.
         rows = con.execute("SELECT content FROM messages WHERE session=? AND role='assistant' ORDER BY id DESC LIMIT 1",
                            (args.session,)).fetchall()
         ev = rows[0][0][:800] if rows else ""
         if len(ev) < 50:
             print("refine needs evidence: no substantial trajectory yet")
         else:
-            pid = M.stage_lesson(con, args.name or "lesson", ev, args.gist or ev[:120])
-            print(f"staged lesson {pid} (approve via harness skills approve {pid})")
+            name = args.name or "lesson"
+            pid = M.stage_lesson(con, name, ev, args.gist or ev[:120])
+            n = len(M.evidence(con, name))
+            promoted = M.auto_refine(con, M.memory_file(root))
+            note = (f"promoted to {M.memory_file(root)}" if name in promoted
+                    else f"staged lesson {pid} ({n} evidence excerpt(s); "
+                         f"2 promote it automatically)")
+            print(note)
+    elif args.memory_action == "show":
+        path = M.memory_file(root)
+        print(path.read_text() if path.exists() else f"(no memory yet: {path})")
+    elif args.memory_action == "prune":
+        print(f"pruned {M.prune(con, args.days)} fact(s) older than {args.days}d")
     con.close()
     return 0
 
@@ -182,7 +198,13 @@ def _opencode_config_path() -> Path:
 
 
 def _bundled_opencode_json() -> dict:
-    """harness-opencode.json from repo tree, installed package data, or inline fallback."""
+    """harness-opencode.json from repo tree, installed package data, or inline fallback.
+
+    Carries the permission ANCHORS (edit/task/webfetch/external_directory) but
+    deliberately no `bash` value: the shell map is generated from risk.py by
+    `ensure_opencode_config`, so the policy the model is told about and the rule
+    opencode enforces are the same object.
+    """
     import json as _j
     from pathlib import Path as _P
     cands = [
@@ -224,22 +246,47 @@ def ensure_opencode_config() -> str:
     for name, spec in want.get("agent", {}).items():
         node = agents.setdefault(name, {})
         for k, v in spec.items():
-            node.setdefault(k, v)
-    # Migration for upgraders: the read-only agents used to ship
-    # permission.bash = "deny". opencode only advertises its `shell` tool when
-    # bash is not denied, and zen's free-tier gate rejects any request whose
-    # tool list has no `shell` (403 "OpenCode's free tier can only be used from
-    # within OpenCode") — so every free model failed under `ask`/`review`.
-    # `edit: deny` still blocks writes; bash now prompts per command instead of
-    # disappearing entirely. Only the harness-shipped value is rewritten: a
-    # user-chosen bash setting is left alone.
+            # `permission` merges one level deeper: setdefault on the whole
+            # dict meant an agent that already had one never received a newly
+            # shipped anchor (webfetch/websearch/external_directory), so those
+            # only ever reached fresh installs.
+            if k == "permission" and isinstance(v, dict) and isinstance(node.get(k), dict):
+                for pk, pv in v.items():
+                    node[k].setdefault(pk, pv)
+            else:
+                node.setdefault(k, v)
+    # Shell policy is GENERATED, not shipped in the JSON (see risk.py): the
+    # destructive-command list is the one thing that must not drift between the
+    # classifier the model consults and the rule opencode enforces. A blanket
+    # "ask" prompted for reads and greps exactly as loudly as `git push`, which
+    # trains the owner to approve reflexively; the generated map allows the
+    # former and asks only for the latter. Migration for upgraders:
+    #   * `bash: "deny"` (the original read-only agents) removed the `shell`
+    #     tool opencode advertises, and zen's free-tier gate 403s any request
+    #     without it — every free model failed under `ask`/`review`.
+    #   * a bare "ask" was the fix for that, and is now replaced by the map.
+    # Only a bare string (a harness-shipped value) is rewritten: a user's own
+    # permission object is left exactly as they set it.
+    from . import risk as _risk
     migrated = []
-    for _name in ("ask", "review"):
+    for _name in want.get("agent", {}):
         _node = agents.get(_name)
-        _perm = _node.get("permission") if isinstance(_node, dict) else None
-        if isinstance(_perm, dict) and _perm.get("bash") == "deny" and _perm.get("edit") == "deny":
-            _perm["bash"] = "ask"
-            migrated.append(_name)
+        if not isinstance(_node, dict):
+            continue
+        _perm = _node.get("permission")
+        if not isinstance(_perm, dict):
+            continue
+        _bash = _perm.get("bash")
+        if isinstance(_bash, str):
+            _perm["bash"] = _risk.bash_permission_map()
+            migrated.append(f"{_name}: bash {_bash} -> generated (safe commands run, destructive ones ask)")
+    # The read-only floors are harness-owned negatives: never a prompt, because
+    # a prompt implies a "yes" could unlock them. Seeded only when absent so a
+    # user who deliberately re-enabled edits keeps their choice.
+    for _name in ("ask", "review", "orchestrator"):
+        _node = agents.get(_name)
+        if isinstance(_node, dict) and isinstance(_node.get("permission"), dict):
+            _node["permission"].setdefault("edit", "deny")
     # Legacy relay cleanup for upgraders: provider.harness and harness/* model
     # pins are removed (agents inherit the user default now). User-owned keys
     # are never touched.
@@ -267,11 +314,8 @@ def ensure_opencode_config() -> str:
     except Exception:
         pass
     if migrated:
-        print(
-            f"harness: agent {', '.join(migrated)}: bash deny -> ask (a denied shell tool "
-            "trips zen's free-tier gate; shell commands now need approval)",
-            file=sys.stderr,
-        )
+        print("harness: shell permissions regenerated from the risk policy — "
+              + "; ".join(migrated), file=sys.stderr)
     dest.write_text(_j.dumps(cur, indent=2) + "\n")
     return str(dest)
 
@@ -581,12 +625,14 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--ids", nargs="*", default=[])
     k.set_defaults(fn=cmd_skills)
     m = sub.add_parser("memory")
-    m.add_argument("memory_action", choices=["search", "save", "refine"])
+    m.add_argument("memory_action", choices=["search", "save", "refine", "show", "prune"])
     m.add_argument("query", nargs="?", default="")
     m.add_argument("--text", default="")
     m.add_argument("--session", default="default")
     m.add_argument("--name", default="")
     m.add_argument("--gist", default="")
+    m.add_argument("--days", type=int, default=30,
+                   help="retention window for `memory prune`")
     m.set_defaults(fn=cmd_memory)
     t = sub.add_parser("checkpoint")
     t.add_argument("ck_action", choices=["save", "restore"])

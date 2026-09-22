@@ -58,38 +58,59 @@ plugin activation. The file therefore has no imports and returns nothing; see
 ## TUI views (a stats panel in the sidebar)
 
 `tui.tsx` is the plugin's TUI half. It fills **opencode's existing sidebar** with
-a Kilo-style stats/info panel and adds a small footer chip — it deliberately does
-not rearrange the TUI: no routes, no docked overlay, no replaced slots.
+a stats/info panel and adds a small footer chip — it deliberately does not
+rearrange the TUI: no routes, no docked overlay, no replaced slots.
 
 | view | slot | what it shows |
 | --- | --- | --- |
 | chip | `home.footer.status` | `harness · 9.6k tok · $0.00` — click toggles the sidebar (with no session yet it reads `harness · click for stats`, since the skill/fact stores are location-scoped and empty at the default location) |
-| stats panel | `sidebar.content` | the sections below |
-| hint | `sidebar.footer` | `harness · /harness · click header` |
+| stats panel | `sidebar.content` | the rows below |
+| hint | `sidebar.footer` | `harness · click a row` |
 
 ```
 ctrl+g              toggle the stats sidebar (palette: "Harness: toggle stats sidebar")
 /harness            same, from the prompt (/hp is an alias)
 /harness-refresh    re-scan everything now (/hr)
-click a header      expand that section (one at a time — accordion)
+click a row         expand its detail lines (one row at a time)
 ```
 
-The sidebar is a short, fixed viewport that does not scroll — about **11 rows**
-in a normal terminal — so the layout is budgeted: one header row, six one-line
-headlines, and at most four detail rows for whichever section is open. That is
-why **nothing is expanded by default**: with Context open the last sections were
-pushed off the bottom and looked missing (they were unreachable, since the
-viewport cannot scroll). Click a header to fold/unfold.
+The layout is built out of opencode's own row grammar — a label in
+`theme.text.base` on the left, its value in `theme.text.muted` pinned to the
+right edge (`flexGrow` on the label, `flexShrink 0` on the value, the same
+geometry opencode's MCP rows use). That keeps the numbers aligned at any panel
+width, with no width constant to guess:
 
-| section | rows | source |
+```
+harness ses_f3732c95 · 14 skills · 0 facts
+▸ Window                      █░░░░░░░ 1%
+▸ Tokens                   11.8k · $0.0000
+▸ Models               1 used · 6 providers
+▸ Todo                              0 items
+▸ Skills                      14 installed
+▸ Agents                     11 available
+▸ Memory                           0 facts
+```
+
+Every value is read the same way opencode reads it, so the panel agrees with the
+app's own readout: total tokens = in + out + reasoning + cache read + write,
+cost from `session.cost(sid)`. There is deliberately **no "Context" row** —
+opencode's sidebar already renders one at the top, and a second copy is what made
+the panel look like an overlay bolted onto the app instead of part of it.
+
+| row | rows when expanded | source |
 | --- | --- | --- |
-| header | session id (the agent · model moved into Context) | `data.session.get(sid)` |
-| Context | `model · agent`, in/out, reasoning · cache, cost | `session.tokens` + the provider's `models[id].limit.context` |
-| Token usage | Input · Output, Reasoning, Cache read · write, Cost | `session.tokens` |
-| Models | per provider: available model count, then `model steps cost` | assistant messages grouped by provider/model |
+| header | — | session id, skill/fact counts (`data.session.get(sid)`) |
+| Window | exact `total / limit`, model · agent | `session.tokens` + the provider's `models[id].limit.context` |
+| Tokens | input · output, reasoning, cache read · write, cost | `session.tokens`, `session.cost(sid)` |
+| Models | per provider: available model count, then the model used | assistant messages grouped by provider/model |
 | Todo | `○ ◐ ●` + text, this session only | opencode's `todo` table (read-only) |
-| Agents + Skills | the 11 harness skills, then agents | `location.skill` / `location.agent` after `sync()` |
+| Skills | the bundled harness skills | `location.skill` after `sync()` |
+| Agents | the registered agents | `location.agent` after `sync()` |
 | Memory | durable facts for the project | the same `sessions.db` the server half uses |
+
+A usage bar always shows at least one cell for non-zero usage: 1% of eight cells
+rounds to zero, and an empty bar next to `1%` reads as a broken panel. The
+in-flight marker is a single `⋯` in the header, never a sentence.
 
 Skill rows drop the shared namespace: the store names them
 `harness-spec-driven-development` (that is their id), and the row shows
@@ -103,7 +124,7 @@ install). If your opencode hides the sidebar, the palette has `Show sidebar`
 (`ctrl+x` then `b`). Note opencode puts its own context block at the top of the
 sidebar — ours sits underneath it.
 
-Implementation notes worth keeping (all probed against opencode v2.0.8):
+Implementation notes worth keeping (all probed against opencode 2.0.11):
 
 - `ctx.keymap.layer` throws `Keymap.Provider is missing` unless called from
   inside a slot's render component, so commands register from the `app` slot.
@@ -119,13 +140,31 @@ Implementation notes worth keeping (all probed against opencode v2.0.8):
 - `require` and `Bun` are **not** defined in the TUI plugin scope; file and
   SQLite access use dynamic `import("node:fs")` / `import("bun:sqlite")`.
 - Counts are harness-only for skills (the store also holds opencode's builtins,
-  so “13 skills” above 11 listed rows reads like a bug), and a failed load is
+  so a store-wide count above the harness rows listed reads like a bug), and a failed load is
   shown in the panel because cli-side `console.error` never reaches the log.
 - **The in-flight placeholder reads a reactive flag, never the `loading` guard.**
   `loading` is a plain variable, so a tracked expression reports whatever it held
   at that repaint — that is how `scanning…` stayed on screen next to fully
   loaded stats. `view.scanning` is set when a scan starts and cleared in the same
   state update that bumps `rev`, so the placeholder cannot outlive its scan.
+  Scans are additionally time-boxed (`settle(p, SCAN_MS)`): a store `sync()` can
+  block on the network, and one unreachable provider registry must not strand the
+  panel on its placeholder.
+- **A state write must ask for a repaint (`ctx.renderer.requestRender`).** The
+  rows come from a plugin store and from plain reads — neither is a host signal —
+  so nothing tells opencode to redraw the sidebar for them. Measured on a real
+  session: the store updates landed (`rev` 0 → 4, with the session id and 14
+  skills) while the screen kept its first paint — an all-zero panel with a `⋯`
+  that never cleared. The request is deferred through `setTimeout(…, 0)`: asking
+  for a render from inside the update a render is already applying is how a
+  repaint goes re-entrant. Verified by reading the painted text back out of the
+  pty stream (which is the only reliable witness — a screen-scraper that models
+  the cell grid lies once opencode does a full repaint).
+- **A `full` load is queued, never dropped.** The session id arrives with the
+  first slot render, i.e. while the setup-time load (no session id yet) is still
+  in flight; returning early there left the panel on its session-less,
+  all-zero snapshot for good. `pendingFull` re-runs it when the current load
+  ends.
 - **The 8s poll stands down when nothing is on screen.** opencode loads this
   entrypoint in the long-lived server process too, where no slot ever renders;
   polling there meant a session message walk + four store syncs + two SQLite
@@ -172,13 +211,15 @@ agent's `permission.bash` is not `deny`, so **any** agent that denies bash —
 including a read-only one — makes every free model 403.
 
 Harness used to ship its read-only agents (`ask`, `review`) with
-`"bash": "deny"`, which is why free models failed under them. They now use
-`"bash": "ask"`: the shell tool is advertised (so free models work) while
-commands still need per-command approval, and `edit: deny` keeps writes off.
-`harness plugin install` migrates an existing install (the old `deny` value is
-rewritten to `ask` and reported on stderr); an agent of your own is never
-touched. If a custom agent still trips this, use a shell-capable agent, set
-`"bash": "ask"` on it, or use a paid key.
+`"bash": "deny"`, which is why free models failed under them. Bash is now
+always allowed at some level — the shell tool stays advertised — while the
+*granular rule map* decides what actually prompts: `harness plugin install`
+writes `permission.bash` from `harness/risk.py` (safe commands run, destructive
+ones ask), so reads and test runs never interrupt and `edit: deny` still keeps
+writes off. An existing install is migrated from the old bare `"deny"`/`"ask"`
+string and the change is reported on stderr; a permission object you wrote
+yourself is never touched. If a custom agent still trips this, give it
+shell-capable permissions and let the generated map gate it, or use a paid key.
 
 **The TUI Plugins panel lists only `features.tui` plugins** — that flag is set
 only when the plugin has a `tui` entrypoint. Harness ships one
@@ -219,4 +260,4 @@ update with `opencode upgrade`.
 - A long chat: when the session compacts, the recalled memory brief is applied.
 - `python scripts/opencode_smoke.py` (CI runs this too): boots a real
   `opencode serve`, forces activation, asserts the plugin is `active` with the
-  11 bundled skills seeded.
+  the bundled skills seeded.

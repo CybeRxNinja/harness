@@ -547,17 +547,31 @@ def test_tui_plugin_is_a_sidebar_panel_not_a_layout_change():
     assert 'slash: { name: "harness", aliases: ["hp"] }' in tui
     assert 'slash: { name: "harness-refresh", aliases: ["hr"] }' in tui
 
-    # the Kilo sections, all of them
-    for name, title in (("context", "Context"), ("usage", "Token usage"), ("models", "Models"),
-                        ("todo", "Todo"), ("agents", "Agents + Skills"), ("memory", "Memory")):
-        assert f'name="{name}"' in tui and f'title="{title}"' in tui, f"{name}/{title}"
+    # the stat rows, all of them — and deliberately NO "Context" row: opencode's
+    # own sidebar already renders one, and a second copy is what made the panel
+    # look like a foreign overlay rather than part of the app
+    for row in ("window", "tokens", "models", "todo", "skills", "agents", "memory"):
+        assert f'id="{row}"' in tui, row
+    assert 'label="Context"' not in tui, "opencode already renders Context"
 
-    # accordion: the sidebar viewport is short and does not scroll, so exactly
-    # one section shows details and the rest keep a one-line headline
+    # one row expands at a time: the sidebar viewport is short, so the collapsed
+    # rows have to stay visible as one-line stats
     assert "const isOpen = (name: string) => view.open === name" in tui
-    assert 'd.open = d.open === props.name ? "" : props.name' in tui
-    # every detail closure must read a tracked value (see the Rows docstring)
+    assert 'd.open = d.open === props.id ? "" : props.id' in tui
+    # every detail closure must read a tracked value (see the Row docstring)
     assert tui.count("void view.rev") >= 8, tui.count("void view.rev")
+
+    # native row geometry, copied from opencode's own sidebar rows: the label
+    # takes flexGrow and the value flexShrink 0, so the value pins to the right
+    # edge at any panel width without a hard-coded width constant
+    assert 'flexGrow={1} wrapMode="none" truncate' in tui
+    assert 'flexShrink={0} wrapMode="none"' in tui
+    # theme keys opencode actually exposes (text.base/muted/action/feedback);
+    # text.default/text.subdued are from a different version and resolve to
+    # undefined, which renders rows in a fallback colour — i.e. "foreign"
+    assert "theme?.text?.base" in tui and "theme?.text?.muted" in tui
+    assert "theme?.text?.default" not in tui and "theme?.text?.subdued" not in tui
+    assert "theme?.text?.feedback?.warning" in tui
 
     # the context window comes from the provider's model limits
     assert "provEntry?.models?.[modelName]" in tui and "limit?.context" in tui
@@ -607,7 +621,7 @@ def test_tui_panel_counts_and_repaints():
     # limit) must not re-run on the 8s poll: a blocking provider.sync() every
     # few seconds is what kept the placeholder on screen
     assert "const scanSlow = async (loc: any, data_: Rec)" in tui
-    assert "if (full || !scanned) {" in tui and "await scanSlow(loc, data_)" in tui
+    assert "if (full || !scanned) {" in tui and "await settle(scanSlow(loc, data_), SCAN_MS)" in tui
     assert "void load(true)" in tui and "await load(true)" in tui
     # the poll stands down when nothing has been drawn: the same entrypoint is
     # loaded in the long-lived server process, where no slot ever renders
@@ -619,10 +633,71 @@ def test_tui_panel_counts_and_repaints():
     assert "▪ ${shortSkill(s)}" in tui
     # Solid re-runs tracked JSX expressions, not the render body: detail rows must
     # be built inside the JSX expression, or they freeze at the first paint
-    assert "{(props.lines().length ? props.lines() : [props.empty]).map" in tui
+    assert "{(props.lines().length ? props.lines() : [props.empty]).slice(0, DETAIL_LIMIT).map" in tui
     # a failed load surfaces in the panel (cli-side console.error is not logged)
     assert 'd.note = notes[0] ?? ""' in tui
-    assert "view.note ? cut(view.note, 46)" in tui
+    assert "cut(view.note, 40)" in tui
+
+
+def test_tui_panel_never_wedges_and_reads_like_opencode():
+    """Driving the real TUI on 2.0.11 showed the panel stuck on
+    `harness · no session` with every stat at zero and `scanning…` on screen at
+    the end of a 26s run — while a live probe proved `sidebar.content` DOES
+    receive the active `sessionID` and `data.session.get(sid)` returns real
+    tokens. The wedge was the load mutex: the setup-time load (no session id
+    yet) was still in flight inside a store `sync()`, so the load that the first
+    slot render triggered returned early and the panel never got a second turn.
+
+    Contracts that keep that from coming back — plus the ones that stop the
+    panel from reading as a foreign overlay rather than part of opencode.
+    """
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+
+    # 1. every scan is time-boxed, so the panel always settles
+    assert "const SCAN_MS" in tui
+    assert "function settle(p: any, ms: number)" in tui
+    assert "await settle(scanSlow(loc, data_), SCAN_MS)" in tui
+    for store in ("model", "provider", "agent", "skill"):
+        assert f"settle(store?.{store}?.sync?.(loc), SCAN_MS)" in tui, store
+    assert "settle(data_?.session?.sync?.(sessionID), SCAN_MS)" in tui
+
+    # 2. a `full` load requested while one is in flight is queued, not dropped
+    assert "if (loading) {" in tui and "pendingFull = pendingFull || full" in tui
+    assert "if (pendingFull) {" in tui and "pendingFull = false" in tui
+
+    # 3. the header never names a missing session: the id is shown or omitted
+    assert 'view.sessionID || "no session"' not in tui
+    assert 'view.sessionID || ""' in tui
+
+    # 4. opencode's own numbers, so the panel agrees with the app's readout:
+    #    total tokens = input+output+reasoning+cache read+write, cost from the
+    #    session store's cost accessor rather than a re-derived sum
+    assert "function totalTokens(tokens: Rec | null): number" in tui
+    for field in ("input", "output", "reasoning"):
+        assert f"Number(tokens.{field} ?? 0)" in tui, field
+    assert "Number(cache.read ?? 0)" in tui and "Number(cache.write ?? 0)" in tui
+    assert "data_?.session?.cost?.(sessionID)" in tui
+
+    # 5. a usage bar must never read as "unused": 1% of 8 cells rounds to zero
+    assert "if (clamped > 0 && filled < 1) filled = 1" in tui
+
+    # 6. the in-flight marker is a glyph in the header, not a sentence that can
+    #    be left behind by a load that never finishes
+    assert "scanning skills · memory · todos" not in tui
+    assert '{view.scanning ?' in tui
+
+    # 7. a load must ASK for a repaint. The rows come from a plugin store and
+    #    from plain reads, so nothing tells opencode to redraw the sidebar: on a
+    #    real session the store updates landed (rev 0 -> 4, session id, 14
+    #    skills) while the screen kept its all-zero first paint. Verified fixed
+    #    by reading the painted text out of the pty stream, which then contained
+    #    `harness ses_… · 11 available` and `Tokens 11.8k · $0.0000`.
+    assert "const repaint = () =>" in tui
+    assert "r?.requestRender" in tui and 'typeof fn === "function"' in tui
+    assert "setTimeout(() => {" in tui, "the repaint request must be deferred"
+    # every state write repaints (that is the only path a load's data takes out)
+    assert "      repaint()\n    }" in tui, "patch() must request the repaint"
 
 
 # Parses each entrypoint with Bun's transpiler (JSX-aware, no module
@@ -666,8 +741,8 @@ def test_plugin_features(tmp_path):
     from harness.cli import _plugin_files
     script = tmp_path / "features.ts"
     script.write_text(FEATURES)
-    # HOME is pointed at tmp so the drift case cannot read the developer's real
-    # fact DB (factDbs falls back to $HOME/.opencode/harness/sessions.db)
+    # HOME is pointed at tmp so nothing here can reach the developer's real
+    # fact DB (facts come from <project>/.opencode/harness/sessions.db only)
     env = {**os.environ, "HOME": str(tmp_path)}
     r = subprocess.run([BUN, "run", str(script), _plugin_files()[0]],
                        capture_output=True, text=True, timeout=180, cwd=str(REPO_ROOT), env=env)

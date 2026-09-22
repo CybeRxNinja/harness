@@ -1,15 +1,21 @@
 """Single agent loop. Mode-aware tool allowlist. Budget-enforced. No infinite loops."""
 from __future__ import annotations
 
+import json
+import os
 import time
 from pathlib import Path
 
 from . import models as backend
+from . import orchestrator as O
 from .kernel import Kernel
 
 # Restricted modes are read-only. `skills_list` belongs in every set that
 # allows `skill_view`: without it the model has to guess skill names.
-READ_ONLY_TOOLS = {"read", "glob", "grep", "skill_view", "skills_list", "memory"}
+# `risk_check` is read-only by nature (it classifies, it never acts), so every
+# mode gets it — the model can always ask "does this need the owner?" instead of
+# guessing or asking the human about a grep.
+READ_ONLY_TOOLS = {"read", "glob", "grep", "skill_view", "skills_list", "memory", "risk_check"}
 MODE_TOOLS = {
     "code": None,  # all
     "orchestrator": None,
@@ -40,7 +46,12 @@ def _fresh_history(hist: list[dict]) -> list[dict]:
 SYSTEM = {
     "code": "You are Harness, a senior coding agent. Be concrete. Use tools. Verify with tests. Return summary+files changed.",
     "orchestrator": ("You are the ORCHESTRATOR. Never write product code yourself. Decompose, spawn(category=...) "
-                     "parallel workers, merge diffs, verify with an independent reviewer before done."),
+                     "parallel workers, merge diffs, verify with an independent reviewer before done. "
+                     "Reads, greps, status checks and test runs never need the owner: just do them. "
+                     "Before anything destructive or irreversible (git push, deletes, publishes, "
+                     "deploys, schema drops, config writes), call risk_check once and ask the owner "
+                     "a single focused question naming what cannot be undone. Never ask again for "
+                     "the same action in the same session."),
     "plan": "You are in PLAN mode. Read-only. Produce a decision-complete plan, no code writes.",
     "ask": "You are in ASK mode. Answer from the codebase. No writes.",
     "debug": "You debug methodically: reproduce, localize, reduce, fix, guard.",
@@ -68,21 +79,31 @@ def run_turn(project_root: Path, session: str, user_msg: str, mode: str = "code"
     kernel = Kernel(project_root, session)
     add_message(con, session, "user", user_msg)
 
-    # recall (kibitzer-lite): top-1 hint, verified-not-trusted
+    # recall (kibitzer-lite): top-1 hint, verified-not-trusted. The whole turn
+    # is the query: recall tokenizes it, and a longer query means more terms to
+    # match (the old 80-char phrase match almost never hit anything).
+    mem_cfg = cfg.get("memory", {}) or {}
     hint = ""
-    try:
-        hits = M.recall(con, user_msg[:80], 1)
-        if hits:
-            hint = f"\nrecalled memory: {hits[0]['text'][:200]} [{hits[0].get('source','')}] (verify before relying)"
-    except Exception:
-        pass
+    if mem_cfg.get("enabled", True):
+        try:
+            hits = M.recall(con, user_msg[:200], 1)
+            if hits:
+                hint = (f"\nrecalled memory: {hits[0]['text'][:200]} "
+                        f"[{hits[0].get('source','')}] (verify before relying)")
+        except Exception:
+            pass
 
     # Model: explicit provider/model passes through, otherwise the user's
     # configured opencode default (agents inherit; no relay, no router ids).
+    # HARNESS_MOCK is the offline path: it must not require a configured model
+    # (a real model is never called there, see models.chat).
     try:
         model = backend.resolve_model(model, cfg)
     except RuntimeError as e:
-        return {"content": f"no model: {e}", "touched": [], "route_model": ""}
+        if os.environ.get("HARNESS_MOCK") != "1":
+            return {"content": f"no model: {e}", "touched": [], "route_model": "",
+                    "verified": False, "memory": {}, "ledger": None}
+        model = model or "mock/model"
 
     budgets = dict((cfg.get("budgets", {}) or {}))
     budgets.update(budget_override or {})
@@ -101,12 +122,15 @@ def run_turn(project_root: Path, session: str, user_msg: str, mode: str = "code"
     total_cost = 0.0
     t0 = time.time()
     final = ""
+    verified = False  # a test/lint run actually came back clean this turn
+    error = ""
     for _ in range(max_turns):
         try:
             msg = backend.chat(msgs, model=model, cfg=cfg, tools=TOOLS_SCHEMA,
                                workdir=project_root)
         except Exception as e:
             final = f"model backend failed: {e}"
+            error = str(e)[:300]
             break
         content = str(msg.get("content", ""))
         tcalls = msg.get("tool_calls") or []
@@ -132,6 +156,10 @@ def run_turn(project_root: Path, session: str, user_msg: str, mode: str = "code"
             except Exception as e:
                 res = f"tool error: {e}"
             text = str(res)
+            # Evidence, not assertion: a verification command that ran clean is
+            # what lets the ledger close a box (see orchestrator.auto_check).
+            if name == "shell" and O.is_verification(str(args.get("cmd", ""))):
+                verified = O.verification_passed(text) or verified
             ccfg = (cfg.get("compress", {}) or {})
             if ccfg.get("enabled", True) and len(text) >= int(ccfg.get("threshold", 4000)):
                 from .compress import stacked as _stacked
@@ -151,14 +179,28 @@ def run_turn(project_root: Path, session: str, user_msg: str, mode: str = "code"
             break
     else:
         final = "stopped: max_turns"
-    # inbox flush: surface child completions
+    # inbox flush: surface child completions. inbox() marks what it returns, so
+    # a child's summary is handed to the parent exactly once (it used to be
+    # re-appended on every turn).
     try:
         for m in R.inbox(con)[:2]:
             final += f"\n[child {m['from']}] {m['content'][:500]}"
     except Exception:
         pass
+    # Remember what this turn should carry forward (facts + progress), and close
+    # the active plan box only when this turn actually verified its work.
+    memory_result: dict = {}
+    checked: str | None = None
+    try:
+        memory_result = M.capture_turn(con, session, final, verified=verified,
+                                       error=error, cfg=cfg, root=project_root)
+        if mem_cfg.get("enabled", True):
+            checked = O.auto_check(project_root, final, verified)
+    except Exception:
+        pass
     con.close()
-    return {"content": final, "touched": touched, "route_model": model}
+    return {"content": final, "touched": touched, "route_model": model,
+            "verified": verified, "memory": memory_result, "ledger": checked}
 
 
 def _exec_tool(name, args, root, session, cfg, con, kernel, allowlist, auto_approve, touched) -> str:
@@ -205,6 +247,13 @@ def _exec_tool(name, args, root, session, cfg, con, kernel, allowlist, auto_appr
         return S.view(root, cfg, args.get("name", ""), args.get("path", ""))[:4000]
     if name == "skills_list":
         return str([(s["name"], s["description"][:60]) for s in S.scan(root, cfg)])[:4000]
+    if name == "risk_check":
+        from . import risk as RK
+        actions = args.get("actions")
+        if isinstance(actions, list) and actions:
+            return json.dumps(RK.assess_many(actions, root), indent=2)[:3000]
+        return json.dumps(RK.assess(args.get("action", ""), args.get("kind", "auto"),
+                                    args.get("path", ""), root), indent=2)[:3000]
     if name == "config_get":
         from .config import redact
         return str(cget(redact(cfg), args.get("path", "budgets")))[:2000]
@@ -228,6 +277,7 @@ TOOLS_SCHEMA = [
     {"type": "function", "function": {"name": "memory", "description": "recall/save facts", "parameters": {"type": "object", "properties": {"op": {"type": "string"}, "q": {"type": "string"}, "text": {"type": "string"}}}}},
     {"type": "function", "function": {"name": "skill_view", "description": "progressive skill load L1/L2", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}}}},
     {"type": "function", "function": {"name": "skills_list", "description": "L0 skill index", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "risk_check", "description": "classify actions: which are safe vs destructive/irreversible (ask the owner only for those). Pass one `action`, or `actions` for a whole plan", "parameters": {"type": "object", "properties": {"action": {"type": "string"}, "kind": {"type": "string"}, "path": {"type": "string"}, "actions": {"type": "array", "items": {"type": "string"}}}}}},
     {"type": "function", "function": {"name": "config_get", "description": "read config (redacted)", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}},
     {"type": "function", "function": {"name": "config_set", "description": "set allowlisted config with backup", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "value": {}, "scope": {"type": "string"}}}}},
 ]

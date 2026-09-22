@@ -13,7 +13,7 @@ providers — every agent inherits your configured default model.
 ```bash
 pip install -e .            # or: curl -fsSL https://raw.githubusercontent.com/CybeRxNinja/harness/main/install.sh | bash
 python -m harness setup     # seed skills, verify your model + opencode binary
-python -m harness plugin install   # -> ~/.config/opencode/plugins/harness.ts (auto-loaded by opencode v2)
+python -m harness plugin install   # -> ~/.config/opencode/plugins/harness/{server.ts,tui.tsx}
 opencode                  # stock opencode; set "model" in opencode.json first
 ```
 
@@ -31,7 +31,8 @@ never clobbered. Sessions persist per directory under
 <project>/.opencode/harness/   sessions + FTS memory, MEMORY.md, kernel,
                                 workers, runs, checkpoints, plans/boulder/ledger,
                                 project skills, project config, backups
-~/.config/opencode/            opencode.json (merged agents) + plugins/harness.ts
+~/.config/opencode/            opencode.json (merged agents + generated shell
+                               policy) + plugins/harness/{server.ts,tui.tsx}
 ~/.harness/                    global skills/bundles, user config
 ```
 
@@ -72,9 +73,10 @@ See `docs/plugin.md`.
 
 ```
 harness/            loop, kernel(RLM), rlm(spawn), models(opencode backend),
-                    reasoning, compact, orchestrator, store, memory, skills,
-                    mcp, checkpoints, doctor, cli
-harness/plugin/     opencode v2 server plugin (harness.ts) + README
+                    risk(permission policy), compact, orchestrator, store,
+                    memory, skills, mcp, checkpoints, doctor, cli
+harness/data/skills bundled skills (ladder/router/review packs), NOTICE.md
+harness/plugin/     opencode v2 server + TUI entrypoints (harness.ts, tui.tsx)
 docs/               one page per feature (start at docs/quickstart.md, docs/plugin.md)
 scripts/            optional external skill-pack installers (Addy / reverse-router)
 install.sh          CLI + plugin installer (no binary)
@@ -84,4 +86,4 @@ install.sh          CLI + plugin installer (no binary)
 
 - `docs/quickstart.md` `agents.md` `rlm.md` `skills.md` `memory.md` `plugin.md`
 - `docs/config.md` `security.md` `mcp.md` `tui.md` `compression.md`
-- `AGENTS.md` (agent operating rules), `SOUL.md`, `MEMORY.md`, `CONSTRAINTS.md`
+- `AGENTS.md` (persona, build discipline, operating rules) · `MEMORY.md` (durable lessons)
