@@ -556,7 +556,7 @@ def cmd_plugin(args) -> int:
             ensure_opencode_config()
         except Exception as e:
             print(f"harness: provider merge failed ({e}) — continuing", file=sys.stderr)
-        print(f"plugin installed at {plug} (stock opencod v2, no fork needed)")
+        print(f"plugin installed at {plug} (stock opencode v2, no fork needed)")
         print("restart opencode/TUI to load it; agents use your opencode default model")
     elif args.plugin_action == "uninstall":
         for line in uninstall_plugin():
@@ -592,7 +592,7 @@ def cmd_tui(args) -> int:
     if not binary:
         print("opencode binary not found. Install stock opencode, e.g.:")
         print("  npm create opencode@latest   (or: npx opencode)")
-        print(f"(opencod.json wired at {cfg_path}; harness plugin at {plug}; CLI fallback: harness chat)")
+        print(f"(opencode.json wired at {cfg_path}; harness plugin at {plug}; CLI fallback: harness chat)")
         return 1
     print(f"launching {binary} (agents inherit your opencode default model; no relay)")
     os.execvp(binary, [binary])
