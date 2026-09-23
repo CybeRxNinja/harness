@@ -1,5 +1,11 @@
 name: ci
-on: [push, pull_request]
+# Branch pushes and PRs only: a `plugin-v*` tag points at a commit this already
+# tested, and the release workflow runs there. `branches:` is what excludes tag
+# events — a bare `[push, pull_request]` ran the whole matrix twice per release.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
 
 # A newer run for the same ref replaces the older one. Without this every push
 # leaves a full run behind, and a stalled job sits in the queue for hours.

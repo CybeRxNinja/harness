@@ -65,6 +65,25 @@ class Server:
         self.boot_timeout = boot_timeout
         self.lines: list[str] = []
 
+    def banner(self) -> str | None:
+        """Read the startup banner once: which auth mode is this server in?
+
+        A machine that has run opencode before reports `server password <x>` and
+        wants HTTP basic auth. A CLEAN one (CI) warns
+        "OPENCODE_SERVER_PASSWORD is not set; server is unsecured" and wants no
+        auth at all — treating that as "no banner" is what made this script file
+        a healthy server as a 45s timeout.
+        """
+        for line in list(self.lines):
+            m = re.search(r"server password (\S+)", line)
+            if m:
+                token = base64.b64encode(f"opencode:{m.group(1)}".encode()).decode()
+                self.auth = f"Basic {token}"
+                return "password"
+            if "is unsecured" in line or "OPENCODE_SERVER_PASSWORD is not set" in line:
+                return "unsecured"
+        return None
+
     def tail(self, n: int = 25) -> str:
         """The server's last output — what a failure actually looked like."""
         return "\n".join(self.lines[-n:]) or "(no output)"
@@ -102,13 +121,9 @@ class Server:
                 raise RuntimeError(
                     f"opencode serve exited early (code {self.proc.returncode}):\n{self.tail()}"
                 )
-            # the banner can arrive in any order relative to the API coming up
-            for line in list(self.lines):
-                m = re.search(r"server password (\S+)", line)
-                if m:
-                    token = base64.b64encode(f"opencode:{m.group(1)}".encode()).decode()
-                    self.auth = f"Basic {token}"
-            if self.auth and self.get("/api/plugin") is not None:
+            # the banner can arrive in any order relative to the API coming up,
+            # and the API itself is the health check either way
+            if self.banner() and self.get("/api/plugin") is not None:
                 return self
             time.sleep(0.25)
         raise RuntimeError(
@@ -123,8 +138,13 @@ class Server:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
 
+    def headers(self) -> dict:
+        """No Authorization header at all when the server has no password — an
+        empty header value is not the same request."""
+        return {"Authorization": self.auth} if self.auth else {}
+
     def get(self, path: str):
-        req = urllib.request.Request(self.base + path, headers={"Authorization": self.auth})
+        req = urllib.request.Request(self.base + path, headers=self.headers())
         try:
             with urllib.request.urlopen(req, timeout=5) as r:
                 return json.loads(r.read())
@@ -137,7 +157,7 @@ def wait_for_activation(srv: Server, timeout: float = 45.0) -> dict:
     req = urllib.request.Request(
         srv.base + "/api/session",
         method="POST",
-        headers={"Authorization": srv.auth, "Content-Type": "application/json"},
+        headers={**srv.headers(), "Content-Type": "application/json"},
         data=b"{}",
     )
     with urllib.request.urlopen(req, timeout=30) as r:
@@ -180,6 +200,7 @@ def main() -> int:
         status = harness.get("state", {}).get("status")
         features = harness.get("features", {})
         src_path = harness.get("source", {}).get("path")
+        print(f"server: auth={srv.auth[:7] + '…' if srv.auth else 'none'}")
         print(f"plugin: id={harness.get('id')} status={status} features={features} path={src_path}")
         if status != "active":
             failures.append(f"plugin not active: {json.dumps(harness)}")
