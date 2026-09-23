@@ -18,6 +18,9 @@
 // What it registers:
 //   1. skill seeding      ctx.skill.transform(editor => editor.add(skill))
 //   2. native tools       ctx.tool.transform(editor => editor.add(tool))
+//      skills_list / skill_view / memory_recall, plus todowrite / todoread —
+//      the plan tools opencode 2.x no longer ships, backed by the harness todo
+//      space (the same `todos` table the sidebar panel reads).
 //   3. output condensing  ctx.tool.hook("execute.after", fn)
 //   4. compaction brief   ctx.session.hook("compaction", fn)
 //
@@ -177,7 +180,7 @@ async function readSkill(skill: Rec, subpath?: string): Promise<string> {
 
 // Project-local only: a $HOME probe here recalled a different project's facts
 // (state_dir() in harness/paths.py is always <root>/.opencode/harness).
-function factDb(projectDir: string): string {
+function stateDb(projectDir: string): string {
   return `${projectDir}/.opencode/harness/sessions.db`
 }
 
@@ -205,7 +208,7 @@ async function facts(
   const where = mode === "recent" ? "1=1" : patterns.map(() => "text LIKE ?").join(" OR ")
   const params = mode === "recent" ? [] : patterns.map((p) => `%${p}%`)
   try {
-    const dbPath = factDb(projectDir)
+    const dbPath = stateDb(projectDir)
     if (!(await Bun.file(dbPath).exists())) return []
     const db = new Database(dbPath, { readonly: true })
     try {
@@ -220,6 +223,80 @@ async function facts(
     /* unreadable db */
   }
   return hits
+}
+
+/**
+ * The project's TODO SPACE — the `todos` table the Python core keeps in
+ * <project>/.opencode/harness/sessions.db.
+ *
+ * opencode 2.0.14 ships no todo tool at all, so a session's plan had nowhere to
+ * live: the sidebar's Todo row could only ever read opencode's own `todo`
+ * table, which no version past 2.0.13 writes. One space instead of a
+ * tool-private copy — the model writes it through `todowrite`, the sidebar
+ * reads the same table, and the compaction brief carries it across a
+ * compaction.
+ */
+const TODO_MARKS: Rec = { completed: "●", in_progress: "◐", cancelled: "✕", pending: "○" }
+const todoLine = (r: Rec) => `${TODO_MARKS[String(r?.status)] ?? "○"} ${String(r?.text ?? "")}`
+
+/** Open the todo space. `create` is false for reads: a read must not invent state. */
+async function todoDb(projectDir: string, create = false): Promise<any> {
+  const dbPath = stateDb(projectDir)
+  try {
+    const { Database } = await import("bun:sqlite").catch(() => ({}) as any)
+    if (!Database) return null
+    if (!create && !(await Bun.file(dbPath).exists())) return null
+    if (create) {
+      const { mkdirSync } = await import("node:fs")
+      mkdirSync(`${projectDir}/.opencode/harness`, { recursive: true })
+    }
+    const db = new Database(dbPath)
+    db.run("PRAGMA busy_timeout=3000")
+    if (create) {
+      db.run(
+        "CREATE TABLE IF NOT EXISTS todos(id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT, text TEXT, status TEXT, ts INTEGER)",
+      )
+    }
+    return db
+  } catch {
+    return null
+  }
+}
+
+async function readTodos(projectDir: string, sessionID: string): Promise<Rec[]> {
+  const db = await todoDb(projectDir)
+  if (!db) return []
+  try {
+    return db.query("SELECT text, status FROM todos WHERE session = ? ORDER BY id").all(sessionID) as Rec[]
+  } catch {
+    return []
+  } finally {
+    db.close()
+  }
+}
+
+/** Replace the session's list (the tool's whole contract) and answer with it. */
+async function writeTodos(projectDir: string, sessionID: string, todos: any): Promise<Rec[]> {
+  const db = await todoDb(projectDir, true)
+  if (!db) return []
+  try {
+    const rows = (Array.isArray(todos) ? todos : [])
+      .map((t: Rec) => ({
+        text: String(t?.content ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
+        status: String(t?.status ?? "pending"),
+      }))
+      .filter((t: Rec) => t.text)
+    const now = Date.now()
+    db.run("DELETE FROM todos WHERE session = ?", sessionID)
+    rows.forEach((t: Rec, i: number) =>
+      db.run("INSERT INTO todos(session, text, status, ts) VALUES(?,?,?,?)", sessionID, t.text, t.status, now + i),
+    )
+    return rows
+  } catch {
+    return []
+  } finally {
+    db.close()
+  }
 }
 
 /** Words long enough to be worth matching; falls back to the phrase itself. */
@@ -396,6 +473,56 @@ const HarnessPlugin = {
             content: (await recallFacts(String(input?.query ?? ""), directory)) || NO_FACTS,
           }),
         })
+
+        // The plan tool opencode 2.x no longer has, backed by the harness todo
+        // space. Extra keys a model sends (priority, id, …) are ignored rather
+        // than rejected: a strict schema turns a familiar call into a failed tool.
+        add({
+          name: "todowrite",
+          description:
+            "Replace this session's todo list in the harness todo space (the sidebar's Todo row reads it). " +
+            "Use it for multi-step work: one item in_progress at a time, completed as you finish.",
+          input: {
+            type: "object",
+            properties: {
+              todos: {
+                type: "array",
+                description: "The full list, in order. It replaces the previous list.",
+                items: {
+                  type: "object",
+                  properties: {
+                    content: { type: "string", description: "The task" },
+                    status: { type: "string", enum: ["pending", "in_progress", "completed", "cancelled"] },
+                  },
+                  required: ["content", "status"],
+                },
+              },
+            },
+            required: ["todos"],
+            additionalProperties: false,
+          },
+          options: direct,
+          execute: async (input: Rec, context: Rec) => {
+            const sid = String(context?.sessionID ?? "")
+            if (!sid) return { content: "todowrite needs an active session (no sessionID in the tool context)" }
+            const rows = await writeTodos(directory, sid, input?.todos)
+            const summary = rows.map(todoLine).join("\n")
+            return { content: `${rows.length} todo${rows.length === 1 ? "" : "s"} in this session:\n${summary}` }
+          },
+        })
+
+        add({
+          name: "todoread",
+          description: "Read this session's todo list from the harness todo space.",
+          input: { type: "object", properties: {}, additionalProperties: false },
+          options: direct,
+          execute: async (_input: Rec, context: Rec) => {
+            const sid = String(context?.sessionID ?? "")
+            const rows = sid ? await readTodos(directory, sid) : []
+            if (!rows.length) return { content: "(no todos in this session — call todowrite to set them)" }
+            return { content: rows.map(todoLine).join("\n") }
+          },
+        })
       })
     } catch (e) {
       log(`tool registration failed: ${short(e)}`)
@@ -417,8 +544,10 @@ const HarnessPlugin = {
     }
 
     // 4. Compaction brief: the compaction run's system array is built here, so
-    //    the newest durable facts ride along into the summary instead of being
-    //    summarized away. Verified payload (v2): the compaction hook receives
+    //    the newest durable facts AND the open todos ride along into the summary
+    //    instead of being summarized away — a plan that only lives in the
+    //    transcript is exactly what a compaction destroys. Verified payload
+    //    (v2): the compaction hook receives
     //    {sessionID, model, system, messages, options, agent, tools}.
     try {
       // guarded: a host without session hooks just loses the brief, not activation
@@ -430,11 +559,13 @@ const HarnessPlugin = {
           const already = event.system.some((s: Rec) => String(s?.text ?? s).includes(BRIEF_MARK))
           if (already) return
           const brief = (await facts(directory, [], 5, "recent")).join("\n")
-          if (!brief) return
-          event.system.push({
-            type: "text",
-            text: `${BRIEF_MARK} (durable facts — verify before relying):\n${brief}`,
-          })
+          const todos = await readTodos(directory, String(event?.sessionID ?? ""))
+          const open = todos.filter((t: Rec) => t.status !== "completed" && t.status !== "cancelled")
+          if (!brief && !open.length) return
+          const text = [`${BRIEF_MARK} (durable facts — verify before relying):`]
+          if (brief) text.push(brief)
+          if (open.length) text.push(`Open todos (harness todo space):\n${open.map(todoLine).join("\n")}`)
+          event.system.push({ type: "text", text: text.join("\n") })
         } catch (e) {
           // never break compaction, but never fail silently either
           log(`compaction brief failed: ${short(e)}`)

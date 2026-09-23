@@ -39,21 +39,53 @@ All four are registered through the v2 plugin context from `setup(ctx)`:
    (`harness/data/skills/<category>/<name>/SKILL.md`) into opencode's skill store
    so they're loadable by id without editing `opencode.json`.
 2. **Native tools** — `ctx.tool.transform` adds
-   `skills_list`/`skill_view`/`memory_recall` as *direct* tools
-   (`options: { codemode: false }`; the v2 default is Code-Mode-only, where a
-   by-name call fails with "No tool named … is currently available"). They read
-   local disk + SQLite directly (no gateway, no extra process).
+   `skills_list`/`skill_view`/`memory_recall` plus `todowrite`/`todoread` as
+   *direct* tools (`options: { codemode: false }`; the v2 default is
+   Code-Mode-only, where a by-name call fails with "No tool named … is currently
+   available"). They read local disk + SQLite directly (no gateway, no extra
+   process). `todowrite`/`todoread` are the plan tools opencode 2.x no longer
+   ships, backed by the harness todo space (below).
 3. **Output condensing** — the `ctx.tool.hook("execute.after")` hook collapses
    oversized tool results in place (errors pass through untouched).
 4. **Compaction memory** — the `ctx.session.hook("compaction")` hook recalls
-   project facts locally and appends them to the summarization request, so
-   durable facts survive the summary step.
+   project facts locally and appends them, together with the session's still-open
+   todos, to the summarization request — so a plan that only lived in the
+   transcript is not what a compaction destroys.
 
 The loader only accepts a default-exported object with a string `id` plus an
 `effect` or `setup` function, and `setup` must return a cleanup function or
 nothing — any other returned value is called as a cleanup function and kills
 plugin activation. The file therefore has no imports and returns nothing; see
 `harness/plugin/README.md` for the full contract.
+
+## The todo space (one plan, shared)
+
+opencode 2.0.14 ships **no todo tool**, and its `todo` table is legacy: nothing
+past 2.0.13 writes it. A session's plan therefore had nowhere to live, and the
+sidebar's Todo row could only ever read `0 items`. Harness gives it one place:
+
+| who | how |
+| --- | --- |
+| the model | `todowrite` (replaces this session's list) and `todoread` |
+| the sidebar panel | reads the same table — this session's list, else the newest in the project |
+| the compaction brief | carries the still-open items into the summary |
+| `harness compact` | already read it (`compact.py` keeps todos across a compaction) |
+
+The table is the one the Python core keeps —
+`<project>/.opencode/harness/sessions.db` → `todos(id, session, text, status,
+ts)` — keyed by the **opencode** session id, so the model's plan, the panel and
+the Python core read one list instead of three private copies. The server half
+creates the table on first write, so the plugin works on a project where the
+`harness` CLI has never run.
+
+Verified end to end on a real 2.0.14 server: `opencode run "…call todowrite…"`
+→ the tool call lands as rows in that table under the run's session id, and the
+panel paints them.
+
+```bash
+# what the space holds for this project
+sqlite3 .opencode/harness/sessions.db "select session, status, text from todos order by id desc limit 10"
+```
 
 ## TUI views (a stats panel in the sidebar)
 
@@ -71,7 +103,7 @@ rearrange the TUI: no routes, no docked overlay, no replaced slots.
 ctrl+g              toggle the stats sidebar (palette: "Harness: toggle stats sidebar")
 /harness            same, from the prompt (/hp is an alias)
 /harness-refresh    re-scan everything now (/hr)
-click a row         expand its detail lines (one row at a time)
+click a row         expand/collapse that row's detail lines (several at once)
 ```
 
 The layout is built out of opencode's own row grammar — a label in
@@ -81,15 +113,32 @@ geometry opencode's MCP rows use). That keeps the numbers aligned at any panel
 width, with no width constant to guess:
 
 ```
-harness ses_f3732c95 · 14 skills · 0 facts
+harness ses_f368b7d9 · 14 skills · 0 facts
 ▸ Window                      █░░░░░░░ 1%
 ▸ Tokens                   11.8k · $0.0000
-▸ Models               1 used · 6 providers
-▸ Todo                              0 items
+▾ Models               1 used · 6 providers
+    opencode · 75 models
+    muse-spark-1.3-cont… · 1 step
+▾ Todo                    3 items · project
+    ● read the panel contract
+    ◐ fix the Models row
+    ○ add the Workers row
+▾ Workers                   2 active
+    ◐ map-auth · running 3m
+    ○ docs-pass · queued 4s
+    ● fix-panel · done
+    ✕ repro-tests · error
 ▸ Skills                      14 installed
 ▸ Agents                     11 available
 ▸ Memory                           0 facts
+
+harness · 3 expanded
 ```
+
+Any number of rows can be open at once. The **Todo row opens itself** whenever
+its list appears or changes (the list is the point of the section; a collapsed
+`3 items` hides the plan the model is following), and a manual collapse sticks
+until the list changes again.
 
 Every value is read the same way opencode reads it, so the panel agrees with the
 app's own readout: total tokens = in + out + reasoning + cache read + write,
@@ -102,8 +151,9 @@ the panel look like an overlay bolted onto the app instead of part of it.
 | header | — | session id, skill/fact counts (`data.session.get(sid)`) |
 | Window | exact `total / limit`, model · agent | `session.tokens` + the provider's `models[id].limit.context` |
 | Tokens | input · output, reasoning, cache read · write, cost | `session.tokens`, `session.cost(sid)` |
-| Models | per provider: available model count, then the model used | assistant messages grouped by provider/model |
-| Todo | `○ ◐ ●` + text, this session only | opencode's `todo` table (read-only) |
+| Models | per provider: available model count, then the model used, with step count | assistant messages grouped by provider/model — re-read on **every** pass, so it fills as the message store does; the model count comes from the model store (a `Provider.Info` entry carries no `models` map) |
+| Todo | `● completed ◐ in_progress ○ pending ✕ cancelled` + text — this session's list, else the project's newest (labelled `· project`) — **opens itself** when the list changes | the harness todo space, read-only |
+| Workers | `◐ running ○ queued ● done ✕ error ! timeout ~ stale` + worker name + age of its last update, newest first; the value is the live occupancy (`2 active` / `idle` / `none`) | the `workers` table in the same `sessions.db` — **project-wide, not session-scoped**: `rlm.spawn` records the row and leaves `workers.session` empty, so a worker belongs to the project, not to the opencode session that asked for it. The active count comes from SQL, not the six displayed rows (a long worker can sit outside the newest ones). Deliberately no `stale` verdict here — `harness doctor` owns that rule (`budgets.worker_timeout_s` × 2) and a second copy would drift; the age is printed instead (`◐ map-auth · running 42m`) |
 | Skills | the bundled harness skills | `location.skill` after `sync()` |
 | Agents | the registered agents | `location.agent` after `sync()` |
 | Memory | durable facts for the project | the same `sessions.db` the server half uses |
@@ -114,8 +164,10 @@ in-flight marker is a single `⋯` in the header, never a sentence.
 
 Skill rows drop the shared namespace: the store names them
 `harness-spec-driven-development` (that is their id), and the row shows
-`spec-driven-development` because the sidebar is 46 columns wide and every row
-would repeat `harness-`.
+`spec-driven-development` because the sidebar is 42 columns wide and every row
+would repeat `harness-`. Detail lines are kept to 34 cells for the same reason:
+one more and opencode middle-truncates the row it is already showing
+(`◐ write todos i...the harness space`).
 
 **"The side panel is empty"** — the sidebar renders *only plugin
 contributions*, so with nothing claiming `sidebar.content` it is genuinely
@@ -165,6 +217,13 @@ Implementation notes worth keeping (all probed against opencode 2.0.11):
   in flight; returning early there left the panel on its session-less,
   all-zero snapshot for good. `pendingFull` re-runs it when the current load
   ends.
+- **The Models rows are built on every load, not once per session.** The message
+  store starts empty and is filled by `message.sync()`, which runs at the end of
+  a load (see below) — so a walk that only ran inside the once-per-session slow
+  scan froze `Models` at `0 used` for the whole session. The walk is a local
+  in-memory read, so it runs on every pass, and one nudge per session
+  (`setTimeout(load, 500)`) picks the rows up with the session instead of up to
+  `POLL_MS` later.
 - **The 8s poll stands down when nothing is on screen.** opencode loads this
   entrypoint in the long-lived server process too, where no slot ever renders;
   polling there meant a session message walk + four store syncs + two SQLite
@@ -172,7 +231,7 @@ Implementation notes worth keeping (all probed against opencode 2.0.11):
   and the poll skips once nothing has rendered for ~32s (it resumes the moment
   the panel is drawn again). What a scan reads: session tokens/cost/agent/model,
   the session's assistant messages (Models rows), the lazily-synced location
-  stores (skill/agent/model/provider), opencode's `todo` table and the harness
+  stores (skill/agent/model/provider), the harness todo space and the harness
   facts DB — measured at ~4ms warm, which is why the placeholder is the thing
   worth watching, not the cost.
 

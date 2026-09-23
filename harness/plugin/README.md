@@ -42,6 +42,13 @@ v2. Everything is registered through `ctx`:
 | output condensing | `ctx.tool.hook("execute.after", fn)` |
 | compaction brief | `ctx.session.hook("compaction", fn)` → append to `event.system` |
 
+Registered tools: `skills_list`, `skill_view`, `memory_recall`, `todowrite`,
+`todoread`. The last two are the plan tools opencode 2.x dropped; they persist
+into the harness todo space (`<project>/.opencode/harness/sessions.db` → `todos`,
+keyed by the opencode session id), which is also what the sidebar's Todo row and
+the compaction brief read. `execute(input, context)` — `context.sessionID` is the
+active session, and a todo tool with no session answers instead of writing.
+
 `input` is a JSON Schema; `execute(input, tool)` returns `{ content }`. Set
 `options.codemode: false` or the tool is Code-Mode-only (reachable as
 `tools.<name>()` inside `execute`, and "No tool named … is currently available"
@@ -58,8 +65,8 @@ no model pins: they inherit your opencode default model.
 | target | what harness contributes |
 | --- | --- |
 | `home.footer.status` | `harness · 9.6k tok · $0.00`, click toggles the sidebar |
-| `sidebar.content` | the stats rows: Window / Tokens / Models / Todo / Skills / Agents / Memory, each click-to-expand |
-| `sidebar.footer` | `harness · click a row` |
+| `sidebar.content` | the stats rows: Window / Tokens / Models / Todo / Workers / Skills / Agents / Memory, each click-to-expand (several at once) |
+| `sidebar.footer` | `harness · click a row` / `harness · N expanded` |
 | `app` | the `app` slot hosts the `ctx.keymap.layer` call (see below) |
 
 Rows follow opencode's own geometry (label `flexGrow` + value `flexShrink 0`, so
@@ -90,9 +97,26 @@ Traps found by probing the running TUI — do not "simplify" these away:
   (`settle(p, SCAN_MS)`) and a `full` load requested while one is in flight is
   queued (`pendingFull`) rather than dropped — the session id arrives with the
   first slot render, exactly while the setup-time load is running.
-- **There is no todo store** (`data.session.todo` and `data.location.todo` are
-  `undefined`), so the session's todo list is read read-only from opencode's own
-  SQLite db and degrades to "none" if that schema changes.
+- **There is no todo store, and opencode writes no todos.** `data.session.todo`
+  and `data.location.todo` are `undefined`, and nothing past 2.0.13 writes
+  opencode's own `todo` table (2.0.14 has no todo tool at all). The row reads the
+  HARNESS todo space instead — this session's list from
+  `<project>/.opencode/harness/sessions.db`, else the newest list in the project.
+- **The Models rows must be built on every load.** `message.list(sid)` returns an
+  in-memory store that only fills after `message.sync(sid)`, which runs at the
+  end of a load; computing the rows inside the once-per-session slow scan froze
+  them at `0 used` for the whole session. The walk runs every pass, with one
+  `setTimeout(load, 500)` nudge per session.
+- **A provider entry has no `models` map** (`Provider.Info` is
+  id/name/activation/package), so per-provider model counts come from the model
+  store (`m.providerID`).
+- **The Workers row is project-wide**, and its count is a `count(*)` query rather
+  than `rows.length` of the six displayed rows: `rlm.spawn` leaves `workers.session`
+  empty, and a worker that runs for an hour can fall outside the newest rows while
+  short ones finish. `workers.updated` is epoch **seconds** (`int(time.time())`),
+  and the row prints the age instead of re-deriving `stale` (`doctor`'s rule).
+- **Detail lines are budgeted at 34 cells.** The sidebar is a fixed 42 columns;
+  one cell more and opencode middle-truncates the line it is already showing.
 - **`require` and `Bun` are undefined** in the TUI plugin scope. File and SQLite
   access go through dynamic `import("node:fs")` / `import("bun:sqlite")`
   (`Bun.file` is *not* available here, unlike in server.ts).

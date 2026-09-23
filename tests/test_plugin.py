@@ -83,7 +83,9 @@ if (returned !== undefined && typeof returned !== "function") {
 const seeds = skills.filter((s: any) => s.id !== "opencode")
 const execs: any = {}
 for (const t of tools) {
-  const input = t.name === "skill_view" ? { id: seeds[0]?.id ?? "missing" } : t.name === "memory_recall" ? { query: "smoke" } : {}
+  const input =
+    t.name === "skill_view" ? { id: seeds[0]?.id ?? "missing" } : t.name === "memory_recall" ? { query: "smoke" } : {}
+  // no sessionID on purpose: nothing here may write to a real project store
   const out = await t.execute(input, {})
   execs[t.name] = typeof out?.content
 }
@@ -183,9 +185,9 @@ makeDb(dir, [
 const s = makeCtx(dir)
 await plug.setup(s.ctx)
 const tools: any = Object.fromEntries(s.tools.map((t: any) => [t.name, t]))
-const call = async (name: string, input?: any): Promise<string> => {
+const call = async (name: string, input?: any, context?: any): Promise<string> => {
   try {
-    const o = await tools[name].execute(input ?? {}, {})
+    const o = await tools[name].execute(input ?? {}, context ?? {})
     return String(o?.content ?? "")
   } catch (e: any) {
     return `THREW ${e?.message ?? e}`
@@ -263,6 +265,45 @@ for (const bad of [undefined, null, {}, { sessionID: "ses_x", system: "nope" }])
   try { await comp(bad) } catch (e: any) { out.briefThrew = String(e?.message ?? e) }
 }
 out.briefThrew = out.briefThrew ?? null
+
+// ---- the todo space: opencode 2.x ships no todo tool, so the plan lives in the
+// HARNESS store (the table the sidebar panel reads) instead of a tool-private
+// copy that nothing else can see. ----
+const TODO_SID = "ses_todo_smoke"
+const tctx = { sessionID: TODO_SID }
+out.todoNoSession = await call("todowrite", { todos: [{ content: "x", status: "pending" }] })
+out.todoWrite = await call("todowrite", { todos: [
+  { content: "first thing", status: "completed" },
+  { content: "second thing", status: "in_progress" },
+  { content: "third thing", status: "pending" },
+] }, tctx)
+out.todoRead = await call("todoread", {}, tctx)
+out.todoReadEmpty = await call("todoread", {}, { sessionID: "ses_no_todos_yet" })
+out.todoGarbage = await call("todowrite", { todos: ["nope", null, { status: "pending" }] }, tctx)
+// the write REPLACES the list, drops blank rows, and ignores a stranger's session
+out.todoReplace = await (async () => {
+  await tools.todowrite.execute({ todos: [
+    { content: "only this", status: "pending" },
+    { content: "   ", status: "pending" },
+  ] }, tctx)
+  await call("todowrite", { todos: [{ content: "other session row", status: "pending" }] }, { sessionID: "ses_other" })
+  return call("todoread", {}, tctx)
+})()
+// rows really are in the harness store, keyed by the opencode session id
+{
+  const tdb = new Database(join(dir, ".opencode", "harness", "sessions.db"))
+  out.todoRows = tdb.query("SELECT session, text, status FROM todos ORDER BY id").all()
+  tdb.close()
+}
+// open todos ride into the compaction brief: a compaction destroys the
+// transcript, and a plan that only lives in the transcript goes with it
+{
+  const evT: any = { sessionID: TODO_SID, system: [] }
+  await s.hooks["session:compaction"](evT)
+  out.briefWithTodos = String(evT.system[0]?.text ?? "")
+}
+// a todo tool with no session at all must answer, not write or throw
+out.todoBare = await call("todoread", {})
 
 // no facts yet -> no brief, no throw
 const emptyDir = mkdtempSync(join(tmpdir(), "harness-plugin-empty-"))
@@ -550,14 +591,16 @@ def test_tui_plugin_is_a_sidebar_panel_not_a_layout_change():
     # the stat rows, all of them — and deliberately NO "Context" row: opencode's
     # own sidebar already renders one, and a second copy is what made the panel
     # look like a foreign overlay rather than part of the app
-    for row in ("window", "tokens", "models", "todo", "skills", "agents", "memory"):
+    for row in ("window", "tokens", "models", "todo", "workers", "skills", "agents", "memory"):
         assert f'id="{row}"' in tui, row
     assert 'label="Context"' not in tui, "opencode already renders Context"
 
-    # one row expands at a time: the sidebar viewport is short, so the collapsed
-    # rows have to stay visible as one-line stats
-    assert "const isOpen = (name: string) => view.open === name" in tui
-    assert 'd.open = d.open === props.id ? "" : props.id' in tui
+    # several rows can be open at once (`open` is a list of row ids), and a
+    # click toggles exactly the row it landed on
+    assert "const isOpen = (name: string) => (Array.isArray(view.open) ? view.open : []).includes(name)" in tui
+    assert "if (open.has(props.id)) open.delete(props.id)" in tui
+    assert "d.open = [...open]" in tui
+    assert 'view.open === name' not in tui, "expansion is no longer single-select"
     # every detail closure must read a tracked value (see the Row docstring)
     assert tui.count("void view.rev") >= 8, tui.count("void view.rev")
 
@@ -577,12 +620,13 @@ def test_tui_plugin_is_a_sidebar_panel_not_a_layout_change():
     assert "provEntry?.models?.[modelName]" in tui and "limit?.context" in tui
 
     # stat sources: session tokens/cost, messages for the model step rows, the
-    # lazily-synced location stores, todos from opencode's DB, facts from ours
+    # lazily-synced location stores, todos from the HARNESS space, facts from ours
     assert "data_?.session?.get?.(sessionID)" in tui
     assert "data_?.session?.message?.list?.(sessionID)" in tui
     for store in ("model", "provider", "agent", "skill"):
         assert f"store?.{store}?.sync?.(loc)" in tui and f"store?.{store}?.list?.(loc)" in tui, store
-    assert "SELECT content, status FROM todo WHERE session_id" in tui
+    assert "SELECT text, status FROM todos WHERE session = ?" in tui
+    assert "FROM todo WHERE session_id" not in tui, "opencode 2.x writes no todos"
     assert "SELECT text FROM facts ORDER BY id DESC" in tui
     assert 'await import("node:fs")' in tui and 'await import("bun:sqlite")' in tui
 
@@ -700,6 +744,104 @@ def test_tui_panel_never_wedges_and_reads_like_opencode():
     assert "      repaint()\n    }" in tui, "patch() must request the repaint"
 
 
+def test_tui_models_rows_are_computed_on_every_load():
+    """The Models row was built only inside the once-per-session slow scan, from
+    a message store that is EMPTY until its own sync lands — so it sat at
+    "0 used" for a whole session unless the session changed or the user ran
+    /harness-refresh, and the detail rows claimed "1 step" regardless.
+
+    The message walk is a local read, so it runs on every load; the store syncs
+    stay on the slow half; and one nudge per session picks the rows up with the
+    session instead of up to POLL_MS later.
+    """
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+
+    assert "const scanModels = (data_: Rec): void => {" in tui
+    assert "scanSlow = async (loc: any, data_: Rec)" in tui
+    assert "        scanModels(data_)\n" in tui, "the walk must run on every load"
+    # ...and outside the slow gate, not behind its `scanned` flag
+    gate = tui.index("if (full || !scanned) {")
+    assert "scanModels" not in tui[gate:tui.index("\n        }\n", gate)]
+    assert "warmedFor = sessionID" in tui and "setTimeout(() => void load(), 500)" in tui
+    # real step counts, not a hard-coded "1 step", and the row fits the sidebar
+    assert 'e.steps === 1 ? "" : "s"' in tui
+    assert "`${cut(name, 20)} · ${e.steps} step" in tui
+    # a session that has sent nothing yet still shows the model it is using
+    assert "· selected`" in tui
+    # the per-provider model count comes from the MODEL store: a Provider.Info
+    # entry has no models map on 2.0.14, so reading it printed a bare provider
+    # name ("opencode" with no "· N models")
+    assert "data.modelList = models" in tui
+    assert '(data.modelList ?? []).filter((m: Rec) => String(m?.providerID ?? "") === prov)' in tui
+    assert "provEntries" not in tui
+
+
+def test_tui_workers_row_shows_the_rlm_pool():
+    """The RLM pool is project state, so it belongs in the panel next to the
+    todos: the row reports how many workers are unfinished right now and lists
+    the newest rows. The COUNT comes from SQL rather than the displayed window
+    (a long worker can fall outside the newest rows while short ones finish),
+    and the row deliberately does NOT re-derive `stale` — `harness doctor` owns
+    that rule (`budgets.worker_timeout_s` × 2) and a second copy would drift, so
+    the age is printed instead (`◐ build:panel · running 42m`).
+    """
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+
+    # same DB as the todos/facts, one read-only open for all three
+    assert "const readProjectState = async (directory: string, sid: string)" in tui
+    assert tui.count("await import(\"bun:sqlite\")") == 1, "one connection for the state DB"
+    assert "SELECT name, status, updated FROM workers ORDER BY rowid DESC LIMIT ?" in tui
+    assert "SELECT count(*) AS n FROM workers WHERE status IN ('queued','running')" in tui
+
+    # the pool's own vocabulary and the honest age, in epoch seconds
+    assert 'done: "●", running: "◐", queued: "○", error: "✕", timeout: "!", stale: "~"' in tui
+    assert 'const WORKER_LIVE = new Set(["queued", "running"])' in tui
+    assert "function age(updated: unknown): string" in tui
+    assert "/ 1000" in tui, "rlm writes epoch seconds, not milliseconds"
+    assert "STALE_MS" not in tui and '= "stale"' not in tui, "the stale rule stays doctor's"
+
+    # the value is the live occupancy; empty history reads as "none", a quiet
+    # pool as "idle"
+    assert 'if (!view.workers) return "none"' in tui
+    assert 'view.workersActive ? `${view.workersActive} active` : "idle"' in tui
+    assert '(no workers in this project)' in tui
+
+
+def test_tui_todo_row_reads_the_harness_space_and_auto_expands():
+    """The Todo row is backed by the HARNESS todo space — the table the server
+    half's `todowrite` writes — not by opencode's `todo` table, which nothing
+    past 2.0.13 writes (the row was permanently empty). The row also opens
+    itself when the list appears or changes, and a manual collapse sticks until
+    the list changes again.
+    """
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+
+    # this session's list, else the newest list in the project (the plan the
+    # project is actually following) — both from the harness store
+    assert "SELECT text, status FROM todos WHERE session = ?" in tui
+    assert "SELECT text, status FROM todos ORDER BY id DESC LIMIT ?" in tui
+    assert "stateDb(directory)" in tui
+    assert "opencode.db" not in tui, "the panel must not read opencode's dead todo table"
+    # the glyphs match what todowrite reports back
+    assert 'completed: "●", in_progress: "◐", cancelled: "✕", pending: "○"' in tui
+
+    # a fallback list is labelled as the project's, never passed off as this
+    # session's
+    assert "out.todosFallback = !mine.length && rows.length > 0" in tui
+    assert 'view.todosProject ? " · project" : ""' in tui
+
+    # auto-expand on a new/changed list, and only then (a manual collapse lasts)
+    assert "if (todoSig !== (d.todoSig ?? \"\")) {" in tui
+    assert "d.todoSig = todoSig" in tui
+    assert 'open.add("todo")' in tui
+
+    # several rows may be open, so the footer reports how many
+    assert "`${openCount()} expanded`" in tui
+
+
 # Parses each entrypoint with Bun's transpiler (JSX-aware, no module
 # resolution). A broken tui.tsx is otherwise only visible as a WARN in
 # opencode's log ("plugin operation failed … stage=read") with nothing in the
@@ -790,20 +932,43 @@ def test_plugin_features(tmp_path):
     assert out["briefThrew"] is None, out["briefThrew"]
     assert out["briefWithoutFacts"] == 0
 
+    # the todo space opencode 2.x lacks: todowrite/todoread persist into the
+    # harness store under the OPENCODE session id, and the write replaces the
+    # list rather than appending to it
+    assert out["todoNoSession"].startswith("todowrite needs an active session"), out["todoNoSession"]
+    assert "3 todos in this session" in out["todoWrite"], out["todoWrite"]
+    assert out["todoRead"] == "● first thing\n◐ second thing\n○ third thing", out["todoRead"]
+    assert out["todoReadEmpty"].startswith("(no todos in this session"), out["todoReadEmpty"]
+    assert out["todoBare"].startswith("(no todos in this session"), out["todoBare"]
+    # junk input (strings, nulls, missing content) writes nothing and never throws
+    assert "0 todos in this session" in out["todoGarbage"], out["todoGarbage"]
+    assert out["todoReplace"] == "○ only this", out["todoReplace"]
+    assert out["todoRows"] == [
+        {"session": "ses_todo_smoke", "text": "only this", "status": "pending"},
+        {"session": "ses_other", "text": "other session row", "status": "pending"},
+    ], out["todoRows"]
+    # open todos ride into the compaction brief, completed ones do not, and the
+    # facts are still there alongside them
+    assert "Harness memory brief" in out["briefWithTodos"], out["briefWithTodos"]
+    assert "Open todos (harness todo space):" in out["briefWithTodos"], out["briefWithTodos"]
+    assert "only this" in out["briefWithTodos"], out["briefWithTodos"]
+    assert "first thing" not in out["briefWithTodos"], out["briefWithTodos"]
+    assert "codemode false" in out["briefWithTodos"], out["briefWithTodos"]
+
     # future-host degradation: an opencode upgrade that renames/removes a ctx
     # API costs only its own feature — activation never throws, tools that do
     # not depend on the lost API still register, one bad editor.add does not
     # sink the other tools, and a drifted DB schema degrades to an answer.
     assert out["degradeNoSkillTransform"] is True
-    assert out["degradeNoSkillTransformTools"] == 3 and out["degradeNoSkillTransformHooks"] == 2
+    assert out["degradeNoSkillTransformTools"] == 5 and out["degradeNoSkillTransformHooks"] == 2
     assert out["degradeNoToolTransform"] is True
     assert out["degradeNoToolTransformSeeds"] >= 11 and out["degradeNoToolTransformHooks"] == 2
     assert out["degradeNoToolHook"] is True
-    assert out["degradeNoToolHookTools"] == 3 and out["degradeNoToolHookCondense"] is False
+    assert out["degradeNoToolHookTools"] == 5 and out["degradeNoToolHookCondense"] is False
     assert out["degradeNoSessionHook"] is True
-    assert out["degradeNoSessionHookTools"] == 3 and out["degradeNoSessionHookBrief"] is False
+    assert out["degradeNoSessionHookTools"] == 5 and out["degradeNoSessionHookBrief"] is False
     assert out["degradePartialAdd"] is True
-    assert out["degradePartialAddTools"] == ["memory_recall", "skills_list"]
+    assert out["degradePartialAddTools"] == ["memory_recall", "skills_list", "todoread", "todowrite"]
     assert out["degradeNoList"] is True and out["degradeNoListSeeds"] >= 11
     assert out["degradeSchemaDrift"] == "(nothing recalled — verify from the transcript instead)", out["degradeSchemaDrift"]
     assert out["degradeSchemaDriftBrief"] == 0
@@ -822,14 +987,14 @@ def test_plugin_setup_registers_through_ctx(tmp_path):
     assert out["id"] == "harness"
     assert out["returned"] is None, "setup must not return a hooks object"
     assert out["hooks"] == ["tool:execute.after", "session:compaction"]
-    assert [t["name"] for t in out["tools"]] == ["skills_list", "skill_view", "memory_recall"]
+    assert [t["name"] for t in out["tools"]] == ["skills_list", "skill_view", "memory_recall", "todowrite", "todoread"]
     for t in out["tools"]:
         assert t["input"] == "object" and t["execute"] == "function"
         # codemode:false == exposed as a direct tool (the v2 default hides it
         # in the Code Mode catalog, where calling it by name fails)
         assert t["direct"] is True, f"{t['name']} is not a direct tool"
     # every executor answers with a content string (the v2 tool result shape)
-    assert set(out["execs"]) == {"skills_list", "skill_view", "memory_recall"}
+    assert set(out["execs"]) == {"skills_list", "skill_view", "memory_recall", "todowrite", "todoread"}
     assert all(v == "string" for v in out["execs"].values()), out["execs"]
     # bundled seeds are registered in opencode's skill shape
     assert out["skills"], "no skills seeded"

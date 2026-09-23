@@ -1,8 +1,9 @@
 // Harness CLI plugin for the opencode TUI.
 //
 // It fills opencode's EXISTING side panel (the `sidebar.content` slot) with a
-// stats/info panel — Window, Tokens, Models, Todo, Skills, Agents, Memory — and
-// nothing else moves: no routes, no docked overlay, no replaced slots. It is
+// stats/info panel — Window, Tokens, Models, Todo, Workers, Skills, Agents,
+// Memory — and nothing else moves: no routes, no docked overlay, no replaced
+// slots. It is
 // built to read as part of opencode rather than bolted onto it:
 //
 //   * same visual grammar as opencode's own sidebar rows — a label in
@@ -29,9 +30,14 @@
 //   * `ctx.data.session.get(sid)` -> `{agent, model:{id,providerID,variant},
 //     tokens:{input,output,reasoning,cache:{read,write}}, cost, title, …}`;
 //     `ctx.data.session.cost(sid)` is opencode's own cost accessor.
-//   * There is NO todo store (`data.session.todo` / `data.location.todo` are
-//     undefined), so the session todo list is read read-only from opencode's
-//     own SQLite db and degrades to "none" if that schema ever changes.
+//   * opencode 2.0.14 has no todo tool and writes no todos: the Todo row reads
+//     the HARNESS todo space (`<project>/.opencode/harness/sessions.db`, the
+//     `todos` table the server half's `todowrite` writes), and falls back to
+//     the newest list in that space. Degrades to "none" on schema drift.
+//   * The Workers row reads the RLM pool out of the same DB (`workers`), keyed
+//     by PROJECT — `rlm.spawn` leaves `workers.session` empty, so a worker is
+//     not this session's. It shows the persisted status plus the age of the
+//     last update; the authoritative stale verdict stays `harness doctor`'s.
 //   * `ctx.keymap.layer(...)` throws "Keymap.Provider is missing" unless it is
 //     called from inside a slot's render component, so commands are registered
 //     from the `app` slot (the pattern the CLI-plugin docs use).
@@ -53,6 +59,37 @@ const SCAN_MS = 5000
 const ROW_LIMIT = 6
 /** Detail rows per section when expanded (the sidebar viewport is short). */
 const DETAIL_LIMIT = 5
+
+/** Status glyphs, shared with the server half's todo space. */
+const TODO_MARKS: Rec = { completed: "●", in_progress: "◐", cancelled: "✕", pending: "○" }
+const todoMark = (status: unknown) => TODO_MARKS[String(status)] ?? "○"
+
+/**
+ * Worker lifecycle glyphs (harness/rlm.py). `!` for a timed-out worker and `~`
+ * for a stale one are ASCII on purpose — the status word is printed next to the
+ * glyph, so the mark only has to group unfinished / failed / finished.
+ */
+const WORKER_MARKS: Rec = { done: "●", running: "◐", queued: "○", error: "✕", timeout: "!", stale: "~" }
+const workerMark = (status: unknown) => WORKER_MARKS[String(status)] ?? "·"
+/** Still-working statuses, i.e. the ones whose age is worth showing. */
+const WORKER_LIVE = new Set(["queued", "running"])
+
+/**
+ * "how long ago" for a worker row, from its `updated` epoch SECONDS
+ * (`int(time.time())` in harness/rlm.py — not milliseconds).
+ *
+ * Deliberately not a stale verdict: `harness doctor` owns that rule
+ * (`budgets.worker_timeout_s` × 2), and a second definition here would drift
+ * from it. `◐ build:panel · running 42m` says the same thing honestly.
+ */
+function age(updated: unknown): string {
+  const t = Number(updated ?? 0)
+  if (!Number.isFinite(t) || t <= 0) return ""
+  const secs = Math.max(0, Math.round((Date.now() - t * 1000) / 1000))
+  if (secs < 60) return `${secs}s`
+  if (secs < 3600) return `${Math.round(secs / 60)}m`
+  return `${Math.round(secs / 3600)}h`
+}
 
 /**
  * opencode's skill store namespaces the seeded skills (`harness-spec-driven-
@@ -159,7 +196,9 @@ function settle(p: any, ms: number): Promise<void> {
 
 // Project-local only: a $HOME probe here recalled a different project's facts
 // (state_dir() in harness/paths.py is always <root>/.opencode/harness).
-function factDb(directory: string): string {
+// One file holds both the fact store and the todo space — it is the DB the
+// Python core owns, not the TUI's business to relocate.
+function stateDb(directory: string): string {
   return `${directory}/.opencode/harness/sessions.db`
 }
 
@@ -231,7 +270,8 @@ const HarnessTui = {
       }
       repaint()
     }
-    const isOpen = (name: string) => view.open === name
+    /** Any number of rows can be open at once — `open` is a list of row ids. */
+    const isOpen = (name: string) => (Array.isArray(view.open) ? view.open : []).includes(name)
 
     // Plain (non-reactive) detail rows: re-read on every load and shown as-is.
     const data: Rec = {
@@ -241,17 +281,23 @@ const HarnessTui = {
       model: "",
       contextLimit: 0,
       steps: [] as Rec[],
+      modelList: [] as Rec[],
       providers: [] as string[],
       agents: [] as string[],
       skills: [] as string[],
       facts: [] as string[],
       todos: [] as string[],
+      todosFromProject: false,
+      workers: [] as string[],
+      workersActive: 0,
     }
     let sqlite: any = null
     let fs: any = null
     let sessionID = ""
     let loading = false
     let pendingFull = false
+    /** Session whose message store has already been warmed once (see load). */
+    let warmedFor = ""
     // Timestamp of the last slot render. This entrypoint is loaded in the
     // long-lived server process as well, where no slot ever renders — an
     // instance that polls forever with nobody watching is pure background
@@ -266,80 +312,95 @@ const HarnessTui = {
       }
     }
 
-    /** Best-effort: opencode's own DB (read-only) for the session todo list. */
-    const readTodos = async (sid: string): Promise<string[]> => {
+    /**
+     * Everything the panel reads off disk, in ONE read-only open of the project
+     * state DB: the todo space, the worker pool and the fact store.
+     *
+     * Todos: this session's list wins; with none, the newest list in the project
+     * stands in, so the row shows the plan the project is following rather than a
+     * dead "0 items". Workers: PROJECT-wide on purpose — `rlm.spawn` writes a row
+     * before the pool runs it and leaves `workers.session` empty, so a worker
+     * belongs to the project, not to whichever opencode session asked for it.
+     *
+     * Each query is guarded alone: a drifted schema costs that one section.
+     */
+    const readProjectState = async (directory: string, sid: string) => {
+      const out = {
+        todos: [] as string[],
+        todosFallback: false,
+        facts: [] as string[],
+        workers: [] as string[],
+        workersActive: 0,
+      }
       try {
         if (fs === null) fs = await import("node:fs")
         if (sqlite === null) sqlite = await import("bun:sqlite")
-        const dbPath = `${process.env?.HOME}/.local/share/opencode/opencode.db`
-        if (!fs.existsSync(dbPath)) return []
+        const dbPath = stateDb(directory)
+        if (!fs.existsSync(dbPath)) return out
         const db = new sqlite.Database(dbPath, { readonly: true })
         try {
-          const rows = db
-            .query("SELECT content, status FROM todo WHERE session_id = ? ORDER BY position LIMIT ?")
-            .all(sid, ROW_LIMIT) as Rec[]
-          return rows.map((r) => {
-            const mark = r?.status === "completed" ? "●" : r?.status === "in_progress" ? "◐" : "○"
-            return `${mark} ${cut(r?.content, 40)}`
-          })
+          try {
+            const mine = db.query("SELECT text, status FROM todos WHERE session = ? ORDER BY id").all(sid) as Rec[]
+            const rows = mine.length
+              ? mine
+              : (db.query("SELECT text, status FROM todos ORDER BY id DESC LIMIT ?").all(ROW_LIMIT) as Rec[]).reverse()
+            // Say so when the list is the PROJECT's, not this session's: the
+            // fallback is useful, but silently passing off another session's
+            // plan as this one's is not.
+            out.todosFallback = !mine.length && rows.length > 0
+            out.todos = rows.map((r) => `${todoMark(r?.status)} ${cut(r?.text, 30)}`)
+          } catch {
+            /* no todos table yet */
+          }
+          try {
+            // The active COUNT comes from SQL, not the window below: a long
+            // worker can sit outside the newest rows while short ones finish.
+            const active = db.query("SELECT count(*) AS n FROM workers WHERE status IN ('queued','running')").get() as Rec
+            out.workersActive = Number(active?.n ?? 0) || 0
+            const rows = db
+              .query("SELECT name, status, updated FROM workers ORDER BY rowid DESC LIMIT ?")
+              .all(ROW_LIMIT) as Rec[]
+            out.workers = rows.map((r) => {
+              const status = String(r?.status ?? "?")
+              const since = WORKER_LIVE.has(status) ? ` ${age(r?.updated)}` : ""
+              return `${workerMark(status)} ${cut(r?.name, 15)} · ${status}${since}`
+            })
+          } catch {
+            /* no workers table yet */
+          }
+          try {
+            out.facts = (db.query("SELECT text FROM facts ORDER BY id DESC LIMIT ?").all(ROW_LIMIT) as Rec[]).map(
+              (r) => `✎ ${cut(r?.text, 30)}`,
+            )
+          } catch {
+            /* no facts table yet */
+          }
         } finally {
           db.close()
         }
       } catch {
-        return []
+        /* unreadable db */
       }
-    }
-
-    const readFacts = async (directory: string): Promise<string[]> => {
-      try {
-        if (fs === null) fs = await import("node:fs")
-        if (sqlite === null) sqlite = await import("bun:sqlite")
-        const dbPath = factDb(directory)
-        if (!fs.existsSync(dbPath)) return []
-        const db = new sqlite.Database(dbPath, { readonly: true })
-        try {
-          return (db.query("SELECT text FROM facts ORDER BY id DESC LIMIT ?").all(ROW_LIMIT) as Rec[]).map(
-            (r) => `✎ ${cut(r?.text, 40)}`,
-          )
-        } finally {
-          db.close()
-        }
-      } catch {
-        return []
-      }
+      return out
     }
 
     let scanned = false
 
     /**
-     * The slow half of a scan: the session's assistant messages (Models rows),
-     * the lazily-synced location stores (agents/skills/providers/models) and the
-     * context-window limit. A `sync()` can block on the network and none of it
-     * changes between messages, so it runs when the session changes, on the
-     * first load and on `/harness-refresh` — not on the cheap 8s poll.
+     * The slow half of a scan: the lazily-synced location stores
+     * (agents/skills/providers/models) and the context-window limit. A `sync()`
+     * can block on the network and none of it changes between messages, so it
+     * runs when the session changes, on the first load and on
+     * `/harness-refresh` — not on the cheap 8s poll. The message walk that fills
+     * the Models rows is deliberately NOT in here (see scanModels): it is a
+     * local read that has to run every pass, because the message store only
+     * fills once its own sync lands.
      *
      * Every sync is individually time-boxed: one unreachable provider registry
      * must not strand the whole panel on its placeholder.
      */
     const scanSlow = async (loc: any, data_: Rec): Promise<void> => {
       const store = data_?.location
-
-      // Model rows: assistant messages grouped by provider -> model, with the
-      // step count (Kilo shows Model / Steps / Cost per provider group).
-      const msgs = sessionID ? asArray(data_?.session?.message?.list?.(sessionID)) : []
-      const byProv = new Map<string, Map<string, { steps: number; cost: number }>>()
-      for (const m of msgs) {
-        const role = m?.role ?? m?.type
-        if (role !== "assistant") continue
-        const prov = String(m?.providerID ?? m?.model?.providerID ?? "unknown")
-        const name = shortModel(modelId(m?.model) || data.model)
-        if (!byProv.has(prov)) byProv.set(prov, new Map())
-        const inner = byProv.get(prov)!
-        const cur = inner.get(name) ?? { steps: 0, cost: 0 }
-        cur.steps += 1
-        cur.cost += Number(m?.cost ?? 0)
-        inner.set(name, cur)
-      }
 
       // Location stores ARE lazy: they need sync first or list() is empty.
       await Promise.all([
@@ -364,15 +425,9 @@ const HarnessTui = {
       const limit = fromProvider?.limit?.context ?? match?.limit?.context ?? match?.limits?.context
       data.contextLimit = Number(limit ?? 0) || 0
 
-      const steps: Rec[] = []
-      for (const [prov, used] of byProv) {
-        const available = Object.keys(provs.find((p: Rec) => String(p?.id ?? p?.name ?? "") === prov)?.models ?? {}).length
-        steps.push({ row: available ? `${prov} · ${available} models` : prov, kind: "provider" })
-        for (const [name, e] of used) {
-          steps.push({ row: `${name} · 1 step`, kind: "row", cost: e.cost })
-        }
-      }
-      data.steps = steps
+      // Kept for the Models rows: the model store is what knows which provider
+      // owns which model, and the current model's context limit comes from it.
+      data.modelList = models
 
       data.agents = asArray(store?.agent?.list?.(loc))
         .map((a: Rec) => String(a?.name ?? a?.id ?? ""))
@@ -380,6 +435,51 @@ const HarnessTui = {
       data.skills = asArray(store?.skill?.list?.(loc))
         .map((s: Rec) => String(s?.id ?? s?.name ?? ""))
         .filter((s: string) => s.startsWith(HARNESS_PREFIX))
+    }
+
+    /**
+     * Models rows: assistant messages grouped by provider -> model, with the
+     * step count and cost (the shape opencode's own sidebar uses). A plain
+     * in-memory read, so it runs on EVERY load.
+     *
+     * Computing it only on the first load was the bug behind "Models never
+     * populates": the message store starts empty, `message.sync()` fills it
+     * afterwards, and the first pass had already frozen the rows at zero —
+     * nothing recomputed them until a new session or a manual refresh.
+     */
+    const scanModels = (data_: Rec): void => {
+      const msgs = sessionID ? asArray(data_?.session?.message?.list?.(sessionID)) : []
+      const byProv = new Map<string, Map<string, { steps: number; cost: number }>>()
+      for (const m of msgs) {
+        if (String(m?.role ?? m?.type) !== "assistant") continue
+        const prov = String(m?.providerID ?? m?.model?.providerID ?? "unknown")
+        const name = shortModel(modelId(m?.model) || data.model) || "unknown"
+        if (!byProv.has(prov)) byProv.set(prov, new Map())
+        const inner = byProv.get(prov)!
+        const cur = inner.get(name) ?? { steps: 0, cost: 0 }
+        cur.steps += 1
+        cur.cost += Number(m?.cost ?? 0)
+        inner.set(name, cur)
+      }
+
+      const steps: Rec[] = []
+      for (const [prov, used] of byProv) {
+        // Count from the MODEL store: a provider entry has no `models` map on
+        // 2.0.14 (Provider.Info is id/name/activation/package), so reading the
+        // count off the provider row silently printed a bare provider name.
+        const available = (data.modelList ?? []).filter((m: Rec) => String(m?.providerID ?? "") === prov).length
+        steps.push({ row: available ? `${prov} · ${available} models` : prov, kind: "provider" })
+        for (const [name, e] of used) {
+          // Kept to the sidebar's width: the per-model cost is already the
+          // Tokens row's `$` figure, and a truncated "1 st…" says nothing.
+          steps.push({ row: `${cut(name, 20)} · ${e.steps} step${e.steps === 1 ? "" : "s"}`, kind: "row" })
+        }
+      }
+      // Nothing sent yet: the selected model is still the model in use.
+      if (!steps.length && data.model) {
+        steps.push({ row: `${shortModel(data.model)} · selected`, kind: "row" })
+      }
+      data.steps = steps
     }
 
     const load = async (full = false) => {
@@ -429,16 +529,34 @@ const HarnessTui = {
           await settle(scanSlow(loc, data_), SCAN_MS)
           scanned = true
         }
+        // Cheap, and only correct AFTER the message store has filled — so it
+        // runs on every pass, not on the slow half.
+        scanModels(data_)
 
-        // Location-scoped, so these also work before the first message.
-        data.todos = sessionID ? await readTodos(sessionID) : []
-        data.facts = await readFacts(directory)
+        // One read-only open of the project state DB for the todo space, the
+        // worker pool and the fact store (all local, and they work before the
+        // first message because they are keyed by directory/session, not by the
+        // message store).
+        const state = await readProjectState(directory, sessionID)
+        data.todos = state.todos
+        data.todosFromProject = state.todosFallback
+        data.facts = state.facts
+        data.workers = state.workers
+        data.workersActive = state.workersActive
 
         // warm the session store for the next poll (see the note above on why
         // this cannot happen before the reads)
         if (sessionID) {
           void settle(data_?.session?.sync?.(sessionID), SCAN_MS)
           void settle(data_?.session?.message?.sync?.(sessionID), SCAN_MS)
+          // The message store fills asynchronously, so this session's model rows
+          // land on the NEXT pass. Nudge one so they appear with the session
+          // instead of up to POLL_MS later (once per session — a self-scheduling
+          // loop here would be a load storm).
+          if (warmedFor !== sessionID) {
+            warmedFor = sessionID
+            setTimeout(() => void load(), 500)
+          }
         }
       } catch (e) {
         notes.push(short(e))
@@ -448,8 +566,22 @@ const HarnessTui = {
           d.skills = data.skills.length
           d.agents = data.agents.length
           d.todos = data.todos.length
+          d.todosProject = data.todosFromProject
+          d.workersActive = data.workersActive
+          d.workers = data.workers.length
           d.models = data.steps.filter((s: Rec) => s.kind === "row").length
           d.providers = data.providers.length
+          // A todo list that appears or changes opens its own row: the list is
+          // the point of the section, and a collapsed "3 items" hides the plan
+          // the model is following. A manual collapse sticks until the list
+          // changes again (the signature is what re-opens it).
+          const todoSig = data.todos.join("\u0000")
+          if (todoSig !== (d.todoSig ?? "")) {
+            d.todoSig = todoSig
+            const open = new Set<string>(Array.isArray(d.open) ? d.open : [])
+            if (todoSig) open.add("todo")
+            d.open = [...open]
+          }
           // Surface a load failure in the panel itself: cli-side console.error
           // does not reach opencode's log, so a silent catch would leave only
           // an empty-looking panel to debug.
@@ -573,7 +705,10 @@ const HarnessTui = {
           minWidth={0}
           onMouseDown={() =>
             patch((d) => {
-              d.open = d.open === props.id ? "" : props.id
+              const open = new Set<string>(Array.isArray(d.open) ? d.open : [])
+              if (open.has(props.id)) open.delete(props.id)
+              else open.add(props.id)
+              d.open = [...open]
             })
           }
         >
@@ -590,8 +725,11 @@ const HarnessTui = {
         {isOpen(props.id) ? (
           <box flexDirection="column">
             {(props.lines().length ? props.lines() : [props.empty]).slice(0, DETAIL_LIMIT).map((l) => (
+              // 32 columns + the two-space indent is the sidebar's whole content
+              // width (measured off a real 42-column sidebar): one more and
+              // opencode middle-truncates the row it is already showing.
               <text fg={th.muted} wrapMode="none" truncate>
-                {`  ${cut(l, 42)}`}
+                {`  ${cut(l, 32)}`}
               </text>
             ))}
           </box>
@@ -693,12 +831,30 @@ const HarnessTui = {
                 <Row
                   id="todo"
                   label="Todo"
-                  value={() => `${view.todos ?? 0} item${(view.todos ?? 0) === 1 ? "" : "s"}`}
+                  value={() =>
+                    `${view.todos ?? 0} item${(view.todos ?? 0) === 1 ? "" : "s"}${view.todosProject ? " · project" : ""}`
+                  }
                   lines={() => {
                     void view.rev
                     return data.todos
                   }}
                   empty="(none in this session)"
+                />
+                {/* Project-wide, unlike the rows above: `rlm.spawn` records a
+                    worker before the pool runs it and leaves `session` empty, so
+                    the pool belongs to the project, not to this session. */}
+                <Row
+                  id="workers"
+                  label="Workers"
+                  value={() => {
+                    if (!view.workers) return "none"
+                    return view.workersActive ? `${view.workersActive} active` : "idle"
+                  }}
+                  lines={() => {
+                    void view.rev
+                    return data.workers
+                  }}
+                  empty="(no workers in this project)"
                 />
                 <Row
                   id="skills"
@@ -737,11 +893,12 @@ const HarnessTui = {
           }
         },
       })
+      const openCount = () => (Array.isArray(view.open) ? view.open.length : 0)
       ctx.ui.slot({
         append: "sidebar.footer",
         render: () => (
           <text fg={th.muted} wrapMode="none" truncate>
-            {`harness · ${view.open ? "row open" : "click a row"}`}
+            {`harness · ${openCount() ? `${openCount()} expanded` : "click a row"}`}
           </text>
         ),
       })
@@ -791,13 +948,13 @@ const HarnessTui = {
 }
 
 /**
- * Initial view state: which row is expanded (one at a time — the sidebar is a
- * short viewport, so the collapsed rows must stay visible as one-line stats)
- * plus the counters the rows render. `rev` is bumped on every load to trigger a
- * repaint; `scanning` is the placeholder flag (reactive, never a plain var).
+ * Initial view state: which rows are expanded (`open`, a list — several at
+ * once) plus the counters the rows render. `rev` is bumped on every load to
+ * trigger a repaint; `scanning` is the placeholder flag (reactive, never a
+ * plain var); `todoSig` is the todo list the auto-expand last reacted to.
  */
 function defaultSections(): Rec {
-  return { open: "", rev: 0, scanning: false }
+  return { open: [] as string[], rev: 0, scanning: false }
 }
 
 export default HarnessTui
