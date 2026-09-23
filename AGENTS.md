@@ -61,6 +61,13 @@ function you touch and fix it once where all callers route through.
 - `load_skills` param scopes worker skills. Lessons-not-logs. Verification section = acceptance for ledger checkbox.
 - One system message per turn wins: history replays only the latest system note; never restate superseded directives.
 
+## Todo — one plan, kept current
+- Multi-step work starts with `todowrite`: the whole list up front, smallest verifiable task first, exactly ONE item `in_progress`.
+- Tick on evidence, never intent: `completed` needs that task's own check (a passing test, a real run); `cancelled` when you drop it, with the reason in the turn.
+- Keep it moving — a list written once and never updated reads as abandoned. `todoread` before you re-plan, and after a compaction.
+- The list IS the shared plan: it is the sidebar's Todo row and the compaction brief, so a plan that lives only in prose disappears with the transcript.
+- Single-step work needs no list. Don't write one to look busy.
+
 ## Memory
 - `AGENTS.md > MEMORY.md`. Recall hints are verify-before-rely.
 - Capture is automatic: every turn stores its durable lines (decisions, root causes, blockers, outcomes) as facts + a progress note, deduped and capped. Don't narrate what memory already records; don't ask to save.
