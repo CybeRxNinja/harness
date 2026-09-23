@@ -1,34 +1,49 @@
 name: ci
 on: [push, pull_request]
+
+# A newer run for the same ref replaces the older one. Without this every push
+# leaves a full run behind, and a stalled job sits in the queue for hours.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
       - run: python -m pip install -e ".[test]"
+      # The whole suite, one command: the bun contract tests, the CLI tests and
+      # doctor are all in here, so a second `harness doctor` step added nothing
+      # but runtime.
       - run: python -m pytest -q
         env:
           HARNESS_MOCK: "1"
-      - run: python -m harness doctor
 
   # Live check: the plugin must activate on a REAL opencode server and seed its
   # skills. No model calls, no API keys — boot opencode serve, create a session
   # to force activation, assert via the server's own API. Catches loader-contract
   # or hook-payload drift in opencode releases before users hit it.
+  #
+  # Push-only (a PR does not need a 200MB opencode download to be useful) and
+  # hard-capped: the job this replaced hung for 32 minutes and had to be
+  # cancelled by hand.
   opencode-live:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: python -m pip install -e ".[test]"
       - name: Install opencode
         run: |
           curl -fsSL https://opencode.ai/install | bash
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+      # Stdlib only — the smoke script imports nothing from this package, so no
+      # Python setup or pip install is needed to run it.
       - name: Plugin live smoke (real opencode server)
-        run: python scripts/opencode_smoke.py --port 4199
+        run: python3 scripts/opencode_smoke.py --port 4199

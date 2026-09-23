@@ -30,6 +30,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -56,29 +57,63 @@ def install_plugin() -> Path:
 
 
 class Server:
-    def __init__(self, port: int):
+    def __init__(self, port: int, boot_timeout: float = 45.0):
         self.port = port
         self.base = f"http://127.0.0.1:{port}"
         self.proc: subprocess.Popen | None = None
         self.auth: str = ""
+        self.boot_timeout = boot_timeout
+        self.lines: list[str] = []
+
+    def tail(self, n: int = 25) -> str:
+        """The server's last output — what a failure actually looked like."""
+        return "\n".join(self.lines[-n:]) or "(no output)"
+
+    def _drain(self) -> None:
+        """Read the server's output on its own thread.
+
+        A blocking readline() on a pipe is how this script hung a CI job for 32
+        minutes: `opencode serve` buffers its banner when stdout is not a TTY, so
+        the read never returned and no deadline could fire. Reading on a thread
+        keeps the deadline in charge.
+        """
+        try:
+            for line in self.proc.stdout or []:  # type: ignore[union-attr]
+                self.lines.append(line.rstrip())
+                del self.lines[:-80]
+        except Exception:
+            pass
 
     def __enter__(self) -> "Server":
-        self.proc = subprocess.Popen(
-            ["opencode", "serve", "--hostname", "127.0.0.1", "--port", str(self.port)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        deadline = time.time() + 60
+        try:
+            self.proc = subprocess.Popen(
+                ["opencode", "serve", "--hostname", "127.0.0.1", "--port", str(self.port)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError(f"opencode is not on PATH: {e}") from None
+        threading.Thread(target=self._drain, daemon=True).start()
+
+        deadline = time.time() + self.boot_timeout
         while time.time() < deadline:
-            line = self.proc.stdout.readline() if self.proc.stdout else ""
-            m = re.search(r"server password (\S+)", line)
-            if m:
-                token = base64.b64encode(f"opencode:{m.group(1)}".encode()).decode()
-                self.auth = f"Basic {token}"
+            if self.proc.poll() is not None:
+                raise RuntimeError(
+                    f"opencode serve exited early (code {self.proc.returncode}):\n{self.tail()}"
+                )
+            # the banner can arrive in any order relative to the API coming up
+            for line in list(self.lines):
+                m = re.search(r"server password (\S+)", line)
+                if m:
+                    token = base64.b64encode(f"opencode:{m.group(1)}".encode()).decode()
+                    self.auth = f"Basic {token}"
             if self.auth and self.get("/api/plugin") is not None:
                 return self
-        raise RuntimeError("opencode serve did not report a password + healthy API in 60s")
+            time.sleep(0.25)
+        raise RuntimeError(
+            f"opencode serve did not report a password + healthy API in {self.boot_timeout:.0f}s:\n{self.tail()}"
+        )
 
     def __exit__(self, *exc) -> None:
         if self.proc and self.proc.poll() is None:
@@ -91,9 +126,9 @@ class Server:
     def get(self, path: str):
         req = urllib.request.Request(self.base + path, headers={"Authorization": self.auth})
         try:
-            with urllib.request.urlopen(req, timeout=20) as r:
+            with urllib.request.urlopen(req, timeout=5) as r:
                 return json.loads(r.read())
-        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError):
             return None
 
 
@@ -130,6 +165,8 @@ def list_skills(srv: Server) -> list[dict]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=4199)
+    ap.add_argument("--boot-timeout", type=float, default=45.0,
+                    help="seconds to wait for the server banner + API (bounded on purpose)")
     args = ap.parse_args()
 
     if not PLUGIN_DIR.exists():
@@ -138,7 +175,7 @@ def main() -> int:
     dest = install_plugin()
 
     failures: list[str] = []
-    with Server(args.port) as srv:
+    with Server(args.port, args.boot_timeout) as srv:
         harness = wait_for_activation(srv)
         status = harness.get("state", {}).get("status")
         features = harness.get("features", {})

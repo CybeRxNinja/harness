@@ -6,6 +6,11 @@ name: release
 # entrypoint — a release carrying server.ts alone installs server-only and the
 # plugin silently stays out of the panel. server.ts is the harness.ts source
 # under its installed name; harness.ts is kept as an asset for older CLIs.
+#
+# No test suite runs here on purpose: the tag points at a commit CI has already
+# tested, and the Python toolchain cost more than publishing did. What IS checked
+# is what only this workflow can break — the assets it builds and the release it
+# publishes.
 on:
   push:
     tags: ["plugin-v*"]
@@ -16,17 +21,9 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: python -m pip install -e ".[test]"
-      # Gate the release on the plugin tests: entrypoint contract, loader shape,
-      # tool visibility and the install layout.
-      - run: python -m pytest -q tests/test_plugin.py tests/test_agents.py
-        env:
-          HARNESS_MOCK: "1"
       - name: Collect assets
         run: |
           set -euo pipefail
