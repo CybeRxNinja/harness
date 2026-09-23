@@ -64,6 +64,7 @@ class Server:
         self.auth: str = ""
         self.boot_timeout = boot_timeout
         self.lines: list[str] = []
+        self.last_error = ""
 
     def banner(self) -> str | None:
         """Read the startup banner once: which auth mode is this server in?
@@ -127,7 +128,8 @@ class Server:
                 return self
             time.sleep(0.25)
         raise RuntimeError(
-            f"opencode serve did not report a password + healthy API in {self.boot_timeout:.0f}s:\n{self.tail()}"
+            f"opencode serve did not report a banner + healthy API in "
+            f"{self.boot_timeout:.0f}s (last API error: {self.last_error or 'none'}):\n{self.tail()}"
         )
 
     def __exit__(self, *exc) -> None:
@@ -148,8 +150,22 @@ class Server:
         try:
             with urllib.request.urlopen(req, timeout=5) as r:
                 return json.loads(r.read())
-        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError):
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError) as e:
+            # kept, not swallowed: "did not report a healthy API" is useless
+            # advice when the real answer is "this binary has no /api/plugin"
+            self.last_error = f"{path}: {e}"
             return None
+
+
+def opencode_version() -> str:
+    """Printed up front: a smoke run against the WRONG opencode (GitHub's
+    `releases/latest` is the 1.x train, the plugin targets 2.x) must say so
+    instead of timing out on an API that does not exist there."""
+    try:
+        r = subprocess.run(["opencode", "--version"], capture_output=True, text=True, timeout=30)
+        return (r.stdout or r.stderr).strip() or "unknown"
+    except Exception as e:
+        return f"unknown ({e})"
 
 
 def wait_for_activation(srv: Server, timeout: float = 45.0) -> dict:
@@ -193,6 +209,7 @@ def main() -> int:
         print(f"FAIL: {PLUGIN_DIR} missing")
         return 2
     dest = install_plugin()
+    print(f"opencode: {opencode_version()}")
 
     failures: list[str] = []
     with Server(args.port, args.boot_timeout) as srv:

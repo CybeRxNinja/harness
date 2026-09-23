@@ -45,9 +45,16 @@ jobs:
     timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
-      - name: Install opencode
+      # PINNED to the 2.x line this plugin targets. `opencode.ai/install` with no
+      # --version resolves GitHub's `releases/latest`, which is the 1.x train
+      # (v1.18.x): that binary has no `server password` banner and no /api/plugin,
+      # so the smoke used to sit on its deadline against a healthy server it
+      # could not talk to. Bump this deliberately, after re-probing the contract.
+      - name: Install opencode (2.x)
+        env:
+          OPENCODE_VERSION: "2.0.14"
         run: |
-          curl -fsSL https://opencode.ai/install | bash
+          curl -fsSL https://opencode.ai/install | bash -s -- --version "$OPENCODE_VERSION"
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
       # Stdlib only — the smoke script imports nothing from this package, so no
       # Python setup or pip install is needed to run it.
