@@ -1,6 +1,6 @@
 [![ci](https://github.com/CybeRxNinja/harness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CybeRxNinja/harness/actions/workflows/ci.yml)
 [![release](https://github.com/CybeRxNinja/harness/actions/workflows/release.yml/badge.svg)](https://github.com/CybeRxNinja/harness/releases)
-[![tests](https://img.shields.io/badge/tests-197%20passing-brightgreen)](.github/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-200%20passing-brightgreen)](.github/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![release](https://img.shields.io/github/v/tag/CybeRxNinja/harness?filter=plugin-v*&label=plugin)](https://github.com/CybeRxNinja/harness/releases/latest)
 
@@ -15,10 +15,10 @@ inherits your default model.
 
 ```
 you ──> stock opencode ──> harness plugin (server.ts + tui.tsx)
-                                ├─ skills_list / skill_view / memory_recall as native tools
-                                ├─ compaction hook → durable memory survives summarization
+                                ├─ native tools: skills_list / skill_view / memory_recall + todowrite / todoread
+                                ├─ compaction hook → durable memory and open todos survive summarization
                                 ├─ orchestrator + workers (RLM pool), plans, checkpoints
-                                └─ sidebar panel: Window · Tokens · Models · Todo · Skills · Agents · Memory
+                                └─ sidebar panel: Window · Tokens · Models · Todo · Workers · Skills · Agents · Memory
 ```
 
 Potato-PC safe: stdlib-only Python core, SQLite state, <150 MB idle, workers
@@ -39,9 +39,10 @@ and the live smoke) and re-runnable locally:
 | dangerous commands ask, safe ones don't | `tests/test_risk.py`: 94 ask-rules generated from `harness/risk.py` (`git push`, `rm -rf`, `DROP TABLE`, deploys) — greps, diffs, fetches, tests never prompt |
 | RLM workers reach a terminal state | `tests/test_rlm.py`: `done\|error\|timeout\|stale`, delivered-once mailbox, `result.md`, pool sized by `budgets.max_parallel` |
 | entrypoints never break a boot | `tests/test_plugin.py` transpiles both files with `Bun.Transpiler`; bad `setup()` returns are pinned by tests |
-| 197 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
+| the model's plan lands in the harness todo space | live: `opencode run "…call todowrite…"` → rows in `<project>/.opencode/harness/sessions.db` under the run's session id, painted by the panel off a real pty capture |
+| 200 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
 
-Latest release: **[`plugin-v0.5.1`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.5.1)**
+Latest release: **[`plugin-v0.6`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.6)**
 — verified end-to-end by installing *from the release* (`harness plugin
 install --from-release latest` → byte-identical assets → live smoke `SMOKE OK`).
 
@@ -54,7 +55,12 @@ opencode v2:
   (`ctx.skill.transform`): build ladder (incl. **ponytail**, MIT), review,
   audit, spec-driven development, security, and more.
 - **Native tools** — `skills_list`, `skill_view`, `memory_recall` registered
-  through `ctx.tool.transform` (no MCP hop).
+  through `ctx.tool.transform` (no MCP hop), plus `todowrite`/`todoread` — the
+  plan tools opencode 2.x dropped — backed by the harness todo space
+  (`<project>/.opencode/harness/sessions.db` → `todos`), the same list the
+  sidebar reads and the compaction brief carries. `AGENTS.md` and three bundled
+  skills (`planning-and-task-breakdown`, `incremental-implementation`,
+  `using-agent-skills`) tell the agents to keep it current on evidence.
 - **Memory** — on compaction (`ctx.session.hook("compaction")`) a recalled
   FTS5 brief is appended to the summarization request, so decisions and root
   causes survive a condensed transcript; oversized tool outputs are condensed
@@ -66,9 +72,11 @@ opencode v2:
   same object: reads/fetches/tests run free, destructive commands ask with a
   reason.
 - **Sidebar panel** (`tui.tsx`) — opencode's own row grammar and theme keys:
-  Window (usage bar), Tokens (+$), Models, Todo, Skills, Agents, Memory; every
-  row click-to-expand; footer chip `harness · 9.6k tok · $0.00` toggles it.
-  Details and the loader/TUI traps this survives: `harness/plugin/README.md`.
+  Window (usage bar), Tokens (+$), Models (provider + model + steps), Todo
+  (auto-expands as the plan changes), Workers (RLM pool: running/queued and the
+  newest results), Skills, Agents, Memory; several rows can be expanded at once;
+  footer chip `harness · 9.6k tok · $0.00` toggles it. Details and the loader/TUI
+  traps this survives: `harness/plugin/README.md`.
 
 ## Install
 
