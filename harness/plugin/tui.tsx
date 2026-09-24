@@ -11,7 +11,8 @@
 //     label taking `flexGrow` and the value `flexShrink 0` so the value pins to
 //     the right edge at any panel width (opencode's own MCP rows do this);
 //   * same numbers as opencode's readout (total tokens = in+out+reasoning+
-//     cache read+write; context % = total / model.limit.context);
+//     cache read+write; window % = LAST assistant message / model.limit.context,
+//     opencode's own header rule);
 //   * no duplicate "Context" section — opencode already renders one — so the
 //     panel adds what it doesn't show (breakdown, window size, skills, memory).
 //
@@ -59,6 +60,15 @@ const SCAN_MS = 5000
 const ROW_LIMIT = 6
 /** Detail rows per section when expanded (the sidebar viewport is short). */
 const DETAIL_LIMIT = 5
+
+/**
+ * opencode's internal agents run its own plumbing (conversation compaction,
+ * title generation). They are not work roles a user can pick, and listing
+ * them advertised capabilities nobody could spawn — while inflating the
+ * "Agents available" count above the rows actually shown. Filtered at load,
+ * so the count and the list can never disagree.
+ */
+const INTERNAL_AGENTS = new Set(["compaction", "title", "summarize", "summary"])
 
 /** Status glyphs, shared with the server half's todo space. */
 const TODO_MARKS: Rec = { completed: "●", in_progress: "◐", cancelled: "✕", pending: "○" }
@@ -280,13 +290,15 @@ const HarnessTui = {
       agent: "",
       model: "",
       contextLimit: 0,
+      contextUsed: 0,
       steps: [] as Rec[],
-      modelList: [] as Rec[],
-      providers: [] as string[],
+      provsUsed: 0,
       agents: [] as string[],
       skills: [] as string[],
       facts: [] as string[],
+      factsCount: 0,
       todos: [] as string[],
+      todosDone: 0,
       todosFromProject: false,
       workers: [] as string[],
       workersActive: 0,
@@ -327,8 +339,10 @@ const HarnessTui = {
     const readProjectState = async (directory: string, sid: string) => {
       const out = {
         todos: [] as string[],
+        todosDone: 0,
         todosFallback: false,
         facts: [] as string[],
+        factsCount: 0,
         workers: [] as string[],
         workersActive: 0,
       }
@@ -348,6 +362,7 @@ const HarnessTui = {
             // fallback is useful, but silently passing off another session's
             // plan as this one's is not.
             out.todosFallback = !mine.length && rows.length > 0
+            out.todosDone = rows.filter((r) => String(r?.status ?? "") === "completed").length
             out.todos = rows.map((r) => `${todoMark(r?.status)} ${cut(r?.text, 30)}`)
           } catch {
             /* no todos table yet */
@@ -369,6 +384,11 @@ const HarnessTui = {
             /* no workers table yet */
           }
           try {
+            // The VALUE is a real count, not the displayed window: LIMIT 6
+            // rows capped it, and the view state never received it at all, so
+            // the header and Memory row printed "0 facts" with facts on disk.
+            const fc = db.query("SELECT count(*) AS n FROM facts").get() as Rec
+            out.factsCount = Number(fc?.n ?? 0) || 0
             out.facts = (db.query("SELECT text FROM facts ORDER BY id DESC LIMIT ?").all(ROW_LIMIT) as Rec[]).map(
               (r) => `✎ ${cut(r?.text, 30)}`,
             )
@@ -411,7 +431,6 @@ const HarnessTui = {
       ])
       const provs = asArray(store?.provider?.list?.(loc))
       const models = asArray(store?.model?.list?.(loc))
-      data.providers = provs.map((p: Rec) => String(p?.id ?? p?.name ?? "")).filter(Boolean).slice(0, ROW_LIMIT)
 
       const [provId, modelName] = splitModel(data.model)
       const provEntry = provs.find((p: Rec) => String(p?.id ?? p?.name ?? "") === provId)
@@ -425,13 +444,10 @@ const HarnessTui = {
       const limit = fromProvider?.limit?.context ?? match?.limit?.context ?? match?.limits?.context
       data.contextLimit = Number(limit ?? 0) || 0
 
-      // Kept for the Models rows: the model store is what knows which provider
-      // owns which model, and the current model's context limit comes from it.
-      data.modelList = models
-
       data.agents = asArray(store?.agent?.list?.(loc))
         .map((a: Rec) => String(a?.name ?? a?.id ?? ""))
         .filter(Boolean)
+        .filter((a: string) => !INTERNAL_AGENTS.has(a.toLowerCase()))
       data.skills = asArray(store?.skill?.list?.(loc))
         .map((s: Rec) => String(s?.id ?? s?.name ?? ""))
         .filter((s: string) => s.startsWith(HARNESS_PREFIX))
@@ -449,6 +465,19 @@ const HarnessTui = {
      */
     const scanModels = (data_: Rec): void => {
       const msgs = sessionID ? asArray(data_?.session?.message?.list?.(sessionID)) : []
+      // Context-window usage the way opencode's own header computes it: the LAST
+      // assistant message with output wins, and a compaction summary counts its
+      // output only. The session AGGREGATE keeps growing past the window, so
+      // summing it pinned the bar at 100% for the rest of the session — that
+      // was the wrong percentage, not a rounding slip.
+      let ctxUsed = 0
+      for (const m of msgs) {
+        if (String(m?.role ?? m?.type) !== "assistant") continue
+        const t = m?.tokens
+        if (!t || Number(t.output ?? 0) <= 0) continue
+        ctxUsed = m?.summary ? Number(t.output ?? 0) : totalTokens(t)
+      }
+      data.contextUsed = ctxUsed
       const byProv = new Map<string, Map<string, { steps: number; cost: number }>>()
       for (const m of msgs) {
         if (String(m?.role ?? m?.type) !== "assistant") continue
@@ -464,22 +493,28 @@ const HarnessTui = {
 
       const steps: Rec[] = []
       for (const [prov, used] of byProv) {
-        // Count from the MODEL store: a provider entry has no `models` map on
-        // 2.0.14 (Provider.Info is id/name/activation/package), so reading the
-        // count off the provider row silently printed a bare provider name.
-        const available = (data.modelList ?? []).filter((m: Rec) => String(m?.providerID ?? "") === prov).length
-        steps.push({ row: available ? `${prov} · ${available} models` : prov, kind: "provider" })
+        // A provider line WITHOUT catalog counts: "kilo · 392 models" is
+        // inventory trivia — what matters is what this session routed through
+        // it, and the available-count lived on a shape that drifts (a
+        // Provider.Info row carries no `models` map on 2.0.14).
+        steps.push({ row: `${cut(prov, 20)}:`, kind: "provider" })
         for (const [name, e] of used) {
-          // Kept to the sidebar's width: the per-model cost is already the
-          // Tokens row's `$` figure, and a truncated "1 st…" says nothing.
-          steps.push({ row: `${cut(name, 20)} · ${e.steps} step${e.steps === 1 ? "" : "s"}`, kind: "row" })
+          // Aligned columns inside the 32-cell detail budget: model left,
+          // steps right. Per-model cost stays out — the Tokens row owns `$`.
+          steps.push({
+            row: `${cut(name, 18).padEnd(18)}${e.steps} step${e.steps === 1 ? "" : "s"}`,
+            kind: "row",
+          })
         }
       }
-      // Nothing sent yet: the selected model is still the model in use.
+      // Nothing sent yet: the selected model is still the model in use — a
+      // "fallback" row that is deliberately NOT counted as usage ("1 used"
+      // before the first message was the old lie).
       if (!steps.length && data.model) {
-        steps.push({ row: `${shortModel(data.model)} · selected`, kind: "row" })
+        steps.push({ row: `${shortModel(data.model)} · selected`, kind: "fallback" })
       }
       data.steps = steps
+      data.provsUsed = byProv.size
     }
 
     const load = async (full = false) => {
@@ -539,8 +574,10 @@ const HarnessTui = {
         // message store).
         const state = await readProjectState(directory, sessionID)
         data.todos = state.todos
+        data.todosDone = state.todosDone
         data.todosFromProject = state.todosFallback
         data.facts = state.facts
+        data.factsCount = state.factsCount
         data.workers = state.workers
         data.workersActive = state.workersActive
 
@@ -566,11 +603,17 @@ const HarnessTui = {
           d.skills = data.skills.length
           d.agents = data.agents.length
           d.todos = data.todos.length
+          d.todosDone = data.todosDone
           d.todosProject = data.todosFromProject
           d.workersActive = data.workersActive
           d.workers = data.workers.length
           d.models = data.steps.filter((s: Rec) => s.kind === "row").length
-          d.providers = data.providers.length
+          // Providers the session actually ROUTED through: the store-wide
+          // count ("6 providers" installed, 3 used) read as wrong data.
+          d.providers = data.provsUsed
+          // facts never reached the view state before this — header and Memory
+          // printed 0 even with facts on disk.
+          d.facts = data.factsCount
           // A todo list that appears or changes opens its own row: the list is
           // the point of the section, and a collapsed "3 items" hides the plan
           // the model is following. A manual collapse sticks until the list
@@ -697,7 +740,21 @@ const HarnessTui = {
      * `const rows = lines()` up here would freeze at the first paint and keep
      * showing the pre-load snapshot no matter what the store did later.
      */
-    const Row = (props: { id: string; label: string; value: () => string; lines: () => string[]; empty: string }) => (
+    const Row = (props: {
+      id: string
+      label: string
+      value: () => string
+      lines: () => string[]
+      empty: string
+      /** Hide the whole row when there is nothing to say (empty Todo/Workers/Memory). */
+      hide?: () => boolean
+      /** Optional value colour — the Window row tints itself by pressure. */
+      valueFg?: () => string
+    }) => {
+      // A section with nothing in it is noise, not honesty: an empty Workers
+      // row or "0 facts" Memory is exactly the clutter the panel must drop.
+      if (props.hide?.()) return null
+      return (
       <box flexDirection="column">
         <box
           flexDirection="row"
@@ -718,24 +775,32 @@ const HarnessTui = {
           <text fg={isOpen(props.id) ? th.accent : th.base} flexGrow={1} wrapMode="none" truncate>
             {props.label}
           </text>
-          <text fg={th.muted} flexShrink={0} wrapMode="none">
+          <text fg={props.valueFg ? props.valueFg() : th.muted} flexShrink={0} wrapMode="none">
             {props.value()}
           </text>
         </box>
         {isOpen(props.id) ? (
           <box flexDirection="column">
-            {(props.lines().length ? props.lines() : [props.empty]).slice(0, DETAIL_LIMIT).map((l) => (
-              // 32 columns + the two-space indent is the sidebar's whole content
-              // width (measured off a real 42-column sidebar): one more and
-              // opencode middle-truncates the row it is already showing.
-              <text fg={th.muted} wrapMode="none" truncate>
-                {`  ${cut(l, 32)}`}
-              </text>
-            ))}
+            {(() => {
+              const all = props.lines()
+              const rows: string[] = all.length ? all.slice(0, DETAIL_LIMIT) : [props.empty]
+              // A count that outgrows its list ("11 available", 5 shown) is
+              // the dishonesty users notice — always say how many more exist.
+              if (all.length > DETAIL_LIMIT) rows.push(`… +${all.length - DETAIL_LIMIT} more`)
+              return rows.map((l) => (
+                // 32 columns + the two-space indent is the sidebar's whole content
+                // width (measured off a real 42-column sidebar): one more and
+                // opencode middle-truncates the row it is already showing.
+                <text fg={th.muted} wrapMode="none" truncate>
+                  {`  ${cut(l, 32)}`}
+                </text>
+              ))
+            })()}
           </box>
         ) : null}
       </box>
-    )
+      )
+    }
 
     // ---- the side panel: opencode's own sidebar, our rows ---------------
     try {
@@ -750,21 +815,31 @@ const HarnessTui = {
               void view.rev
               return totalTokens(data.tokens)
             }
+            /** Window occupancy: the last message, never the lifetime total. */
+            const used = (): number => {
+              void view.rev
+              return Number(data.contextUsed ?? 0) || 0
+            }
             const pct = (): number => {
               void view.rev
-              return data.contextLimit > 0 ? Math.min(100, Math.round((total() / data.contextLimit) * 100)) : 0
+              return data.contextLimit > 0 ? Math.min(100, Math.round((used() / data.contextLimit) * 100)) : 0
             }
             const windowValue = (): string => {
               void view.rev
               if (!data.tokens) return "—"
-              return data.contextLimit > 0 ? `${bar(pct())} ${pct()}%` : `${kfmt(total())} tok`
+              return data.contextLimit > 0 ? `${bar(pct())} ${pct()}%` : `${kfmt(used())} tok`
+            }
+            /** Pressure tint: quiet until the window is actually filling up. */
+            const windowFg = (): string => {
+              void view.rev
+              return pct() >= 80 ? th.warn : th.muted
             }
             const windowLines = (): string[] => {
               void view.rev
               if (!data.tokens) return []
               const out: string[] = []
               if (data.contextLimit > 0) {
-                out.push(`${numfmt(total())} / ${numfmt(data.contextLimit)} of window`)
+                out.push(`${numfmt(used())} / ${numfmt(data.contextLimit)} in context`)
               }
               out.push(`${data.model ? shortModel(data.model) : "model —"} · agent ${data.agent || "—"}`)
               return out
@@ -780,12 +855,15 @@ const HarnessTui = {
               const t = data.tokens
               if (!t) return []
               const cache = t.cache ?? {}
-              return [
+              // No cost line: it is the row's value already, and a repeat of
+              // the same number was pure noise. Cache write is shown only
+              // when there is any (it is usually 0).
+              const out = [
                 `input ${numfmt(t.input)} · output ${numfmt(t.output)}`,
-                `reasoning ${numfmt(t.reasoning)}`,
-                `cache read ${numfmt(cache.read)} · write ${numfmt(cache.write)}`,
-                `cost $${Number(data.cost ?? 0).toFixed(4)}`,
+                `reasoning ${numfmt(t.reasoning)} · cache ${kfmt(cache.read)}`,
               ]
+              if (Number(cache.write ?? 0) > 0) out.push(`cache write ${numfmt(cache.write)}`)
+              return out
             }
             return (
               <box flexDirection="column">
@@ -799,8 +877,12 @@ const HarnessTui = {
                   <text fg={th.muted} flexGrow={1} wrapMode="none" truncate>
                     {view.note
                       ? cut(view.note, 40)
-                      : [view.sessionID || "", `${view.skills ?? 0} skills`, `${view.facts ?? 0} facts`]
-                          .filter((s) => String(s).length && s !== "0 skills")
+                      : [
+                          view.sessionID || "",
+                          (view.skills ?? 0) > 0 ? `${view.skills} skills` : "",
+                          (view.facts ?? 0) > 0 ? `${view.facts} facts` : "",
+                        ]
+                          .filter((s) => s.length)
                           .join(" · ")}
                   </text>
                   {view.scanning ? (
@@ -814,6 +896,7 @@ const HarnessTui = {
                   id="window"
                   label="Window"
                   value={windowValue}
+                  valueFg={windowFg}
                   lines={windowLines}
                   empty="(no context data yet)"
                 />
@@ -821,7 +904,12 @@ const HarnessTui = {
                 <Row
                   id="models"
                   label="Models"
-                  value={() => `${view.models ?? 0} used · ${view.providers ?? 0} providers`}
+                  value={() => {
+                    void view.rev
+                    if (!view.models) return "not used"
+                    const p = view.providers ?? 0
+                    return `${view.models} model${view.models === 1 ? "" : "s"} · ${p} provider${p === 1 ? "" : "s"}`
+                  }}
                   lines={() => {
                     void view.rev
                     return data.steps.map((s: Rec) => String(s.row))
@@ -831,9 +919,16 @@ const HarnessTui = {
                 <Row
                   id="todo"
                   label="Todo"
-                  value={() =>
-                    `${view.todos ?? 0} item${(view.todos ?? 0) === 1 ? "" : "s"}${view.todosProject ? " · project" : ""}`
-                  }
+                  value={() => {
+                    void view.rev
+                    const n = view.todos ?? 0
+                    if (!n) return "—"
+                    return `${view.todosDone ?? 0}/${n} done${view.todosProject ? " · project" : ""}`
+                  }}
+                  hide={() => {
+                    void view.rev
+                    return !(view.todos ?? 0)
+                  }}
                   lines={() => {
                     void view.rev
                     return data.todos
@@ -846,9 +941,10 @@ const HarnessTui = {
                 <Row
                   id="workers"
                   label="Workers"
-                  value={() => {
-                    if (!view.workers) return "none"
-                    return view.workersActive ? `${view.workersActive} active` : "idle"
+                  value={() => (view.workersActive ? `${view.workersActive} active` : "idle")}
+                  hide={() => {
+                    void view.rev
+                    return !view.workers
                   }}
                   lines={() => {
                     void view.rev
@@ -872,7 +968,13 @@ const HarnessTui = {
                   value={() => `${view.agents ?? 0} available`}
                   lines={() => {
                     void view.rev
-                    return data.agents.map((a) => `◦ ${a}`)
+                    // Active agent first and marked; internals were filtered
+                    // at load, so the count and this list always agree (the
+                    // Row prints "+N more" when they outgrow the budget).
+                    const cur = data.agent
+                    return [...data.agents]
+                      .sort((a, b) => Number(b === cur) - Number(a === cur))
+                      .map((a) => `${a === cur ? "●" : "◦"} ${a}`)
                   }}
                   empty="(none registered)"
                 />
@@ -880,6 +982,10 @@ const HarnessTui = {
                   id="memory"
                   label="Memory"
                   value={() => `${view.facts ?? 0} fact${(view.facts ?? 0) === 1 ? "" : "s"}`}
+                  hide={() => {
+                    void view.rev
+                    return !(view.facts ?? 0)
+                  }}
                   lines={() => {
                     void view.rev
                     return data.facts
@@ -910,12 +1016,26 @@ const HarnessTui = {
       void view.rev // tracked read: repaint when a load lands
       const t = data.tokens
       const totalTok = totalTokens(t)
-      if (totalTok > 0) return `harness · ${kfmt(totalTok)} tok · $${Number(data.cost ?? 0).toFixed(2)}`
+      if (totalTok > 0) {
+        // What you want at a glance: window pressure first, spend second, and
+        // the lifetime total demoted — it only ever grows, so leading with it
+        // made the chip read as "always the same big number".
+        const p =
+          data.contextLimit > 0
+            ? Math.min(100, Math.round((Number(data.contextUsed ?? 0) / data.contextLimit) * 100))
+            : 0
+        const ctx = data.contextLimit > 0 ? `${p}% ctx · ` : ""
+        return `harness · ${ctx}$${Number(data.cost ?? 0).toFixed(2)} · ${kfmt(totalTok)} tok`
+      }
       // No session yet: the skill/fact stores are location-scoped and empty at
       // the default location, so counting them here would print a misleading
       // "0 skills" next to a plugin that ships a skill pack.
       if (!view.sessionID) return "harness · click for stats"
-      return `harness · ${view.skills ?? 0} skills · ${view.facts ?? 0} facts`
+      const bits = [
+        (view.skills ?? 0) > 0 ? `${view.skills} skills` : "",
+        (view.facts ?? 0) > 0 ? `${view.facts} facts` : "",
+      ].filter((s) => s)
+      return bits.length ? `harness · ${bits.join(" · ")}` : "harness · click for stats"
     }
 
     // ---- footer chip: headline stats, click toggles the sidebar ----------

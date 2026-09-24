@@ -64,16 +64,18 @@ no model pins: they inherit your opencode default model.
 
 | target | what harness contributes |
 | --- | --- |
-| `home.footer.status` | `harness · 9.6k tok · $0.00`, click toggles the sidebar |
-| `sidebar.content` | the stats rows: Window / Tokens / Models / Todo / Workers / Skills / Agents / Memory, each click-to-expand (several at once) |
+| `home.footer.status` | `harness · 12% ctx · $0.03 · 5.9m tok`, click toggles the sidebar (pressure first, lifetime total last) |
+| `sidebar.content` | the stats rows: Window / Tokens / Models / Todo / Workers / Skills / Agents / Memory, each click-to-expand (several at once). Todo/Workers/Memory hide when empty; any list past five rows ends with `… +N more` so counts always match their list |
 | `sidebar.footer` | `harness · click a row` / `harness · N expanded` |
 | `app` | the `app` slot hosts the `ctx.keymap.layer` call (see below) |
 
 Rows follow opencode's own geometry (label `flexGrow` + value `flexShrink 0`, so
 values pin right at any width), use its own theme keys (`text.base` for labels,
 `text.muted` for values) and its own numbers (total tokens = in + out +
-reasoning + cache), and there is no "Context" row because opencode already
-renders one. Opened by `ctrl+g`, `/harness` (alias `/hp`), or the sidebar toggle;
+reasoning + cache for the session; the Window bar = the LAST assistant message /
+the model's context limit, opencode's header rule — the session sum only grows
+and pinned the bar at 100%), and there is no "Context" row because opencode
+already renders one. Opened by `ctrl+g`, `/harness` (alias `/hp`), or the sidebar toggle;
 `/harness-refresh` (`/hr`) re-scans.
 
 Traps found by probing the running TUI — do not "simplify" these away:
@@ -108,8 +110,9 @@ Traps found by probing the running TUI — do not "simplify" these away:
   them at `0 used` for the whole session. The walk runs every pass, with one
   `setTimeout(load, 500)` nudge per session.
 - **A provider entry has no `models` map** (`Provider.Info` is
-  id/name/activation/package), so per-provider model counts come from the model
-  store (`m.providerID`).
+  id/name/activation/package). The Models row therefore shows no catalog counts
+  at all ("kilo · 392 models" was inventory trivia); the model store only feeds
+  the context-limit lookup.
 - **The Workers row is project-wide**, and its count is a `count(*)` query rather
   than `rows.length` of the six displayed rows: `rlm.spawn` leaves `workers.session`
   empty, and a worker that runs for an hour can fall outside the newest rows while

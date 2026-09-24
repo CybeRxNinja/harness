@@ -11,9 +11,16 @@ def test_tui_config_merge(tmp_path, monkeypatch):
     assert d["model"] == "openai/gpt"  # user value kept, never pinned
     assert "harness" not in d.get("provider", {})  # no relay provider
     assert set(("orchestrator", "ask", "debug", "review")) <= set(d["agent"])
+    # specialized subagents merge too: the task tool can only route to agents
+    # opencode knows about, and the built-in fallback is `general`
+    assert {"explore", "code-reviewer", "test-engineer"} <= set(d["agent"])
+    assert d["agent"]["code-reviewer"]["mode"] == "subagent"
     for spec in d["agent"].values():  # agents inherit the user default
         assert "model" not in spec
-        assert "harness/" not in json.dumps(spec)
+        # relay ids only ever appeared as a value ("harness/auto-fastest"),
+        # so require the quote — a prompt may legitimately name a path like
+        # .opencode/harness/tmp/
+        assert '"harness/' not in json.dumps(spec)
     # idempotent
     ensure_opencode_config()
     d2 = json.loads(open(out).read())

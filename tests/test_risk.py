@@ -66,12 +66,61 @@ def test_force_push_is_reported_as_force_not_as_a_plain_push():
     assert "overwritten" in v["reason"], v
 
 
+def test_installs_that_land_outside_the_project_ask():
+    """An unattended worker pip-installing into the interpreter or pulling
+    playwright browsers is how a simple task starts mutating the system.
+    Project-local `npm install` stays unattended (pinned separately below)."""
+    for action, part in (
+        ("pip install httpx", "outside the project"),
+        ("python3 -m pip install --user httpx", "outside the project"),
+        ("uv tool install ruff", "outside the project"),
+        ("playwright install firefox", "~/.cache"),
+        ("npx playwright install chromium", "~/.cache"),
+        ("apt-get install -y jq", "OS package manager"),
+        ("brew install jq", "OS package manager"),
+    ):
+        v = R.assess(action, "shell")
+        assert v["ask"] is True, (action, v)
+        assert part in v["reason"], (action, v)
+
+
+def test_scratch_outside_the_project_asks_without_pretending_to_be_irreversible():
+    """Temp files written outside the project cannot come back from a
+    checkpoint, so they prompt — same posture as external_directory: elevated
+    and askable, not irreversible. Reads of /tmp are still plain reads."""
+    for action in ("echo hi > /tmp/shot.png", "tee /tmp/out.txt",
+                   "python3 /tmp/opencode/check.py", "node /tmp/x.js"):
+        v = R.assess(action, "shell")
+        assert v["ask"] is True, (action, v)
+        assert v["risk"] == R.ELEVATED, (action, v)
+        assert v["irreversible"] is False, (action, v)
+        assert "harness/tmp" in v["reason"], v
+    # a read that merely mentions /tmp — or greps for the word python3 — must
+    # never ask: reads are the things that must stay free
+    assert R.assess("cat /tmp/data.txt", "shell")["ask"] is False
+    assert R.assess("grep python3 /tmp/list.txt", "shell")["ask"] is False
+
+
 def test_ordinary_reversible_commands_run_unattended():
     for action in ("git commit -m wip", "python -m harness chat hi", "bun run build",
                    "npm install", "mv a.py b.py", "mkdir -p build"):
         v = R.assess(action, "shell")
         assert v["ask"] is False, (action, v)
         assert v["risk"] == R.ELEVATED, (action, v)
+
+
+def test_the_permission_map_asks_on_system_installs_and_outside_scratch():
+    """The map opencode enforces must match the classifier the model consults
+    (risk.py is the one source): installs outside the project and scratch
+    outside it ask; the project-local install and the daily workflow do not."""
+    m = R.bash_permission_map()
+    assert m["*"] == "allow"
+    for key in ("pip install", "pip install *", "playwright install *",
+                "npx playwright install *", "apt-get install *", "brew install",
+                "python3 /tmp*", "tee /tmp*"):
+        assert m.get(key) == "ask", (key, m.get(key))
+    for key in ("npm install *", "pytest *", "git status *", "python *"):
+        assert m.get(key) != "ask", (key, m.get(key))
 
 
 def test_writes_are_safe_inside_the_project_and_ask_outside_it():

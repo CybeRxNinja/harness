@@ -24,6 +24,11 @@ def plugin_status(plugins_dir: Path | None = None) -> tuple[str, bool]:
     if d.is_dir():
         missing = [n for n in ENTRYPOINTS if not (d / n).exists()]
         if not missing:
+            stale = _stale_entrypoints(d)
+            if stale:
+                return (f"{d} (server + tui) — STALE: {', '.join(stale)} differ "
+                        f"from this build (old window/agent code in effect); "
+                        f"re-run: harness plugin install"), False
             return f"{d} (server + tui)", True
         found = [n for n in ENTRYPOINTS if (d / n).exists()]
         return (f"{d} ({', '.join(found)}) — missing {', '.join(missing)}; "
@@ -32,6 +37,57 @@ def plugin_status(plugins_dir: Path | None = None) -> tuple[str, bool]:
     if legacy.exists():
         return f"{legacy} — legacy server-only layout; re-run: harness plugin install", False
     return "missing (run: harness plugin install)", False
+
+
+# installed name -> shipped source name (server.ts is harness.ts on disk)
+SHIPPED = {"server.ts": "harness.ts", "tui.tsx": "tui.tsx"}
+
+
+def _stale_entrypoints(installed: Path) -> list[str]:
+    """Installed bytes vs the entrypoints THIS build ships.
+
+    A directory that merely exists can be months old — the failure that hid
+    the Window fix and the specialized subagents from an already-'installed'
+    system — so existence alone is not health.
+    """
+    base = Path(__file__).resolve().parent / "plugin"
+    stale = []
+    for name, src in SHIPPED.items():
+        try:
+            f = base / src
+            if f.exists() and f.read_bytes() != (installed / name).read_bytes():
+                stale.append(name)
+        except OSError:
+            continue
+    return stale
+
+
+def agents_status() -> tuple[str, bool]:
+    """opencode.json must carry every bundled agent.
+
+    The task tool resolves subagent_type against opencode's agent registry, so
+    a config merged by an older harness (primaries only, no `mode: subagent`
+    entries) leaves the orchestrator spawning `general` for every task.
+    """
+    import json as _j
+    from .paths import opencode_config_dir
+    try:
+        from .cli import _bundled_opencode_json
+        want = set(_bundled_opencode_json().get("agent", {}))
+    except Exception as e:
+        return f"bundled agents unreadable: {e}", False
+    dest = opencode_config_dir() / "opencode.json"
+    try:
+        cur = _j.loads(dest.read_text()) if dest.exists() else None
+    except Exception:
+        return f"{dest} unreadable — re-run: harness plugin install", False
+    if cur is None:
+        return f"{dest} not found (run: harness plugin install)", False
+    missing = sorted(want - set(cur.get("agent") or {}))
+    if missing:
+        return (f"{dest} missing {len(missing)} harness agent(s): "
+                f"{', '.join(missing)} — re-run: harness plugin install"), False
+    return f"{dest} ({len(want)} harness agents)", True
 
 
 def _project_db(root: Path) -> Path | None:
@@ -116,6 +172,10 @@ def run(root: Path, verbose: bool = False) -> dict:
     status, healthy = plugin_status()
     c["plugin"] = status
     if not healthy:
+        out["ok"] = False
+    agents_msg, agents_ok = agents_status()
+    c["agents"] = agents_msg
+    if not agents_ok:
         out["ok"] = False
     c["memory"] = memory_status(root)
     c["workers"] = worker_status(root, cfg)

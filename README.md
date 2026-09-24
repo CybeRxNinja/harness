@@ -1,6 +1,6 @@
 [![ci](https://github.com/CybeRxNinja/harness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CybeRxNinja/harness/actions/workflows/ci.yml)
 [![release](https://github.com/CybeRxNinja/harness/actions/workflows/release.yml/badge.svg)](https://github.com/CybeRxNinja/harness/releases)
-[![tests](https://img.shields.io/badge/tests-200%20passing-brightgreen)](.github/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-203%20passing-brightgreen)](.github/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![release](https://img.shields.io/github/v/tag/CybeRxNinja/harness?filter=plugin-v*&label=plugin)](https://github.com/CybeRxNinja/harness/releases/latest)
 
@@ -40,7 +40,7 @@ and the live smoke) and re-runnable locally:
 | RLM workers reach a terminal state | `tests/test_rlm.py`: `done\|error\|timeout\|stale`, delivered-once mailbox, `result.md`, pool sized by `budgets.max_parallel` |
 | entrypoints never break a boot | `tests/test_plugin.py` transpiles both files with `Bun.Transpiler`; bad `setup()` returns are pinned by tests |
 | the model's plan lands in the harness todo space | live: `opencode run "…call todowrite…"` → rows in `<project>/.opencode/harness/sessions.db` under the run's session id, painted by the panel off a real pty capture |
-| 200 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
+| 203 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
 
 Latest release: **[`plugin-v0.6`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.6)**
 — verified end-to-end by installing *from the release* (`harness plugin
@@ -65,14 +65,18 @@ opencode v2:
   FTS5 brief is appended to the summarization request, so decisions and root
   causes survive a condensed transcript; oversized tool outputs are condensed
   in place (`ctx.tool.hook("execute.after")`).
-- **Agents** — `orchestrator/ask/debug/review/plan` merged into
-  `opencode.json` by the installer (backed up, never clobbered), no model pins.
+- **Agents** — `orchestrator/ask/debug/review/plan` plus the specialized
+  subagents (`explore`, `librarian`, `plan-consultant`, `plan-reviewer`,
+  `code-reviewer`, `test-engineer`, `security-auditor`) merged into
+  `opencode.json` by the installer (backed up, never clobbered), no model pins:
+  the orchestrator routes by role instead of falling back to the built-in
+  `general`.
 - **Risk-gated shell policy** — opencode permissions generated from
   `harness/risk.py`, so the model's advice and the host's enforcement are the
   same object: reads/fetches/tests run free, destructive commands ask with a
   reason.
 - **Sidebar panel** (`tui.tsx`) — opencode's own row grammar and theme keys:
-  Window (usage bar), Tokens (+$), Models (provider + model + steps), Todo
+  Window (last-message context gauge), Tokens (+$), Models (provider + model + steps), Todo
   (auto-expands as the plan changes), Workers (RLM pool: running/queued and the
   newest results), Skills, Agents, Memory; several rows can be expanded at once;
   footer chip `harness · 9.6k tok · $0.00` toggles it. Details and the loader/TUI

@@ -44,9 +44,23 @@ def _fresh_history(hist: list[dict]) -> list[dict]:
 
 
 SYSTEM = {
-    "code": "You are Harness, a senior coding agent. Be concrete. Use tools. Verify with tests. Return summary+files changed.",
-    "orchestrator": ("You are the ORCHESTRATOR. Never write product code yourself. Decompose, spawn(category=...) "
-                     "parallel workers, merge diffs, verify with an independent reviewer before done. "
+    "code": ("You are Harness, a senior coding agent. Be concrete. Use tools. Verify with "
+             "tests. Return summary+files changed. Scratch/temp files go under the project's "
+             ".opencode/harness/tmp/ — never /tmp or a system directory — and never install "
+             "packages or tools; report the missing tool instead."),
+    "orchestrator": ("You are the ORCHESTRATOR. Never write product code yourself. Decompose, then spawn "
+                     "parallel workers by kind: subagent_type=explore|librarian for read-only recon and "
+                     "research, plan-consultant|plan-reviewer around plans, code-reviewer for a diff, "
+                     "test-engineer for tests, security-auditor for trust boundaries; category=<intent> "
+                     "only when no specialized kind fits. Merge diffs, verify with an independent "
+                     "reviewer before done. "
+                     "Keep context lean: understand workers from their SUMMARY — never re-read product "
+                     "files to check on them; spawn explore for recon; grep first, then narrow "
+                     "<=200-line windows, never whole large files; never open images/screenshots "
+                     "(ask for text findings). At most one worker runs a browser and it is the "
+                     "test-engineer. Every spawn prompt must require a SUMMARY listing each file "
+                     "created/changed with line counts; scratch goes in .opencode/harness/tmp/, "
+                     "never /tmp; workers never install tools; max 2 workers per wave. "
                      "Reads, greps, status checks and test runs never need the owner: just do them. "
                      "Before anything destructive or irreversible (git push, deletes, publishes, "
                      "deploys, schema drops, config writes), call risk_check once and ask the owner "
@@ -273,7 +287,7 @@ TOOLS_SCHEMA = [
     {"type": "function", "function": {"name": "grep", "description": "regex search", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "include": {"type": "string"}}}}},
     {"type": "function", "function": {"name": "shell", "description": "run allowlisted command (10s fg then background)", "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}}}},
     {"type": "function", "function": {"name": "py", "description": "persistent python kernel exec", "parameters": {"type": "object", "properties": {"code": {"type": "string"}}}}},
-    {"type": "function", "function": {"name": "spawn", "description": "spawn subagent: exactly one of category|subagent_type", "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}, "name": {"type": "string"}, "category": {"type": "string"}, "subagent_type": {"type": "string"}}}}},
+    {"type": "function", "function": {"name": "spawn", "description": "spawn subagent: exactly one of category|subagent_type (types: explore|librarian|plan-consultant|plan-reviewer|code-reviewer|test-engineer|security-auditor)", "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}, "name": {"type": "string"}, "category": {"type": "string"}, "subagent_type": {"type": "string"}}}}},
     {"type": "function", "function": {"name": "memory", "description": "recall/save facts", "parameters": {"type": "object", "properties": {"op": {"type": "string"}, "q": {"type": "string"}, "text": {"type": "string"}}}}},
     {"type": "function", "function": {"name": "skill_view", "description": "progressive skill load L1/L2", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}}}},
     {"type": "function", "function": {"name": "skills_list", "description": "L0 skill index", "parameters": {"type": "object", "properties": {}}}},

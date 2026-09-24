@@ -311,6 +311,29 @@ def test_result_and_wait_are_honest_about_an_unknown_worker(root):
         con.close()
 
 
+def test_each_specialized_kind_gets_its_own_brief(root):
+    """A subagent_type is a ROLE. One generic prompt for every kind made "spawn a
+    code reviewer" and "spawn a security auditor" the same worker; each kind now
+    carries its own brief, the read-only pair still says READ-ONLY, and every
+    type in the spawn contract has one so no kind falls back to generic."""
+    from harness import rlm
+    from harness.config import load_config
+    cfg = load_config(root)[0]
+    coder = rlm._system_prompt(root, cfg, "code-reviewer", [])
+    sec = rlm._system_prompt(root, cfg, "security-auditor", [])
+    testy = rlm._system_prompt(root, cfg, "test-engineer", [])
+    assert "five axes" in coder and "Blocker" in coder
+    assert "Static" in coder and "test-engineer's lane" in coder, "reviewers stay static"
+    assert "OWASP" in sec and "trust boundaries" in sec
+    assert "failing first" in testy and "test files only" in testy
+    assert "harness/tmp" in testy and "never install" in testy, "scratch stays in the project"
+    assert len({coder, sec, testy}) == 3
+    assert "SUMMARY + DIFF" in coder, "the subagent contract still leads"
+    assert "READ-ONLY" in rlm._system_prompt(root, cfg, "explore", [])
+    assert "READ-ONLY" not in coder and "READ-ONLY" not in sec
+    assert set(rlm.SUBAGENT_TYPES) == set(rlm.SUBAGENT_BRIEFS)
+
+
 def test_skills_are_passed_to_the_worker_prompt(root, monkeypatch):
     from harness import models, rlm, skills
     from harness.store import connect

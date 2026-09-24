@@ -225,6 +225,21 @@ def _bundled_opencode_json() -> dict:
     return {"agent": {}}
 
 
+# First lines of agent prompts harness shipped in EARLIER releases: a config
+# still opening with one of these is harness-originated, so refreshed guidance
+# reaches it (setdefault alone never would — it only fills what is missing).
+# Any other opening line is the owner's rewrite and is left untouched.
+# MAINTENANCE: when you change a prompt's FIRST LINE, append the old line
+# here; edits that only append paragraphs need no entry.
+LEGACY_PROMPT_HEADS = {
+    "orchestrator": frozenset({
+        "You are the ORCHESTRATOR. Never write product code yourself. Decompose work, spawn parallel subagents via the task tool (one responsibility each), merge their diffs, and verify with tests before done. Keep context lean: ask for SUMMARY+DIFF only.",
+        "You are the ORCHESTRATOR. Never write product code yourself. Decompose work, spawn parallel subagents via the task tool (one responsibility each), merge their diffs, and verify with tests before done. Keep context lean: ask for SUMMARY+DIFF only. Discover procedures with the harness skills_list/skill_view tools and recall durable facts with memory_recall before acting.",
+        "You are the ORCHESTRATOR. Never write product code yourself. Decompose work, spawn parallel subagents via the task tool (one responsibility each), merge their diffs, and verify with tests before done. Keep context lean: ask for SUMMARY+DIFF only. Discover procedures with the harness-skills MCP tools (skills_list, then skill_view) and recall durable facts with memory_recall before acting.",
+    }),
+}
+
+
 def ensure_opencode_config() -> str:
     """Merge harness agents into opencode.json. Never clobbers user keys.
 
@@ -255,6 +270,29 @@ def ensure_opencode_config() -> str:
                     node[k].setdefault(pk, pv)
             else:
                 node.setdefault(k, v)
+    # `prompt` refresh: guidance improvements (lane discipline, lean-context
+    # rules) must reach installs that already carry the agent — setdefault
+    # alone leaves them on the stale prompt forever. The tell is the opening
+    # line: if it still matches the line THIS build ships (or a line a
+    # previous release shipped, see LEGACY_PROMPT_HEADS), the prompt is
+    # harness-originated and is brought up to date; any other opening is the
+    # owner's rewrite and stays. Every run writes a .bak of opencode.json
+    # first, and prompt edits should APPEND paragraphs rather than rewrite
+    # line 1, so the tell keeps working.
+    refreshed = []
+    for _name, _spec in want.get("agent", {}).items():
+        _prompt = _spec.get("prompt", "")
+        _node = agents.get(_name)
+        if not isinstance(_node, dict) or not isinstance(_prompt, str) or not _prompt:
+            continue
+        _cur = _node.get("prompt")
+        if not (isinstance(_cur, str) and _cur != _prompt):
+            continue
+        _head = _prompt.split("\n", 1)[0].strip()
+        _cur_head = _cur.split("\n", 1)[0].strip()
+        if _cur_head == _head or _cur_head in LEGACY_PROMPT_HEADS.get(_name, ()):
+            _node["prompt"] = _prompt
+            refreshed.append(_name)
     # Shell policy is GENERATED, not shipped in the JSON (see risk.py): the
     # destructive-command list is the one thing that must not drift between the
     # classifier the model consults and the rule opencode enforces. A blanket
@@ -280,6 +318,17 @@ def ensure_opencode_config() -> str:
         if isinstance(_bash, str):
             _perm["bash"] = _risk.bash_permission_map()
             migrated.append(f"{_name}: bash {_bash} -> generated (safe commands run, destructive ones ask)")
+        elif isinstance(_bash, dict):
+            # An ALREADY-generated map from an older build would keep the old
+            # rules forever (setdefault never rewrites it) — new ask rules
+            # (installs, outside-project scratch) must reach installs that
+            # already carry one. The harness-only anchor key tells a map THIS
+            # harness generated from the owner's own permission object, which
+            # is left exactly as they set it (a .bak is written every run).
+            _new_map = _risk.bash_permission_map()
+            if "harness checkpoint restore" in _bash and _bash != _new_map:
+                _perm["bash"] = _new_map
+                migrated.append(f"{_name}: generated shell map refreshed (rules added since install)")
     # The read-only floors are harness-owned negatives: never a prompt, because
     # a prompt implies a "yes" could unlock them. Seeded only when absent so a
     # user who deliberately re-enabled edits keeps their choice.
@@ -313,6 +362,9 @@ def ensure_opencode_config() -> str:
             del cur["mcp"]["harness-skills"]
     except Exception:
         pass
+    if refreshed:
+        print("harness: refreshed guidance for harness-originated agent prompts — "
+              + ", ".join(refreshed), file=sys.stderr)
     if migrated:
         print("harness: shell permissions regenerated from the risk policy — "
               + "; ".join(migrated), file=sys.stderr)
@@ -521,7 +573,11 @@ def uninstall_plugin() -> list[str]:
         done.append("removed provider.harness")
         changed = True
     if isinstance(cur.get("agent"), dict):
-        for name in ("orchestrator", "ask", "debug", "review", "plan"):
+        # keep in step with harness-opencode.json (install merges every agent
+        # in that file; uninstall has no way to know which ones it added)
+        for name in ("orchestrator", "ask", "debug", "review", "plan",
+                     "explore", "librarian", "plan-consultant", "plan-reviewer",
+                     "code-reviewer", "test-engineer", "security-auditor"):
             if name in cur["agent"] and isinstance(cur["agent"][name], dict):
                 model = str(cur["agent"][name].get("model", ""))
                 if not model or model.startswith("harness/"):

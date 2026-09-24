@@ -677,7 +677,10 @@ def test_tui_panel_counts_and_repaints():
     assert "▪ ${shortSkill(s)}" in tui
     # Solid re-runs tracked JSX expressions, not the render body: detail rows must
     # be built inside the JSX expression, or they freeze at the first paint
-    assert "{(props.lines().length ? props.lines() : [props.empty]).slice(0, DETAIL_LIMIT).map" in tui
+    # a truncated list always says how many more exist: "11 available" over
+    # five rows was the count/list mismatch users called inaccurate
+    assert "rows: string[] = all.length ? all.slice(0, DETAIL_LIMIT) : [props.empty]" in tui
+    assert "if (all.length > DETAIL_LIMIT) rows.push(`… +${all.length - DETAIL_LIMIT} more`)" in tui
     # a failed load surfaces in the panel (cli-side console.error is not logged)
     assert 'd.note = notes[0] ?? ""' in tui
     assert "cut(view.note, 40)" in tui
@@ -764,16 +767,24 @@ def test_tui_models_rows_are_computed_on_every_load():
     gate = tui.index("if (full || !scanned) {")
     assert "scanModels" not in tui[gate:tui.index("\n        }\n", gate)]
     assert "warmedFor = sessionID" in tui and "setTimeout(() => void load(), 500)" in tui
-    # real step counts, not a hard-coded "1 step", and the row fits the sidebar
+    # real step counts, not a hard-coded "1 step", aligned in columns that fit
+    # the 32-cell detail budget: model left, steps right
     assert 'e.steps === 1 ? "" : "s"' in tui
-    assert "`${cut(name, 20)} · ${e.steps} step" in tui
-    # a session that has sent nothing yet still shows the model it is using
+    assert "`${cut(name, 18).padEnd(18)}${e.steps} step" in tui
+    # a session that has sent nothing still shows the selected model — as a
+    # "fallback" row that is NOT counted as usage ("1 used" before the first
+    # message was the old lie)
     assert "· selected`" in tui
-    # the per-provider model count comes from the MODEL store: a Provider.Info
-    # entry has no models map on 2.0.14, so reading it printed a bare provider
-    # name ("opencode" with no "· N models")
-    assert "data.modelList = models" in tui
-    assert '(data.modelList ?? []).filter((m: Rec) => String(m?.providerID ?? "") === prov)' in tui
+    assert 'kind: "fallback"' in tui
+    # provider lines are plain grouping headers: the catalog count ("kilo ·
+    # 392 models") was inventory trivia and its source shape drifts (a
+    # Provider.Info row has no models map on 2.0.14), so it is gone entirely
+    assert "modelList" not in tui
+    assert "`${cut(prov, 20)}:`" in tui
+    # the value counts providers the session ROUTED through, not the ones
+    # installed ("3 used · 6 providers" was the wrong data users saw)
+    assert "data.provsUsed = byProv.size" in tui
+    assert "d.providers = data.provsUsed" in tui
     assert "provEntries" not in tui
 
 
@@ -802,10 +813,10 @@ def test_tui_workers_row_shows_the_rlm_pool():
     assert "/ 1000" in tui, "rlm writes epoch seconds, not milliseconds"
     assert "STALE_MS" not in tui and '= "stale"' not in tui, "the stale rule stays doctor's"
 
-    # the value is the live occupancy; empty history reads as "none", a quiet
-    # pool as "idle"
-    assert 'if (!view.workers) return "none"' in tui
+    # the value is the live occupancy of a pool that EXISTS; an empty pool
+    # hides the row (a permanent "Workers none" was panel clutter, not state)
     assert 'view.workersActive ? `${view.workersActive} active` : "idle"' in tui
+    assert "return !view.workers" in tui
     assert '(no workers in this project)' in tui
 
 
@@ -1033,6 +1044,7 @@ def test_plugin_install_idempotent(tmp_path, monkeypatch):
     d = json.loads((_opencode_config_path()).read_text())
     assert "harness" not in d.get("provider", {})
     assert "orchestrator" in d.get("agent", {})
+    assert "code-reviewer" in d.get("agent", {}), "specialized subagents merge too"
     # a legacy single-file install is superseded, not left behind to double-load
     legacy = plugdir / "harness.ts"
     legacy.write_text("// stale single-file install")
@@ -1046,4 +1058,72 @@ def test_plugin_install_idempotent(tmp_path, monkeypatch):
     assert r.returncode == 0 and "removed plugin dir" in r.stdout
     d = json.loads((_opencode_config_path()).read_text())
     assert "harness" not in d.get("provider", {})
+    assert "code-reviewer" not in d.get("agent", {}), "uninstall removes the subagents it merged"
     assert not (plugdir / "harness").exists()
+
+
+def test_tui_window_bar_is_the_last_message_not_the_session_total():
+    """The Window row summed the session's lifetime tokens against the context
+    window, so the bar pinned at 100% early in a real session: the aggregate
+    only grows, but a window is filled by what is currently in it. opencode's
+    own header computes the gauge from the LAST assistant message
+    (`usage.Output > 0`; a compaction summary counts its output only).
+    """
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+    # the last-message walk, exactly as opencode's header does it
+    assert "Number(t.output ?? 0) <= 0" in tui
+    assert "ctxUsed = m?.summary ? Number(t.output ?? 0) : totalTokens(t)" in tui
+    assert "data.contextUsed = ctxUsed" in tui
+    # the bar and its detail read the last message; the Tokens row keeps the total
+    assert "return Number(data.contextUsed ?? 0) || 0" in tui
+    assert "Math.round((used() / data.contextLimit) * 100)" in tui
+    assert "`${numfmt(used())} / ${numfmt(data.contextLimit)} in context`" in tui
+    # the value tints itself once the window is actually filling up
+    assert "pct() >= 80 ? th.warn" in tui
+    assert "return totalTokens(data.tokens)" in tui
+    assert "Math.round((total() / data.contextLimit) * 100)" not in tui, (
+        "the percentage must not divide the session total by the window"
+    )
+
+
+def test_tui_panel_shows_only_thoughtful_accurate_rows():
+    """The panel's job is the information you want at a glance; the render
+    carried noise and numbers that disagreed with their own lists:
+
+    * "Agents 11 available" listed 5 rows — opencode's internal compaction and
+      title agents were advertised as spawnable work roles (now filtered at
+      load, active agent marked first);
+    * empty Todo/Workers/Memory rows ("Workers none", "0 facts") narrated
+      their own emptiness — they hide instead;
+    * the facts count never reached the view state (and the raw query was
+      LIMIT-capped), so header and Memory printed 0 with facts on disk — it
+      now comes from `count(*)`;
+    * the Todo value repeated the row count — it is progress now (`1/4 done`);
+    * the footer chip led with the lifetime total, a number that only ever
+      grows — window pressure comes first.
+    """
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+
+    # internal plumbing agents are never advertised as available work roles
+    assert 'INTERNAL_AGENTS = new Set(["compaction", "title"' in tui
+    assert "!INTERNAL_AGENTS.has(a.toLowerCase())" in tui
+    # the active agent leads the list and is marked
+    assert "sort((a, b) => Number(b === cur) - Number(a === cur))" in tui
+    assert '${a === cur ? "●" : "◦"} ${a}' in tui
+
+    # empty sections disappear instead of narrating their emptiness
+    for needle in ("return !(view.todos ?? 0)", "return !view.workers", "return !(view.facts ?? 0)"):
+        assert needle in tui, needle
+
+    # a REAL facts count reaches the view state, and todo progress with it
+    assert "SELECT count(*) AS n FROM facts" in tui
+    assert "d.facts = data.factsCount" in tui
+    assert "out.todosDone = rows.filter" in tui
+    assert "d.todosDone = data.todosDone" in tui
+
+    # chip leads with context pressure; the lifetime total is demoted
+    assert "`${p}% ctx · `" in tui
+    # header drops zero counts instead of printing "0 facts"
+    assert '(view.facts ?? 0) > 0 ? `${view.facts} facts` : ""' in tui

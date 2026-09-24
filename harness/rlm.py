@@ -35,6 +35,36 @@ SUBAGENT_TYPES = ("explore", "librarian", "plan-consultant", "plan-reviewer",
 # contract in AGENTS.md.
 TERMINAL = ("done", "error", "timeout")
 
+# A subagent_type is a ROLE, so each one carries its own brief: one generic
+# prompt for every kind is how "spawn a code reviewer" and "spawn a security
+# auditor" came back as the same worker. `explore`/`librarian` add READ-ONLY on
+# top (see _system_prompt).
+SUBAGENT_BRIEFS = {
+    "explore": ("Find the files and trace the flow, then answer where/how with file:line "
+                "evidence; no edits and no proposed diffs."),
+    "librarian": ("Research the outside world: upstream source, official docs and the versions "
+                  "in use. Cite every source (path or URL + version) and never guess an API."),
+    "plan-consultant": ("Read the plan and the code it touches, then return what the plan must "
+                        "decide — interfaces, ordering, file ownership, risks. Recommend, do "
+                        "not implement."),
+    "plan-reviewer": ("Attack the plan before execution: gaps, wrong assumptions, missing "
+                      "verification, overlapping ownership. One verdict per item with evidence."),
+    "code-reviewer": ("Review the diff on five axes — correctness, tests, simplicity, security, "
+                      "readability — with severity Blocker/Nit and file:line evidence. Static "
+                      "review only: never launch a browser, server or test runner (runtime "
+                      "checks are the test-engineer's lane) and mark anything unverified at "
+                      "runtime as such."),
+    "test-engineer": ("Write and run the tests that prove the change — failing first, then "
+                      "passing. Touch test files only; report the exact command and its result; "
+                      "never weaken a test to get green. Scratch artifacts (scripts, screenshots, "
+                      "logs) go under the project's .opencode/harness/tmp/ — never /tmp or a "
+                      "system directory; reuse one browser/server session; never install "
+                      "packages or tools — report the missing tool instead."),
+    "security-auditor": ("Check the change against the OWASP Top-10 and its trust boundaries — "
+                         "inputs, auth, secrets (never print one), permissions, path escapes. "
+                         "Findings with severity and a concrete fix."),
+}
+
 
 def is_terminal(status: str) -> bool:
     """True when a worker has reached a status nothing will move it out of.
@@ -164,7 +194,14 @@ def _run_worker(root: str, wid: str, prompt: str, name: str, kind: str, model: s
 
 def _system_prompt(project_root: Path, cfg: dict, kind: str, skills: list[str]) -> str:
     sys = ("You are a focused subagent. Answer with SUMMARY + DIFF only, <=4k tokens. "
-           "Do not ask questions.")
+           "Do not ask questions. "
+           "Resources: scratch/temp files go under the project's .opencode/harness/tmp/ — "
+           "never /tmp or any system directory — and never install packages or tools "
+           "(report the missing tool instead). End with a SUMMARY listing every file you "
+           "created or changed, with line counts.")
+    brief = SUBAGENT_BRIEFS.get(str(kind))
+    if brief:
+        sys += " " + brief
     if kind in ("explore", "librarian"):
         sys += " READ-ONLY: do not propose writes."
     if not skills:

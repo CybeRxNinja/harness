@@ -66,6 +66,16 @@ DESTRUCTIVE_RULES: tuple[tuple[str, str], ...] = (
     (r"\bkubectl\s+(delete|apply|drain|cordon)\b", "changes a live cluster"),
     (r"\b(aws|gcloud|az)\b", "changes real cloud resources, often billable"),
     (r"\b(pip|pip3|npm|pnpm|yarn)\s+(install|i)\b.*(-g|--global)\b", "installs software system-wide"),
+    # Installing software lands OUTSIDE the project (interpreter env, ~/.cache,
+    # the OS) where checkpoints cannot undo it — and an unattended worker doing
+    # it silently is exactly how a simple task starts mutating the system.
+    # (Project-local `npm install` in node_modules stays unattended.)
+    (r"\b(pip|pip3|pipx)\s+install\b", "installs into the interpreter's environment, outside the project — prefer the project venv"),
+    (r"\bpython3?\s+(-m\s+)?pip\s+install\b", "installs into the interpreter's environment, outside the project — prefer the project venv"),
+    (r"\buv\s+(tool|pip)\s+install\b", "installs into a shared tool environment, outside the project"),
+    (r"\bplaywright\s+install\b", "downloads browser binaries into ~/.cache — hundreds of MB outside the project"),
+    (r"\b(apt|apt-get|dnf|yum|brew|snap)\s+(install|upgrade)\b", "installs system packages via the OS package manager"),
+    (r"\bpacman\s+(-S|--sync)\b", "installs system packages via the OS package manager"),
     (r"\bcurl\b.+\|\s*(ba)?sh\b", "pipes a remote script straight into a shell"),
     (r"\bwget\b.+\|\s*(ba)?sh\b", "pipes a remote script straight into a shell"),
     (r"\bpip\s+uninstall\b", "removes installed packages"),
@@ -90,6 +100,16 @@ SENSITIVE_PATH_RULES: tuple[tuple[str, str], ...] = (
     (r"(^|/)id_(rsa|ed25519|ecdsa)", "private keys"),
     (r"(^|/)\.git/config$", "repository remotes and hooks"),
     (r"(^|/)\.github/workflows/", "CI config: a push will run it with secrets"),
+)
+
+# Scratch that escapes the project: the file never lived in the repo, so git
+# and checkpoints cannot bring it back — same posture as `external_directory`
+# (elevated + ask, NOT irreversible). The interpreter form is anchored to a
+# command segment start so `grep python3 /tmp` (a read) never matches.
+SCRATCH_RULES: tuple[tuple[str, str], ...] = (
+    (r">\s*/tmp/", "writes scratch outside the project; checkpoints cannot undo it — keep it in .opencode/harness/tmp/"),
+    (r"\btee\s+(-a\s+)?/tmp/", "writes scratch outside the project; checkpoints cannot undo it — keep it in .opencode/harness/tmp/"),
+    (r"(^|[;&|]+\s*)(python3?|node|bun|deno|sh|bash)\s+[^;&|]*/tmp/", "runs a scratch file outside the project — keep it in .opencode/harness/tmp/"),
 )
 
 # Action keywords that never need approval: they observe, they do not change.
@@ -191,10 +211,15 @@ def assess(action: str, kind: str = "auto", path: str = "", root: str | Path = "
                     "rule": "external_directory"}
 
     if k == "shell":
-        hit = _matches(normalize_bash(text), DESTRUCTIVE_RULES)
+        norm = normalize_bash(text)
+        hit = _matches(norm, DESTRUCTIVE_RULES)
         if hit:
             return {"action": text, "kind": k, "risk": DESTRUCTIVE, "irreversible": True,
                     "ask": True, "reason": hit[1], "rule": hit[0]}
+        hit = _matches(norm, SCRATCH_RULES)
+        if hit:
+            return {"action": text, "kind": k, "risk": ELEVATED, "irreversible": False,
+                    "ask": True, "reason": hit[1], "rule": "scratch:" + hit[0]}
         if is_safe_bash(text):
             return {"action": text, "kind": k, "risk": SAFE, "irreversible": False,
                     "ask": False, "reason": "read-only command (inspect/test/lint)",
@@ -300,6 +325,22 @@ _DESTRUCTIVE_BASH = (
     "terraform apply", "terraform destroy", "kubectl delete", "kubectl apply",
     "vercel", "netlify", "fly deploy", "heroku", "aws", "gcloud", "az",
     "harness checkpoint restore", "harness plugin uninstall", "harness config set",
+    # installs that land outside the project (see DESTRUCTIVE_RULES above);
+    # plain project-local `npm install` is deliberately absent.
+    "pip install", "pip3 install", "pipx install",
+    "python -m pip install", "python3 -m pip install",
+    "uv tool install", "uv pip install",
+    "playwright install", "npx playwright install", "bunx playwright install",
+    "apt install", "apt-get install", "dnf install", "yum install",
+    "brew install", "snap install", "pacman -S",
+)
+
+# Scratch outside the project (SCRATCH_RULES): emitted as prefix globs, since
+# opencode matches the parsed command — redirects cannot be expressed as a
+# prefix, so `> /tmp/...` is covered by assess() (risk_check) alone.
+SCRATCH_BASH_PATTERNS = (
+    "python /tmp*", "python3 /tmp*", "node /tmp*", "bun /tmp*",
+    "deno /tmp*", "sh /tmp*", "bash /tmp*", "tee /tmp*", "tee -a /tmp*",
 )
 
 
@@ -319,6 +360,8 @@ def bash_permission_map(allow_safe: bool = True) -> dict:
     for cmd in _DESTRUCTIVE_BASH:
         rules[cmd] = "ask"
         rules[f"{cmd} *"] = "ask"
+    for pat in SCRATCH_BASH_PATTERNS:
+        rules[pat] = "ask"
     return rules
 
 

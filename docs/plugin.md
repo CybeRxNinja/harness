@@ -95,7 +95,7 @@ rearrange the TUI: no routes, no docked overlay, no replaced slots.
 
 | view | slot | what it shows |
 | --- | --- | --- |
-| chip | `home.footer.status` | `harness · 9.6k tok · $0.00` — click toggles the sidebar (with no session yet it reads `harness · click for stats`, since the skill/fact stores are location-scoped and empty at the default location) |
+| chip | `home.footer.status` | `harness · 12% ctx · $0.03 · 5.9m tok` — window pressure first, spend second, the (ever-growing) lifetime total demoted; click toggles the sidebar (with no session yet it reads `harness · click for stats`, since the skill/fact stores are location-scoped and empty at the default location) |
 | stats panel | `sidebar.content` | the rows below |
 | hint | `sidebar.footer` | `harness · click a row` |
 
@@ -113,31 +113,43 @@ geometry opencode's MCP rows use). That keeps the numbers aligned at any panel
 width, with no width constant to guess:
 
 ```
-harness ses_f368b7d9 · 14 skills · 0 facts
-▸ Window                      █░░░░░░░ 1%
-▸ Tokens                   11.8k · $0.0000
-▾ Models               1 used · 6 providers
-    opencode · 75 models
-    muse-spark-1.3-cont… · 1 step
-▾ Todo                    3 items · project
+harness ses_f368b7d9 · 14 skills
+▾ Window                    █░░░░░░░ 12%
+    128,451 / 1,048,576 in context
+    muse-spark-1.3-cont… · agent orchestrator
+▸ Tokens                 5.9m · $0.0300
+▾ Models              2 models · 2 providers
+    opencode:
+      muse-spark-1.3-c    39 steps
+    kilo:
+      kilo-auto-free      12 steps
+▾ Todo                    1/4 done · project
     ● read the panel contract
     ◐ fix the Models row
     ○ add the Workers row
-▾ Workers                   2 active
+▾ Workers                      2 active
     ◐ map-auth · running 3m
     ○ docs-pass · queued 4s
-    ● fix-panel · done
-    ✕ repro-tests · error
 ▸ Skills                      14 installed
+    ▪ using-agent-skills
+    ▪ planning-and-task-breakdown
+    … +9 more
 ▸ Agents                     11 available
-▸ Memory                           0 facts
+    ● orchestrator
+    ◦ general
+    … +6 more
 
 harness · 3 expanded
 ```
 
+A row with nothing in it **does not render**: Todo, Workers and Memory hide
+entirely when empty (a permanent `Workers none` / `0 facts` was clutter, not
+state), and any list that outgrows the five-row detail budget ends with
+`… +N more`, so a count can never advertise more than the list shows.
+
 Any number of rows can be open at once. The **Todo row opens itself** whenever
 its list appears or changes (the list is the point of the section; a collapsed
-`3 items` hides the plan the model is following), and a manual collapse sticks
+`1/4 done` hides the plan the model is following), and a manual collapse sticks
 until the list changes again.
 
 Every value is read the same way opencode reads it, so the panel agrees with the
@@ -148,15 +160,15 @@ the panel look like an overlay bolted onto the app instead of part of it.
 
 | row | rows when expanded | source |
 | --- | --- | --- |
-| header | — | session id, skill/fact counts (`data.session.get(sid)`) |
-| Window | exact `total / limit`, model · agent | `session.tokens` + the provider's `models[id].limit.context` |
-| Tokens | input · output, reasoning, cache read · write, cost | `session.tokens`, `session.cost(sid)` |
-| Models | per provider: available model count, then the model used, with step count | assistant messages grouped by provider/model — re-read on **every** pass, so it fills as the message store does; the model count comes from the model store (a `Provider.Info` entry carries no `models` map) |
-| Todo | `● completed ◐ in_progress ○ pending ✕ cancelled` + text — this session's list, else the project's newest (labelled `· project`) — **opens itself** when the list changes | the harness todo space, read-only |
-| Workers | `◐ running ○ queued ● done ✕ error ! timeout ~ stale` + worker name + age of its last update, newest first; the value is the live occupancy (`2 active` / `idle` / `none`) | the `workers` table in the same `sessions.db` — **project-wide, not session-scoped**: `rlm.spawn` records the row and leaves `workers.session` empty, so a worker belongs to the project, not to the opencode session that asked for it. The active count comes from SQL, not the six displayed rows (a long worker can sit outside the newest ones). Deliberately no `stale` verdict here — `harness doctor` owns that rule (`budgets.worker_timeout_s` × 2) and a second copy would drift; the age is printed instead (`◐ map-auth · running 42m`) |
-| Skills | the bundled harness skills | `location.skill` after `sync()` |
-| Agents | the registered agents | `location.agent` after `sync()` |
-| Memory | durable facts for the project | the same `sessions.db` the server half uses |
+| header | — | session id, non-zero skill/fact counts (`data.session.get(sid)`; a zero count is omitted, never printed as `0 facts`) |
+| Window | `used / limit in context`, model · agent — value tinted `feedback.warning` at ≥ 80% | `session.tokens` + the provider's `models[id].limit.context`; `used` is the **last assistant message** (opencode's header rule), not the lifetime sum |
+| Tokens | `input · output`, `reasoning · cache` (a `cache write` line only when non-zero) — no cost line: the value already carries it | `session.tokens`, `session.cost(sid)` |
+| Models | per **used** provider a bare `name:` header (no catalog counts), then aligned `model … N steps`; value = models/providers this session actually routed through (`not used` before the first message, whose `· selected` fallback row is not counted as usage) | assistant messages grouped by provider/model — re-read on **every** pass, so it fills as the message store does |
+| Todo | value is progress, `1/4 done` (+ `· project` for a fallback list); rows are `● completed ◐ in_progress ○ pending ✕ cancelled` + text — this session's list, else the project's newest — **opens itself** when the list changes; **hidden when empty** | the harness todo space, read-only |
+| Workers | `◐ running ○ queued ● done ✕ error ! timeout ~ stale` + worker name + age of its last update, newest first; value is live occupancy (`2 active` / `idle`); **hidden when empty** | the `workers` table in the same `sessions.db` — **project-wide, not session-scoped**: `rlm.spawn` records the row and leaves `workers.session` empty, so a worker belongs to the project, not to the opencode session that asked for it. The active count comes from SQL, not the six displayed rows (a long worker can sit outside the newest ones). Deliberately no `stale` verdict here — `harness doctor` owns that rule (`budgets.worker_timeout_s` × 2) and a second copy would drift; the age is printed instead (`◐ map-auth · running 42m`) |
+| Skills | the bundled harness skills, `… +N more` past five | `location.skill` after `sync()` |
+| Agents | the registered agents — opencode's internal `compaction`/`title` plumbing agents are filtered out, the active agent is listed first with `●`, `… +N more` past five | `location.agent` after `sync()` |
+| Memory | durable facts for the project — value is a real `count(*)`; **hidden at zero** | the same `sessions.db` the server half uses |
 
 A usage bar always shows at least one cell for non-zero usage: 1% of eight cells
 rounds to zero, and an empty bar next to `1%` reads as a broken panel. The
@@ -241,8 +253,11 @@ Agents are merged into `~/.config/opencode/opencode.json` by
 `harness plugin install`/`harness tui` (`ensure_opencode_config`), not by the
 plugin:
 
-- `agent` — `orchestrator/ask/debug/review` + native `plan`, with modern
-  `permission` maps (auto-approve compatible). No `model` keys: every agent
+- `agent` — `orchestrator/ask/debug/review` + native `plan`, plus the
+  `mode: subagent` specialists the orchestrator routes to (`explore`,
+  `librarian`, `plan-consultant`, `plan-reviewer`, `code-reviewer`,
+  `test-engineer`, `security-auditor`), with modern `permission` maps
+  (auto-approve compatible). No `model` keys: every agent
   runs on your configured default unless you pin one yourself.
 
 Skills need no MCP hop. The stdio server (`harness mcp`) remains for
@@ -260,6 +275,24 @@ legacy `provider.harness` / `harness/*` leftovers). Anything you customized
 beyond that is left alone.
 
 ## Troubleshooting
+
+**`[user_blocked] Your access has been restricted due to repeated policy
+violations`** — your *account* was restricted by the model provider; opencode
+only relays it (`Upstream request failed`). It is not a harness error and
+nothing in the plugin can lift it — it is a known failure on free-tier models
+where the provider's output filter flags repeated generations (security- or
+crypto-heavy tasks hit it often). Every subagent inherits your default model,
+so each spawn fails the same way until you switch: `/models` (`ctrl+x m`) for
+a different model or `/connect` for a different provider/key, or contact the
+provider about the restriction.
+
+**The sidebar Window row shows 100% with more tokens than the context limit**
+(e.g. `5,927,538 / 1,048,576 of window`) — an old plugin build: it divided
+the session's *lifetime* tokens by the context limit, which saturates forever
+after the first exchanges. Re-run `harness plugin install`, restart opencode,
+and confirm with `harness doctor` (no `STALE` line). Fixed builds show the
+**last assistant message's** tokens — opencode's own context readout — so the
+number rises and falls with the conversation.
 
 **"OpenCode's free tier can only be used from within OpenCode"** — zen's
 server-side gate, not a plugin bug. The free-tier endpoint accepts a request
@@ -315,7 +348,8 @@ update with `opencode upgrade`.
 
 ## Verify
 
-- `harness doctor` reports your user model, the plugin file, and opencode presence.
+- `harness doctor` reports your user model, plugin freshness (installed vs
+  shipped bytes), the harness agents in `opencode.json`, and opencode presence.
 - A long chat: when the session compacts, the recalled memory brief is applied.
 - `python scripts/opencode_smoke.py` (CI runs this too): boots a real
   `opencode serve`, forces activation, asserts the plugin is `active` with the

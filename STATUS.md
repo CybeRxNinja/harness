@@ -1,6 +1,6 @@
 # Harness — status
 
-`python -m pytest -q` → **200 passed** (`HARNESS_MOCK=1`, as CI runs it).
+`python -m pytest -q` → **203 passed** (`HARNESS_MOCK=1`, as CI runs it).
 `python scripts/opencode_smoke.py` → **SMOKE OK**: plugin active with `features.tui`, 14 bundled
 skills seeded on a real opencode server (opencode 2.0.14, ~5s). History lives in `git log`; this
 file is current state only.
@@ -50,6 +50,17 @@ goes: `planning-and-task-breakdown` writes it with `todowrite`, `incremental-imp
 the box per slice, `using-agent-skills` names the list as the shared plan. Also fixed on the way: that
 planning skill still pointed at `.harness/plans/` — a path retired in favour of
 `.opencode/harness/plans/`.
+
+**The Window bar is a gauge, not a lifetime odometer — and the orchestrator routes by role.** The
+row summed the session's tokens against the context window, so the bar pinned at 100% early in a
+session: opencode's own header reads the LAST assistant message (`usage.Output > 0`; a compaction
+summary counts output only), and the panel now does the same, while the Tokens row keeps the
+lifetime total. And the orchestrator could only spawn opencode's built-in `general` subagent,
+because nothing else was registered: `opencode.json` now ships `explore`, `librarian`,
+`plan-consultant`, `plan-reviewer`, `code-reviewer`, `test-engineer`, `security-auditor`
+(`mode: subagent`, an own prompt each, edit-denied except the test engineer, `task: deny` so depth
+stays 1) and the orchestrator prompt routes by `subagent_type`; the Python RLM path gives each of
+those kinds its own brief too, instead of one generic worker prompt.
 
 **Models populates now.** The walk was inside the once-per-session slow scan, reading a message
 store that is empty until its own `sync()` lands — so `Models` sat at `0 used` for the whole session
