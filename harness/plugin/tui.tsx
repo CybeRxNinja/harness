@@ -93,6 +93,14 @@ const workerMark = (status: unknown) => WORKER_MARKS[String(status)] ?? "·"
 const WORKER_LIVE = new Set(["queued", "running"])
 
 /**
+ * Memory-note glyphs, like TODO_MARKS/WORKER_MARKS above: a progress note
+ * reads as its status, not as the "✎" every fact used to get.
+ */
+const MEMORY_MARKS: Rec = { progress: "◐", done: "●", blocked: "✕", error: "⚠" }
+/** "progress [s_123]: did the thing" -> status, session, core message. */
+const MEMORY_RE = /^(progress|done|blocked|error) \[(.+?)\]: (.*)$/
+
+/**
  * "how long ago" for a worker row, from its `updated` epoch SECONDS
  * (`int(time.time())` in harness/rlm.py — not milliseconds).
  *
@@ -161,6 +169,48 @@ function numfmt(n: unknown): string {
 function cut(value: unknown, max: number): string {
   const s = String(value ?? "").replace(/\s+/g, " ").trim()
   return s.length <= max ? s : `${s.slice(0, Math.max(1, max - 1))}…`
+}
+
+/**
+ * cut() at a word boundary instead of mid-word: the Memory rows showed
+ * "progress [s_5526202c]: [mock:…" — cut at 30 cols mid-token, six times
+ * over. Falls back to a hard cut for one long token with no space to break.
+ */
+function wcut(value: unknown, max: number): string {
+  const s = String(value ?? "").replace(/\s+/g, " ").trim()
+  if (s.length <= max) return s
+  const head = s.slice(0, Math.max(1, max - 1))
+  const i = head.lastIndexOf(" ")
+  return (i > 0 ? head.slice(0, i) : head) + "…"
+}
+
+/**
+ * One Memory detail row per fact: a progress note ("done [s_x]: …") renders
+ * as its status mark plus the core message, any other fact keeps "✎".
+ * Consecutive identical rows collapse with a ×N suffix, so six mock-echo
+ * notes read as one line ("◐ echo: hello in mock ×6") until retention
+ * prunes them. Shapes only the rows already read — never writes the DB.
+ */
+function humanizeFacts(rows: Rec[]): string[] {
+  const rendered = rows.map((r) => {
+    const text = String(r?.text ?? "")
+    const m = MEMORY_RE.exec(text)
+    if (!m) return "✎ " + wcut(text, 30)
+    const mark = MEMORY_MARKS[m[1]] ?? "✎"
+    return mark + " " + wcut(m[3], 30)
+  })
+  const out: string[] = []
+  for (const line of rendered) {
+    const prev = out.length ? out[out.length - 1] : ""
+    const g = /^(.*) ×(\d+)$/.exec(prev)
+    const core = g ? g[1] : prev
+    if (prev && core === line) {
+      out[out.length - 1] = line + " ×" + (g ? Number(g[2]) + 1 : 2)
+    } else {
+      out.push(line)
+    }
+  }
+  return out
 }
 
 /**
@@ -479,8 +529,10 @@ const HarnessTui = {
             // the header and Memory row printed "0 facts" with facts on disk.
             const fc = db.query("SELECT count(*) AS n FROM facts").get() as Rec
             out.factsCount = Number(fc?.n ?? 0) || 0
-            out.facts = (db.query("SELECT text FROM facts ORDER BY id DESC LIMIT ?").all(ROW_LIMIT) as Rec[]).map(
-              (r) => `✎ ${cut(r?.text, 30)}`,
+            // Progress notes render as status + core message with runs
+            // collapsed ("◐ echo: hello in mock ×6"), not raw mid-word cuts.
+            out.facts = humanizeFacts(
+              db.query("SELECT text FROM facts ORDER BY id DESC LIMIT ?").all(ROW_LIMIT) as Rec[],
             )
           } catch {
             /* no facts table yet */

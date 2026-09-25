@@ -853,6 +853,24 @@ def test_tui_todo_row_reads_the_harness_space_and_auto_expands():
     assert "`${openCount()} expanded`" in tui
 
 
+def test_tui_memory_row_humanizes_progress_notes():
+    """Progress notes render as status + core message, not raw mid-word cuts.
+
+    Six mock-echo notes used to read as six `progress [s_..]: [mock:..` rows;
+    humanizeFacts renders the status mark plus the core message and collapses
+    consecutive identical rows with a xN suffix. (Parse coverage of the file
+    itself already lives in test_plugin_entrypoints_parse; this pins the
+    humanizer's presence and its wiring into the facts read.)
+    """
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+    assert "function humanizeFacts(rows: Rec[]): string[]" in tui
+    assert "const MEMORY_MARKS: Rec = { progress:" in tui
+    assert "const MEMORY_RE = /^(progress|done|blocked|error)" in tui
+    assert "out.facts = humanizeFacts(" in tui
+    assert "SELECT text FROM facts ORDER BY id DESC" in tui
+
+
 # Parses each entrypoint with Bun's transpiler (JSX-aware, no module
 # resolution). A broken tui.tsx is otherwise only visible as a WARN in
 # opencode's log ("plugin operation failed … stage=read") with nothing in the

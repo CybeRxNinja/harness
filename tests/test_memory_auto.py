@@ -152,6 +152,43 @@ def test_capture_turn_honors_memory_disabled(con, root, cfg):
     assert out["skipped"] == "memory disabled" and M.fact_count(con) == 0
 
 
+def test_capture_turn_skips_progress_for_a_mock_echo_with_facts(con, root, cfg):
+    """A mock-model echo alongside real facts gets no progress note.
+
+    `[mock:..] echo: ..` is the harness talking to itself for tests; the
+    captured facts already say where the work got to, and the echo headline
+    would only add another `progress [s_x]: [mock:..` sidebar row.
+    """
+    from harness import memory as M
+    text = ("[mock:test-model] echo: Decision: keep the delivered flag "
+            "so inbox() does not repeat.")
+    out = M.capture_turn(con, "s1", text, verified=False, cfg=cfg, root=root)
+    assert out["facts"], "the durable line inside the echo is still remembered"
+    assert out["progress"] == 0
+    sources = {f["source"] for f in M.recent(con, 10)}
+    assert "turn" in sources
+    assert not ({"progress", "done"} & sources), "no echo headline as a progress note"
+
+
+def test_capture_turn_keeps_a_breadcrumb_for_a_pure_mock_echo(con, root, cfg):
+    """A mock echo with nothing durable stays the turn's only trace."""
+    from harness import memory as M
+    out = M.capture_turn(con, "s1", "[mock:test-model] echo: hello", cfg=cfg, root=root)
+    assert out["facts"] == []
+    assert out["progress"] > 0, "the loop-wiring breadcrumb must still be recorded"
+    assert any(f["source"] == "progress" for f in M.recent(con, 5))
+
+
+def test_capture_turn_still_notes_progress_for_an_ordinary_turn(con, root, cfg):
+    """A non-mock turn records progress exactly as before."""
+    from harness import memory as M
+    out = M.capture_turn(con, "s1",
+                         "Decision: keep the delivered flag so inbox() does not repeat.",
+                         verified=False, cfg=cfg, root=root)
+    assert out["facts"] and out["progress"] > 0
+    assert any(f["source"] == "progress" for f in M.recent(con, 5))
+
+
 def test_prune_drops_notes_but_keeps_progress_and_lessons(con):
     from harness import memory as M
     old = int(time.time()) - 90 * 86400

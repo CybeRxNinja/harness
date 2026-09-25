@@ -174,6 +174,20 @@ def headline(text: str, error: str = "", limit: int = 160) -> str:
     return ""
 
 
+def _is_junk_turn(headline_text: str, has_facts: bool = False) -> bool:
+    """True when a turn deserves no progress note.
+
+    Empty output never did (`progress()` refuses it; this just skips the
+    call). A mock-model echo (`[mock:…] echo: …`) is the harness talking
+    to itself for tests — but it stays the turn's only trace when the
+    turn captured nothing durable, so only an echo *alongside* real facts
+    is junk: the facts already say where the work got to, and the echo
+    headline would just add another `progress [s_x]: [mock:…` sidebar row.
+    """
+    h = normalize(headline_text)
+    return not h or (h.startswith("[mock:") and has_facts)
+
+
 def remember(con, text: str, source: str = "agent", limit: int = 3,
              max_facts: int = 2000) -> list[int]:
     """Auto-capture the durable lines of `text`. Returns the new fact ids."""
@@ -402,7 +416,11 @@ def capture_turn(con, session: str, text: str, verified: bool = False,
         if fid:
             ids.append(fid)
     headline_text = headline(text, error)
-    pid = progress(con, session, headline_text, status="done" if verified else "note")
+    # A mock echo alongside real facts still goes through remember() above
+    # — a durable line is a durable line — but gets no progress note; with
+    # nothing captured the note stays the turn's only trace.
+    pid = (0 if _is_junk_turn(headline_text, bool(ids))
+           else progress(con, session, headline_text, status="done" if verified else "note"))
     promoted: list[str] = []
     if root is not None:
         promoted = auto_refine(con, memory_file(root), min_evidence=2, cap_lines=cap)
