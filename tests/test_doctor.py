@@ -79,6 +79,35 @@ def test_agents_status_catches_a_config_merged_by_an_older_harness(tmp_path,
     assert run(tmp_path)["checks"]["agents"] == msg
 
 
+def test_doctor_reports_the_opencode_version_and_lsp_state(tmp_path, monkeypatch):
+    """The owner asked "why does opencode's version look wrong?" — doctor must
+    print opencode's OWN version, read from the binary itself, plus what the
+    LSP config will actually do for this project. Both are informational: they
+    must appear without being able to flip `ok` on their own."""
+    cfg = tmp_path / "cfg"
+    d = cfg / "opencode" / "plugins" / "harness"
+    d.mkdir(parents=True)
+    (d / "server.ts").write_bytes((_shipped() / "harness.ts").read_bytes())
+    (d / "tui.tsx").write_bytes((_shipped() / "tui.tsx").read_bytes())
+    # an owner decision in opencode's OWN config file: doctor must report
+    # this, not harness's layers (which know nothing about `lsp`)
+    (cfg / "opencode" / "opencode.json").write_text('{"lsp": false}')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+
+    from harness.doctor import run
+    out = run(tmp_path)
+    c = out["checks"]
+    # the binary's real version ("opencode vX.Y.Z"), or an honest placeholder
+    assert c.get("opencode_version"), c
+    assert any(ch.isdigit() for ch in c["opencode_version"]) or c["opencode_version"] in (
+        "missing", "unknown"), c["opencode_version"]
+    # what opencode will do about LSP, read from opencode.json itself
+    assert c.get("lsp"), c
+    assert c["lsp"].split(" (")[0] in ("enabled", "disabled", "overridden", "unset"), c["lsp"]
+    # the pinned case: an explicit owner `false` is reported as disabled
+    assert c["lsp"].startswith("disabled (your config)"), c["lsp"]
+
+
 def test_doctor_reports_an_installed_plugin_as_ok(tmp_path, monkeypatch):
     cfg = tmp_path / "cfg"
     d = cfg / "opencode" / "plugins" / "harness"

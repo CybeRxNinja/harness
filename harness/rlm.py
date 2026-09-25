@@ -53,10 +53,16 @@ SUBAGENT_BRIEFS = {
                       "readability — with severity Blocker/Nit and file:line evidence. Static "
                       "review only: never launch a browser, server or test runner (runtime "
                       "checks are the test-engineer's lane) and mark anything unverified at "
-                      "runtime as such."),
+                      "runtime as such. On a re-run, review only the hunks changed since your "
+                      "last pass: one verdict per prior finding (fixed / still open / regressed) "
+                      "— never a fresh full-file audit and never restated closed findings."),
     "test-engineer": ("Write and run the tests that prove the change — failing first, then "
                       "passing. Touch test files only; report the exact command and its result; "
-                      "never weaken a test to get green. Scratch artifacts (scripts, screenshots, "
+                      "never weaken a test to get green. Use the project's existing runner and "
+                      "its ONE canonical command — never add a second test framework; a fix gets "
+                      "only the check that covers the touched code, and an already-passing gate "
+                      "is not re-run wholesale; browser/e2e only when the repo ships that tooling "
+                      "and a browser is connected. Scratch artifacts (scripts, screenshots, "
                       "logs) go under the project's .opencode/harness/tmp/ — never /tmp or a "
                       "system directory; reuse one browser/server session; never install "
                       "packages or tools — report the missing tool instead."),

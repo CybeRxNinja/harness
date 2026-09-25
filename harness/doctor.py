@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -163,6 +164,37 @@ def run(root: Path, verbose: bool = False) -> dict:
     c["config_layers"] = info
     c["opencode_binary"] = shutil.which("opencode") or (
         "missing (install stock opencode, e.g. `npm create opencode@latest`)")
+    # opencode's OWN version, read from the binary: the TUI/plugins panel
+    # owns displaying it — harness only reports it so any mismatch the owner
+    # sees is attributable (the plugin never writes a version anywhere).
+    binary = shutil.which("opencode")
+    if binary:
+        try:
+            v = subprocess.run([binary, "--version"], capture_output=True,
+                               text=True, timeout=20)
+            first = ((v.stdout or "") + (v.stderr or "")).strip().splitlines()
+            c["opencode_version"] = first[0] if first else "unknown"
+        except Exception:
+            c["opencode_version"] = "unknown"
+    else:
+        c["opencode_version"] = "missing"
+    # LSP: what opencode's OWN config will do — read from opencode.json (the
+    # file the merge writes), NOT harness's config layers, which know nothing
+    # about it. harness merges `lsp: true` only when the key is absent; an
+    # explicit false/object of the owner's is always respected.
+    try:
+        from .paths import opencode_config_dir
+        import json as _j
+        _oc = opencode_config_dir() / "opencode.json"
+        lsp = _j.loads(_oc.read_text()).get("lsp") if _oc.exists() else None
+    except Exception:
+        lsp = None
+    c["lsp"] = (
+        "disabled (your config)" if lsp is False
+        else f"overridden ({len(lsp)} entries, your config)" if isinstance(lsp, dict)
+        else "enabled (opencode built-in servers)" if lsp is True
+        else "unset (opencode default)"
+    )
     try:
         from . import models as backend
         c["user_model"] = backend.resolve_model("", cfg)

@@ -46,7 +46,11 @@ Registered tools: `skills_list`, `skill_view`, `memory_recall`, `todowrite`,
 `todoread`. The last two are the plan tools opencode 2.x dropped; they persist
 into the harness todo space (`<project>/.opencode/harness/sessions.db` → `todos`,
 keyed by the opencode session id), which is also what the sidebar's Todo row and
-the compaction brief read. `execute(input, context)` — `context.sessionID` is the
+the compaction brief read — and every `todowrite` is **mirrored into opencode's
+own `todo` table** (`opencode.db`, resolved via `OPENCODE_DB` / `$XDG_DATA_HOME`)
+so opencode's own storage holds the plan too. The mirror never creates a
+foreign database and never fails the tool call (see `mirrorOpencodeTodos`).
+`execute(input, context)` — `context.sessionID` is the
 active session, and a todo tool with no session answers instead of writing.
 
 `input` is a JSON Schema; `execute(input, tool)` returns `{ content }`. Set
@@ -64,7 +68,7 @@ no model pins: they inherit your opencode default model.
 
 | target | what harness contributes |
 | --- | --- |
-| `home.footer.status` | `harness · 12% ctx · $0.03 · 5.9m tok`, click toggles the sidebar (pressure first, lifetime total last) |
+| `home.footer.status` | `harness · 12% ctx · $0.03 · 5.9m tok`, click toggles the sidebar (pressure first, lifetime total last). The chip carries `flexGrow=1 flexShrink=1 minWidth=0` on purpose: opencode renders its own **version** text right after this slot with `flexShrink 0`, so a non-shrinking chip would push it off-screen — the chip truncates instead, the version stays |
 | `sidebar.content` | the stats rows: Window / Tokens / Models / Todo / Workers / Skills / Agents / Memory, each click-to-expand (several at once). Todo/Workers/Memory hide when empty; any list past five rows ends with `… +N more` so counts always match their list |
 | `sidebar.footer` | `harness · click a row` / `harness · N expanded` |
 | `app` | the `app` slot hosts the `ctx.keymap.layer` call (see below) |
@@ -72,7 +76,9 @@ no model pins: they inherit your opencode default model.
 Rows follow opencode's own geometry (label `flexGrow` + value `flexShrink 0`, so
 values pin right at any width), use its own theme keys (`text.base` for labels,
 `text.muted` for values) and its own numbers (total tokens = in + out +
-reasoning + cache for the session; the Window bar = the LAST assistant message /
+reasoning + cache for the session **and its `task` subagent sessions** — each
+child is its own `Session.Info`, merged in via `session.sync(sid,{children:true})`
++ `session.family(sid)`; the Window bar = the LAST assistant message /
 the model's context limit, opencode's header rule — the session sum only grows
 and pinned the bar at 100%), and there is no "Context" row because opencode
 already renders one. Opened by `ctrl+g`, `/harness` (alias `/hp`), or the sidebar toggle;

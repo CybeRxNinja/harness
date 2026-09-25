@@ -707,7 +707,7 @@ def test_tui_panel_never_wedges_and_reads_like_opencode():
     assert "await settle(scanSlow(loc, data_), SCAN_MS)" in tui
     for store in ("model", "provider", "agent", "skill"):
         assert f"settle(store?.{store}?.sync?.(loc), SCAN_MS)" in tui, store
-    assert "settle(data_?.session?.sync?.(sessionID), SCAN_MS)" in tui
+    assert "settle(data_?.session?.sync?.(sessionID, { children: true }), SCAN_MS)" in tui
 
     # 2. a `full` load requested while one is in flight is queued, not dropped
     assert "if (loading) {" in tui and "pendingFull = pendingFull || full" in tui
@@ -1127,3 +1127,255 @@ def test_tui_panel_shows_only_thoughtful_accurate_rows():
     assert "`${p}% ctx · `" in tui
     # header drops zero counts instead of printing "0 facts"
     assert '(view.facts ?? 0) > 0 ? `${view.facts} facts` : ""' in tui
+
+
+def test_tui_usage_counts_subagent_sessions():
+    """`session.get(sid)` returns ONE Session.Info — the `task` tool's children
+    run as separate opencode sessions with their own `tokens`/`cost` rows, so
+    the Tokens row, the Models steps and the footer chip all under-reported
+    everything the workers spent ("the token stats do not account for the
+    sub-agents").
+
+    The panel now discovers the family the same way opencode's own
+    `session.cost` does (`session.sync(sid, {children:true})` +
+    `session.family(sid)`) and merges the rows field by field. The Window
+    number deliberately stays this-session-only: a context window belongs to
+    one session, never to the whole family.
+    """
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+
+    # discovery: children arrive with the session row, from the local API
+    assert "sync?.(sessionID, { children: true })" in tui
+    assert "function familyIds(data_: Rec, sid: string): string[]" in tui
+    assert "data_?.session?.family?.(sid)" in tui
+    # a new/finished subagent is picked up within ~0.5s, not a full 8s poll —
+    # one bounded nudge, guarded so it cannot become a load storm
+    assert "const famCount = familyIds(data_, sessionID).length" in tui
+    assert "famSeen = famCount" in tui and "famTimer = setTimeout" in tui
+
+    # the merge: every family member's tokens summed field by field, and the
+    # old single-row read (the bug) is gone
+    assert "data.tokens = merged" in tui
+    assert "data.tokens = session?.tokens" not in tui
+    for field in ("merged.input +=", "merged.output +=", "merged.reasoning +=",
+                  "merged.cache.read +=", "merged.cache.write +="):
+        assert field in tui, field
+    assert "data.subCount = subCount" in tui and "data.subTokens = subTokens" in tui
+    # cost: opencode's family-summing accessor, with a hand-rolled fallback for
+    # when that accessor drifts away
+    assert "data_?.session?.cost?.(sessionID)" in tui
+    assert "Number(session?.cost ?? 0) + subCost" in tui
+
+    # Models steps count the whole family; the Window walk does NOT (one
+    # session = one context window)
+    assert "const mine = sessionID ? asArray(data_?.session?.message?.list?.(sessionID))" in tui
+    assert "const msgs = [...mine]" in tui
+    assert "for (const m of mine) {" in tui
+    assert "for (const id of familyIds(data_, sessionID).slice(1))" in tui
+    # the Tokens detail says what the workers contributed, so the total is
+    # traceable instead of mysteriously bigger than the visible messages
+    assert "+ ${data.subCount} subagent" in tui
+
+
+# Runs the pure helpers sliced out of tui.tsx (asArray … stateDb, everything
+# before the plugin object — no imports, no JSX) to prove the FAMILY SCOPE:
+# this session plus its own children, never siblings, never nothing.
+FAMILY_IDS = r"""
+const file = process.argv[2]
+const src = await Bun.file(file).text()
+const start = src.indexOf("function asArray")
+const end = src.indexOf("const HarnessTui = {")
+if (start < 0 || end <= start) throw new Error("helper slice markers missing from tui.tsx")
+// the helpers are TypeScript: runtime eval parses JS, so transpile the slice
+// first — same loader the TUI itself uses to compile tui.tsx
+const js = new Bun.Transpiler({ loader: "ts" }).transformSync(src.slice(start, end))
+const fns: any = eval(js + "\n; ({ asArray, familyIds })")
+
+const check = (label: string, got: unknown, want: string[]) => {
+  const g = JSON.stringify(got)
+  const w = JSON.stringify(want)
+  if (g !== w) throw new Error(`${label}: got ${g}, want ${w}`)
+}
+const info = (id: string, parentID: string | null) => ({ id, parentID })
+const data = {
+  session: {
+    // the store answers for the TREE ROOT, whatever id you ask with
+    family: (_sid: string) => ["root", "c1", "c2"],
+    get: (id: string) =>
+      id === "root" ? info("root", null) : info(id, "root"),
+  },
+}
+check("root sees its subagents", fns.familyIds(data, "root"), ["root", "c1", "c2"])
+// a subagent session opened in the TUI must NOT inherit its siblings' usage
+check("child never inherits siblings", fns.familyIds(data, "c1"), ["c1"])
+// discovery not run yet: the session itself still counts (never "0 tokens")
+check("pre-discovery", fns.familyIds({ session: { family: () => [] } }, "root"), ["root"])
+// API drift: no family accessor at all -> solo session, no throw
+check("drift", fns.familyIds({}, "root"), ["root"])
+check("no session id", fns.familyIds(data, ""), [])
+console.log("familyIds OK")
+"""
+
+
+@pytest.mark.skipif(BUN is None, reason="bun is not installed")
+def test_family_ids_scope_is_the_session_and_its_children(tmp_path):
+    """Executable check for the one piece of new logic in the usage fix: which
+    sessions a token total is allowed to span (see FAMILY_IDS)."""
+    from harness.cli import _plugin_files
+    script = tmp_path / "family_ids.ts"
+    script.write_text(FAMILY_IDS)
+    r = subprocess.run([BUN, "run", str(script), _plugin_files()[1]],
+                       capture_output=True, text=True, timeout=60, cwd=str(REPO_ROOT))
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert "familyIds OK" in r.stdout
+
+
+# Drives the real plugin (setup -> registered todowrite) against a FAKE opencode
+# data dir, so the write-through is proven against opencode's actual `todo`
+# schema rather than pinned as a string: both stores get the list, priority
+# travels, an empty replace clears the foreign rows, and a missing foreign DB
+# is never created on disk.
+MIRROR = r"""
+const file = process.argv[2]
+const dir = process.argv[3]
+import { mkdirSync, existsSync } from "node:fs"
+import { join } from "node:path"
+import { Database } from "bun:sqlite"
+
+const plug: any = (await import(file)).default
+
+const fail = (m: string): never => { throw new Error(m) }
+
+// a fake opencode data dir holding opencode's OWN todo schema
+const xdg = join(dir, "xdg")
+mkdirSync(join(xdg, "opencode"), { recursive: true })
+process.env.XDG_DATA_HOME = xdg
+const foreign = join(xdg, "opencode", "opencode.db")
+{
+  const db = new Database(foreign)
+  db.run("CREATE TABLE todo (session_id text NOT NULL, content text NOT NULL, " +
+    "status text NOT NULL, priority text NOT NULL, position integer NOT NULL, " +
+    "time_created integer NOT NULL, time_updated integer NOT NULL, " +
+    "CONSTRAINT todo_pk PRIMARY KEY(session_id, position))")
+  db.close()
+}
+
+// recording ctx, same shape the FEATURES smoke uses
+const skills: any[] = []
+const tools: any[] = []
+const ctx: any = {
+  location: { directory: dir },
+  options: {},
+  skill: {
+    list: async () => skills,
+    transform: async (cb: any) => { await cb({ list: () => skills, add: (s: any) => skills.push(s) }) },
+  },
+  tool: {
+    transform: async (cb: any) => { await cb({ add: (t: any) => tools.push(t) }) },
+    hook: async () => {},
+  },
+  session: { hook: async () => {} },
+}
+await plug.setup(ctx)
+const T: any = Object.fromEntries(tools.map((t: any) => [t.name, t]))
+if (!T.todowrite) fail("todowrite was not registered")
+
+const sid = "ses_mirror_check"
+const localRows = () => {
+  const db = new Database(join(dir, ".opencode", "harness", "sessions.db"), { readonly: true })
+  try { return db.query("SELECT text, status FROM todos WHERE session = ? ORDER BY id").all(sid) as any[] }
+  finally { db.close() }
+}
+const foreignRows = () => {
+  const db = new Database(foreign, { readonly: true })
+  try {
+    return db.query("SELECT content, status, priority, position FROM todo WHERE session_id = ? ORDER BY position").all(sid) as any[]
+  } finally { db.close() }
+}
+
+// 1. one call lands in BOTH stores, priority and order intact
+await T.todowrite.execute({ todos: [
+  { content: "wire the mirror", status: "in_progress", priority: "high" },
+  { content: "write the docs", status: "pending" },
+  { content: "ship it", status: "pending", priority: "low" },
+] }, { sessionID: sid })
+const local = localRows()
+if (local.length !== 3) fail(`harness space has ${local.length}, want 3`)
+const foreign1 = foreignRows()
+if (foreign1.length !== 3) fail(`opencode todo table has ${foreign1.length}, want 3`)
+if (foreign1[0].content !== "wire the mirror" || foreign1[0].priority !== "high") fail("row 0 wrong: " + JSON.stringify(foreign1[0]))
+if (foreign1[1].priority !== "medium") fail("missing priority must default to medium, got " + foreign1[1].priority)
+if (foreign1[2].priority !== "low" || foreign1[2].position !== 2) fail("row 2 wrong: " + JSON.stringify(foreign1[2]))
+if (foreign1[0].status !== "in_progress") fail("status did not travel")
+
+// 2. replace with an empty list clears BOTH stores (opencode's too)
+await T.todowrite.execute({ todos: [] }, { sessionID: sid })
+if (localRows().length !== 0) fail("harness space not cleared")
+if (foreignRows().length !== 0) fail("opencode todo rows left behind by an empty replace")
+
+// 3. a missing foreign DB is never created (nothing invented on disk)
+const empty = join(dir, "no-opencode-here")
+process.env.XDG_DATA_HOME = empty
+await T.todowrite.execute({ todos: [{ content: "x", status: "pending" }] }, { sessionID: sid })
+if (existsSync(empty)) fail("mirror must not create opencode's data dir")
+
+console.log("mirror OK")
+"""
+
+
+@pytest.mark.skipif(BUN is None, reason="bun is not installed")
+def test_todowrite_mirror_runs_against_opencodes_own_schema(tmp_path):
+    """Executable proof for the write-through: drive the registered tool and
+    check BOTH stores, including the priority column only opencode has."""
+    from harness.cli import _plugin_files
+    script = tmp_path / "mirror.ts"
+    script.write_text(MIRROR)
+    # HOME pointed at tmp: setup must not reach the developer's real fact DB
+    env = {**os.environ, "HOME": str(tmp_path)}
+    r = subprocess.run([BUN, "run", str(script), _plugin_files()[0], str(tmp_path / "proj")],
+                       capture_output=True, text=True, timeout=60, cwd=str(REPO_ROOT), env=env)
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert "mirror OK" in r.stdout
+
+
+def test_todowrite_mirrors_into_opencodes_own_todo_store():
+    """opencode's `todo` table (session_id, content, status, priority, position,
+    time_*) is opencode's OWN todo storage — its pre-2.0.14 `todowrite` wrote
+    it and anything reading opencode's database still expects it. The harness
+    tool keeps its project space as the source of truth (the sidebar and the
+    Python core read it) but writes THROUGH to opencode's store, so the plan
+    lives in opencode's own data instead of only a private copy.
+
+    The mirror must stay best-effort: never CREATE a foreign app's database,
+    never fail the tool call because another process holds it busy.
+    """
+    from harness.cli import _plugin_files
+    srv = Path(_plugin_files()[0]).read_text()
+
+    assert "async function mirrorOpencodeTodos" in srv
+    assert "INSERT INTO todo(session_id, content, status, priority, position" in srv
+    assert "DELETE FROM todo WHERE session_id = ?" in srv
+    # resolves the DB the way opencode itself does (env override, then XDG data)
+    assert "process.env.OPENCODE_DB" in srv
+    assert "opencode/opencode.db" in srv
+    # never invents opencode's database on disk
+    assert "if (!(await Bun.file(dbPath).exists())) return" in srv
+    # the local write is the contract; the mirror runs after it, best-effort
+    assert "await mirrorOpencodeTodos(sessionID, rows)" in srv
+    assert "todo mirror skipped" in srv
+    # the native schema's optional priority is accepted, not rejected
+    assert 'enum: ["high", "medium", "low"]' in srv
+
+
+def test_tui_footer_chip_yields_so_opencode_keeps_showing_its_version():
+    """opencode's home footer renders the `home.footer.status` slot BETWEEN its
+    context items and its own version text (`flexShrink 0`, pinned right). The
+    chip was a non-shrinking box: past a certain headline width its intrinsic
+    size pushed opencode's version off the right edge — the app stopped showing
+    its own actual version while harness's chip stayed. The chip must be the
+    thing that truncates; harness never renders a version of its own."""
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+    assert "<box flexGrow={1} flexShrink={1} minWidth={0} onMouseDown={toggleSidebar}>" in tui
+    assert "the version stays" in tui, "the comment states why the chip shrinks"

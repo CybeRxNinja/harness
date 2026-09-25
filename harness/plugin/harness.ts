@@ -234,7 +234,8 @@ async function facts(
  * table, which no version past 2.0.13 writes. One space instead of a
  * tool-private copy — the model writes it through `todowrite`, the sidebar
  * reads the same table, and the compaction brief carries it across a
- * compaction.
+ * compaction. The list is ALSO written through to opencode's own `todo` table
+ * (see mirrorOpencodeTodos) so opencode's own storage holds it too.
  */
 const TODO_MARKS: Rec = { completed: "●", in_progress: "◐", cancelled: "✕", pending: "○" }
 const todoLine = (r: Rec) => `${TODO_MARKS[String(r?.status)] ?? "○"} ${String(r?.text ?? "")}`
@@ -275,6 +276,55 @@ async function readTodos(projectDir: string, sessionID: string): Promise<Rec[]> 
   }
 }
 
+/**
+ * Write-through to opencode's OWN todo store: the `todo` table in opencode's
+ * data DB (`session_id, content, status, priority, position, time_*`) — the
+ * storage opencode's own todo tool wrote before 2.0.14, and what anything
+ * reading opencode's database still expects. The harness space stays the
+ * source of truth (the sidebar and the Python core read it); this mirror is
+ * best-effort on purpose: a busy or missing foreign DB is a log line, never a
+ * failed tool call. That is the deep-integration ask — the plan lives in
+ * opencode's own store as well as the panel, instead of only a private copy.
+ */
+async function mirrorOpencodeTodos(sessionID: string, rows: Rec[]): Promise<void> {
+  if (!sessionID) return
+  try {
+    const env = String(process.env.OPENCODE_DB ?? "")
+    const dataHome = process.env.XDG_DATA_HOME || `${process.env.HOME}/.local/share`
+    const dbPath =
+      env && env !== ":memory:" && (env.includes("/") || env.endsWith(".db"))
+        ? env
+        : `${dataHome}/opencode/opencode.db`
+    const { Database } = await import("bun:sqlite").catch(() => ({}) as any)
+    if (!Database) return
+    // Never CREATE a foreign app's database: if opencode has never run there
+    // is nothing to mirror into, and nothing may be invented on disk.
+    if (!(await Bun.file(dbPath).exists())) return
+    const db = new Database(dbPath)
+    try {
+      db.run("PRAGMA busy_timeout=3000")
+      const now = Date.now()
+      db.run("DELETE FROM todo WHERE session_id = ?", sessionID)
+      rows.forEach((t: Rec, i: number) =>
+        db.run(
+          "INSERT INTO todo(session_id, content, status, priority, position, time_created, time_updated) VALUES(?,?,?,?,?,?,?)",
+          sessionID,
+          t.text,
+          t.status,
+          t.priority,
+          i,
+          now,
+          now,
+        ),
+      )
+    } finally {
+      db.close()
+    }
+  } catch (e) {
+    console.error(`[harness] todo mirror skipped: ${short(e)}`)
+  }
+}
+
 /** Replace the session's list (the tool's whole contract) and answer with it. */
 async function writeTodos(projectDir: string, sessionID: string, todos: any): Promise<Rec[]> {
   const db = await todoDb(projectDir, true)
@@ -284,6 +334,11 @@ async function writeTodos(projectDir: string, sessionID: string, todos: any): Pr
       .map((t: Rec) => ({
         text: String(t?.content ?? "").replace(/\s+/g, " ").trim().slice(0, 500),
         status: String(t?.status ?? "pending"),
+        // opencode-native priority (high/medium/low); only the mirror uses it —
+        // the harness space has no priority column and does not need one.
+        priority: ["high", "medium", "low"].includes(String(t?.priority ?? ""))
+          ? String(t.priority)
+          : "medium",
       }))
       .filter((t: Rec) => t.text)
     const now = Date.now()
@@ -291,6 +346,8 @@ async function writeTodos(projectDir: string, sessionID: string, todos: any): Pr
     rows.forEach((t: Rec, i: number) =>
       db.run("INSERT INTO todos(session, text, status, ts) VALUES(?,?,?,?)", sessionID, t.text, t.status, now + i),
     )
+    // best-effort: local write is the contract; the foreign mirror never fails it
+    await mirrorOpencodeTodos(sessionID, rows)
     return rows
   } catch {
     return []
@@ -480,7 +537,8 @@ const HarnessPlugin = {
         add({
           name: "todowrite",
           description:
-            "Replace this session's todo list in the harness todo space (the sidebar's Todo row reads it). " +
+            "Replace this session's todo list in the harness todo space (the sidebar's Todo row reads it, " +
+            "and it is mirrored into opencode's own todo table). " +
             "Use it for multi-step work: one item in_progress at a time, completed as you finish.",
           input: {
             type: "object",
@@ -493,6 +551,11 @@ const HarnessPlugin = {
                   properties: {
                     content: { type: "string", description: "The task" },
                     status: { type: "string", enum: ["pending", "in_progress", "completed", "cancelled"] },
+                    priority: {
+                      type: "string",
+                      enum: ["high", "medium", "low"],
+                      description: "Optional opencode-native priority (kept when mirroring to opencode's todo table)",
+                    },
                   },
                   required: ["content", "status"],
                 },

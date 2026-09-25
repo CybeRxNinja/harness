@@ -651,6 +651,10 @@ def cmd_tui(args) -> int:
         print(f"(opencode.json wired at {cfg_path}; harness plugin at {plug}; CLI fallback: harness chat)")
         return 1
     print(f"launching {binary} (agents inherit your opencode default model; no relay)")
+    # LSP: 2.0.x ships the `lsp` tool ungated; newer builds gate it behind
+    # OPENCODE_EXPERIMENTAL_LSP_TOOL. Set it so agents keep definitions/
+    # references access across an upgrade — an unrecognized env var is inert.
+    os.environ.setdefault("OPENCODE_EXPERIMENTAL_LSP_TOOL", "true")
     os.execvp(binary, [binary])
 
 

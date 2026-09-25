@@ -78,6 +78,17 @@ the Python core read one list instead of three private copies. The server half
 creates the table on first write, so the plugin works on a project where the
 `harness` CLI has never run.
 
+**Write-through to opencode's own store.** Every `todowrite` is *also* mirrored
+into opencode's own `todo` table (`session_id, content, status, priority,
+position, time_*`) in opencode's data DB — the storage opencode's own todo tool
+wrote before 2.0.14 and what anything reading `opencode.db` still expects. The
+harness space stays the source of truth (the panel, the Python core and the
+compaction brief read it); the mirror is best-effort by design: it resolves the
+DB the way opencode does (`OPENCODE_DB`, else `$XDG_DATA_HOME/opencode/`),
+never creates a foreign database, and a busy or missing one is a log line —
+never a failed tool call. `priority` (high/medium/low) is accepted in the tool
+schema and travels with the mirror.
+
 Verified end to end on a real 2.0.14 server: `opencode run "…call todowrite…"`
 → the tool call lands as rows in that table under the run's session id, and the
 panel paints them.
@@ -154,7 +165,13 @@ until the list changes again.
 
 Every value is read the same way opencode reads it, so the panel agrees with the
 app's own readout: total tokens = in + out + reasoning + cache read + write,
-cost from `session.cost(sid)`. There is deliberately **no "Context" row** —
+cost from `session.cost(sid)`. Usage spans the `task` tool's **subagent
+sessions** too — a child is a separate `Session.Info` with its own tokens, so
+the panel discovers the family (`session.sync(sid, {children:true})` +
+`session.family(sid)`, the same set opencode's `session.cost` sums) and merges
+its rows; the Tokens detail then names what the workers contributed
+(`+ 2 subagents · 95,412 tok`). The **Window stays this session's own**: one
+count belongs to one context window. There is deliberately **no "Context" row** —
 opencode's sidebar already renders one at the top, and a second copy is what made
 the panel look like an overlay bolted onto the app instead of part of it.
 
@@ -162,8 +179,8 @@ the panel look like an overlay bolted onto the app instead of part of it.
 | --- | --- | --- |
 | header | — | session id, non-zero skill/fact counts (`data.session.get(sid)`; a zero count is omitted, never printed as `0 facts`) |
 | Window | `used / limit in context`, model · agent — value tinted `feedback.warning` at ≥ 80% | `session.tokens` + the provider's `models[id].limit.context`; `used` is the **last assistant message** (opencode's header rule), not the lifetime sum |
-| Tokens | `input · output`, `reasoning · cache` (a `cache write` line only when non-zero) — no cost line: the value already carries it | `session.tokens`, `session.cost(sid)` |
-| Models | per **used** provider a bare `name:` header (no catalog counts), then aligned `model … N steps`; value = models/providers this session actually routed through (`not used` before the first message, whose `· selected` fallback row is not counted as usage) | assistant messages grouped by provider/model — re-read on **every** pass, so it fills as the message store does |
+| Tokens | `input · output`, `reasoning · cache` (a `cache write` line only when non-zero; a `+ N subagents · M tok` line when subagents spent anything) — no cost line: the value already carries it | `session.get(sid).tokens` **merged over `session.family(sid)`** (this session + its `task` children — the single-row read was the "not counting sub-agents" bug), cost from `session.cost(sid)` (already family-summing) with a hand-summed fallback |
+| Models | per **used** provider a bare `name:` header (no catalog counts), then aligned `model … N steps`; value = models/providers this session actually routed through (`not used` before the first message, whose `· selected` fallback row is not counted as usage) | assistant messages of this session **and of its subagent sessions** grouped by provider/model — re-read on **every** pass, so it fills as the message store does |
 | Todo | value is progress, `1/4 done` (+ `· project` for a fallback list); rows are `● completed ◐ in_progress ○ pending ✕ cancelled` + text — this session's list, else the project's newest — **opens itself** when the list changes; **hidden when empty** | the harness todo space, read-only |
 | Workers | `◐ running ○ queued ● done ✕ error ! timeout ~ stale` + worker name + age of its last update, newest first; value is live occupancy (`2 active` / `idle`); **hidden when empty** | the `workers` table in the same `sessions.db` — **project-wide, not session-scoped**: `rlm.spawn` records the row and leaves `workers.session` empty, so a worker belongs to the project, not to the opencode session that asked for it. The active count comes from SQL, not the six displayed rows (a long worker can sit outside the newest ones). Deliberately no `stale` verdict here — `harness doctor` owns that rule (`budgets.worker_timeout_s` × 2) and a second copy would drift; the age is printed instead (`◐ map-auth · running 42m`) |
 | Skills | the bundled harness skills, `… +N more` past five | `location.skill` after `sync()` |
@@ -346,10 +363,24 @@ predates the plugin's first install). Silence it with
 `OPENCODE_DISABLE_AUTOUPDATE=1` (checked by opencode itself), or take the
 update with `opencode upgrade`.
 
+**opencode's version not visible in the footer?** — that one *was* the plugin,
+and it is fixed. opencode's home footer renders its own version text to the
+RIGHT of the `home.footer.status` slot with `flexShrink: 0`; the harness chip
+inside that slot did not shrink, so past a certain headline width it pushed
+opencode's version off the right edge — the app stopped showing its own actual
+version while the chip stayed. The chip now carries
+`flexGrow=1 flexShrink=1 minWidth=0`: it truncates and the version keeps its
+place. Harness itself renders no version anywhere and writes no `version` key
+into `opencode.json` (pinned by a test), and `harness doctor` reports what
+opencode's own binary says (`opencode_version: opencode v2.0.14`) so any
+mismatch you see elsewhere is instantly attributable.
+
 ## Verify
 
 - `harness doctor` reports your user model, plugin freshness (installed vs
-  shipped bytes), the harness agents in `opencode.json`, and opencode presence.
+  shipped bytes), the harness agents in `opencode.json`, opencode's own
+  version straight from the binary, and the effective LSP state (`enabled /
+  overridden / disabled / unset` for this project's config).
 - A long chat: when the session compacts, the recalled memory brief is applied.
 - `python scripts/opencode_smoke.py` (CI runs this too): boots a real
   `opencode serve`, forces activation, asserts the plugin is `active` with the

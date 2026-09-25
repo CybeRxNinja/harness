@@ -29,7 +29,16 @@ used as the intent list).
 (`backups/`) → atomic write → re-validate; corrupt files boot from backup.
 
 LSP is enabled unless already decided (`lsp: true` merged only when the key
-is absent; explicit `false`/object always respected).
+is absent; explicit `false`/object always respected). `lsp: true` turns on
+opencode's **built-in language servers** (typescript, pyright, gopls, clangd, …)
+which spawn per project as their files open — harness never installs a server
+itself. `harness tui` additionally exports
+`OPENCODE_EXPERIMENTAL_LSP_TOOL=true` before exec'ing opencode so agents keep
+the `lsp` tool (definitions / references / symbols) on builds that gate it
+behind that flag; on 2.0.x the tool ships ungated and the variable is inert.
+Workers are told to prefer it over grep-spaghetti when writing code in an
+unfamiliar codebase, and `harness doctor` reports the effective state as
+`lsp: enabled / overridden / disabled / unset`.
 
 ## Shell permissions are generated, not shipped
 

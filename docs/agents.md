@@ -57,3 +57,39 @@ the project's `.opencode/harness/tmp/` — never `/tmp` or a system directory �
 and no worker installs packages or tools (report the missing tool instead).
 Independent workers run in parallel, two per wave. Installs and scratch that
 land outside the project prompt for approval (`docs/security.md`).
+
+### Waves and a right-sized test budget
+
+The next leak was process, not tools: one session burned four skill loads at
+once, spawned `explore` and `plan-consultant` to answer the same question, then
+turned six line-level fixes into four full-file review passes and three whole
+re-verifications. So the orchestrator now plans the **whole wave sequence
+before the first spawn** and stops at the first wave that proves the task:
+
+1. **recon** — one worker, and only when the repo state isn't obvious from a
+   single `ls`/`grep`; `explore` and `plan-consultant` are never spawned on the
+   same question.
+2. **build** — workers with disjoint files, one writer per file.
+3. **verify** — at most two workers: the project's **one canonical test
+   command** plus at most one static review.
+4. **fix** — one wave, then a **delta re-check**: the *same* reviewer closes its
+   own prior findings against the changed hunks (`fixed / still open /
+   regressed`), never a fresh full-file audit and never a re-run of a gate that
+   already passed.
+
+Budget: **8 spawns and 4 waves per task**; past that, stop and report what is
+blocked. Skills: **at most one, loaded at the step that needs it** — never a
+batch at session start (a small/static task needs no spec or incremental skill
+at all). Tests: discover the runner **once**, record its single canonical
+command in the plan, run it at most once per wave; with no runner the gate is a
+parse check plus one structural script; after a fix run only the check that
+covers the touched code (one test node, one calculation); browser/e2e only when
+the repo ships that tooling *and* a browser is connected — a worker that
+reports a tool unavailable is never re-spawned for the same check, the check is
+degraded and said so. Verification cost stays proportional to the change: a
+three-line edit gets a targeted check, not a 44-check suite.
+
+Opencode-native machinery comes first — the `lsp` tool for
+definitions/references/symbols in an unfamiliar codebase, `grep`/`glob` before
+`read`, and `todowrite` (shown in the sidebar) for plans — before harness builds
+anything new.

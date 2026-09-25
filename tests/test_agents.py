@@ -159,6 +159,82 @@ def test_agent_prompts_carry_the_resource_discipline():
     assert "ONE browser/server session" in testy, "one launch, every viewport"
 
 
+def test_orchestrator_plans_waves_and_sizes_verification():
+    """The 57-minute glassmorphism session spent its budget on PROCESS, not
+    work: four skills loaded at once, explore + plan-consultant asked the same
+    question, then four full-file review passes and three full re-verifications
+    for six line-level fixes (plus a re-spawn after a browser that was never
+    there). The economy rules have to live in the shipped prompts, where the
+    behavior is decided."""
+    import json
+    from pathlib import Path
+    d = json.loads((Path("harness") / "harness-opencode.json").read_text())
+    orch = d["agent"]["orchestrator"]["prompt"]
+
+    # one plan, one recon worker, a hard spawn/wave budget
+    assert "WAVES — plan the whole sequence before the first spawn" in orch
+    assert "Never spawn explore AND plan-consultant on the same question" in orch
+    assert "8 spawns and 4 waves per task" in orch
+    # a tool the worker could not use is degraded, never re-spawned
+    assert "never spawn that kind again for the same check" in orch
+
+    # exactly one skill, loaded where it is needed — never a batch at session start
+    assert "load at most ONE skill" in orch
+    assert "never a batch at session start" in orch
+
+    # right-sized verification: one canonical command, chosen once, run sparsely
+    assert "TEST BUDGET" in orch
+    assert "ONE canonical command" in orch
+    assert "never build a test framework" in orch
+    assert "not the whole gate again" in orch
+    assert "three-line edit gets a targeted check" in orch
+
+    # reviews close findings against the delta instead of re-auditing files
+    review = d["agent"]["code-reviewer"]["prompt"]
+    assert "DELTA ON RE-RUN" in review
+    assert "one verdict each (fixed / still open / regressed)" in review
+    assert "do not re-audit untouched code" in review
+
+    # the test engineer discovers ONE runner and does not re-run passed gates
+    testy = d["agent"]["test-engineer"]["prompt"]
+    assert "RIGHT-SIZING" in testy
+    assert "ONE canonical command" in testy
+    assert "do not add a second test framework" in testy
+
+    # the same discipline reaches the Python path (chat --mode orchestrator)
+    from harness.loop import SYSTEM
+    lo = SYSTEM["orchestrator"]
+    assert "delta re-check" in lo and "ONE skill" in lo
+    assert "canonical test command" in lo
+    from harness.rlm import SUBAGENT_BRIEFS
+    assert "hunks changed since your last pass" in SUBAGENT_BRIEFS["code-reviewer"]
+    assert "ONE canonical command" in SUBAGENT_BRIEFS["test-engineer"]
+
+    # deep integration: opencode-native machinery before building new things —
+    # and the lsp line rides into every code-writing spawn prompt, because the
+    # orchestrator's own text never reaches the worker that writes the code
+    assert "prefer the lsp tool (definitions/references/symbols)" in orch
+    assert "todowrite" in orch
+
+
+def test_harness_writes_no_version_key_anywhere():
+    """The owner must be able to see opencode's OWN version. Harness therefore
+    keeps its hands off every version surface: nothing in the shipped config or
+    the merge writes a `version` key, and the launch stays a plain exec of
+    whatever `opencode` is on PATH (doctor only READS the binary's version).
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    bundled = (root / "harness" / "harness-opencode.json").read_text()
+    cli = (root / "harness" / "cli.py").read_text()
+    assert '"version"' not in bundled, "the shipped opencode config must not pin a version"
+    assert '"version"' not in cli, "the CLI must not write a version anywhere"
+    assert "os.execvp(binary, [binary])" in cli, "launch opencode as-is, no wrapper"
+    assert 'os.environ.setdefault("OPENCODE_EXPERIMENTAL_LSP_TOOL", "true")' in cli, (
+        "agents keep the lsp tool across an upgrade; an unknown env var is inert"
+    )
+
+
 def test_harness_originated_prompts_refresh_but_a_user_rewrite_stays(tmp_path, monkeypatch):
     """Guidance updates must reach installs that already carry the agent —
     setdefault alone would leave them on the stale prompt forever. The tell is

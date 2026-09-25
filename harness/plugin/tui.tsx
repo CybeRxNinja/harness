@@ -12,7 +12,12 @@
 //     the right edge at any panel width (opencode's own MCP rows do this);
 //   * same numbers as opencode's readout (total tokens = in+out+reasoning+
 //     cache read+write; window % = LAST assistant message / model.limit.context,
-//     opencode's own header rule);
+//     opencode's own header rule) — and the usage totals plus the Models steps
+//     cover this session's `task` subagent sessions too: a child runs as a
+//     SEPARATE Session.Info with its own tokens, discovered via
+//     `session.sync(sid, {children:true})` + `session.family(sid)` — the same
+//     set opencode's own `session.cost` sums. The Window stays this-session:
+//     a context window belongs to one session, never to the family;
 //   * no duplicate "Context" section — opencode already renders one — so the
 //     panel adds what it doesn't show (breakdown, window size, skills, memory).
 //
@@ -204,6 +209,41 @@ function settle(p: any, ms: number): Promise<void> {
   ]).then(() => {})
 }
 
+/**
+ * This session plus its DIRECT subagent sessions. The `task` tool's children
+ * run as SEPARATE opencode sessions with their own `tokens`/`cost` rows, so a
+ * readout built from `session.get(sid)` alone dropped everything the workers
+ * spent — the "tokens do not account for the sub-agents" bug.
+ *
+ * `session.family(sid)` is opencode's own accessor for this set (the one its
+ * `session.cost` sums for a root row). It stays empty until a
+ * `session.sync(sid, {children:true})` has discovered the children, so this
+ * always includes the active session and degrades to "just me" while
+ * discovery is in flight — never to zero.
+ */
+function familyIds(data_: Rec, sid: string): string[] {
+  if (!sid) return []
+  let fam: string[] = []
+  try {
+    fam = asArray(data_?.session?.family?.(sid)).map((r: Rec) => String(r ?? "")).filter(Boolean)
+  } catch {
+    /* API drift: fall back to a solo session */
+  }
+  const kids: string[] = []
+  for (const id of fam) {
+    if (id === sid) continue
+    try {
+      // family() answers for the TREE ROOT, so a subagent session opened in
+      // the TUI must not inherit its siblings' usage: direct children only
+      // (depth is 1 — subagents carry `task: deny`).
+      if (String(data_?.session?.get?.(id)?.parentID ?? "") === sid) kids.push(id)
+    } catch {
+      /* info row not loaded yet */
+    }
+  }
+  return [sid, ...kids]
+}
+
 // Project-local only: a $HOME probe here recalled a different project's facts
 // (state_dir() in harness/paths.py is always <root>/.opencode/harness).
 // One file holds both the fact store and the todo space — it is the DB the
@@ -287,6 +327,11 @@ const HarnessTui = {
     const data: Rec = {
       tokens: null,
       cost: 0,
+      // What the SUBAGENT sessions contributed to `tokens`/`cost` above — the
+      // Tokens detail row prints it, so a family total stays traceable.
+      subCount: 0,
+      subTokens: 0,
+      subCost: 0,
       agent: "",
       model: "",
       contextLimit: 0,
@@ -310,6 +355,10 @@ const HarnessTui = {
     let pendingFull = false
     /** Session whose message store has already been warmed once (see load). */
     let warmedFor = ""
+    /** Family size from the last pass — a change means a subagent spawned or
+     *  finished, and one extra pass is nudged (see load). One nudge pending. */
+    let famSeen = 0
+    let famTimer: any = null
     // Timestamp of the last slot render. This entrypoint is loaded in the
     // long-lived server process as well, where no slot ever renders — an
     // instance that polls forever with nobody watching is pure background
@@ -464,14 +513,23 @@ const HarnessTui = {
      * nothing recomputed them until a new session or a manual refresh.
      */
     const scanModels = (data_: Rec): void => {
-      const msgs = sessionID ? asArray(data_?.session?.message?.list?.(sessionID)) : []
+      // THIS session's messages: the Window number below is one context window,
+      // and a subagent's window has nothing to do with this session's.
+      const mine = sessionID ? asArray(data_?.session?.message?.list?.(sessionID)) : []
+      // Steps, though, count the whole family: a subagent's calls went through
+      // models this session never touched, and leaving them out made the Models
+      // rows disagree with the (now family-wide) Tokens total.
+      const msgs = [...mine]
+      for (const id of familyIds(data_, sessionID).slice(1)) {
+        msgs.push(...asArray(data_?.session?.message?.list?.(id)))
+      }
       // Context-window usage the way opencode's own header computes it: the LAST
       // assistant message with output wins, and a compaction summary counts its
       // output only. The session AGGREGATE keeps growing past the window, so
       // summing it pinned the bar at 100% for the rest of the session — that
       // was the wrong percentage, not a rounding slip.
       let ctxUsed = 0
-      for (const m of msgs) {
+      for (const m of mine) {
         if (String(m?.role ?? m?.type) !== "assistant") continue
         const t = m?.tokens
         if (!t || Number(t.output ?? 0) <= 0) continue
@@ -547,15 +605,44 @@ const HarnessTui = {
         // syncs are therefore only kicked off at the end, to warm the store for
         // the next poll.
         const session = sessionID ? data_?.session?.get?.(sessionID) ?? null : null
-        data.tokens = session?.tokens ?? null
         data.agent = String(session?.agent ?? "")
         data.model = modelId(session?.model)
-        // opencode's own cost accessor (the session row's `cost` works too).
+        // Usage = THIS session plus every subagent it spawned. `session.get`
+        // returns one row and each `task` child is its own session with its own
+        // tokens, so summing the family is what makes the Tokens row, the footer
+        // chip and the Models totals account for the workers at all.
+        let merged: Rec | null = null
+        let subCount = 0
+        let subTokens = 0
+        let subCost = 0
+        for (const id of familyIds(data_, sessionID)) {
+          const s = id === sessionID ? session : data_?.session?.get?.(id) ?? null
+          const t = s?.tokens ?? null
+          if (!t) continue
+          if (!merged) merged = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+          merged.input += Number(t.input ?? 0) || 0
+          merged.output += Number(t.output ?? 0) || 0
+          merged.reasoning += Number(t.reasoning ?? 0) || 0
+          merged.cache.read += Number(t.cache?.read ?? 0) || 0
+          merged.cache.write += Number(t.cache?.write ?? 0) || 0
+          if (id !== sessionID) {
+            subCount += 1
+            subTokens += totalTokens(t)
+            subCost += Number(s?.cost ?? 0) || 0
+          }
+        }
+        data.tokens = merged
+        data.subCount = subCount
+        data.subTokens = subTokens
+        data.subCost = subCost
+        // opencode's own cost accessor: it sums the family for a root row, so
+        // the children are already inside it once discovery lands. The fallback
+        // hand-sums this row plus the subagents for when that accessor drifts.
         try {
-          const c = sessionID ? data_?.session?.cost?.(sessionID) : undefined
-          data.cost = Number(c ?? session?.cost ?? 0) || 0
+          const c = Number(sessionID ? data_?.session?.cost?.(sessionID) : NaN)
+          data.cost = Number.isFinite(c) && c > 0 ? c : Number(session?.cost ?? 0) + subCost
         } catch {
-          data.cost = Number(session?.cost ?? 0) || 0
+          data.cost = Number(session?.cost ?? 0) + subCost
         }
 
         // Slow sources only when they can have changed: session change, first
@@ -584,8 +671,16 @@ const HarnessTui = {
         // warm the session store for the next poll (see the note above on why
         // this cannot happen before the reads)
         if (sessionID) {
-          void settle(data_?.session?.sync?.(sessionID), SCAN_MS)
+          // {children:true}: fetch this session AND its subagent sessions in one
+          // round trip — a `task` child is a separate Session.Info with its own
+          // tokens, and until discovery lands, the Tokens row, the chip's $/tok
+          // and opencode's own `session.cost` all miss what the workers spent.
+          void settle(data_?.session?.sync?.(sessionID, { children: true }), SCAN_MS)
           void settle(data_?.session?.message?.sync?.(sessionID), SCAN_MS)
+          // subagent messages feed the Models rows too (see scanModels)
+          for (const id of familyIds(data_, sessionID).slice(1)) {
+            void settle(data_?.session?.message?.sync?.(id), SCAN_MS)
+          }
           // The message store fills asynchronously, so this session's model rows
           // land on the NEXT pass. Nudge one so they appear with the session
           // instead of up to POLL_MS later (once per session — a self-scheduling
@@ -593,6 +688,20 @@ const HarnessTui = {
           if (warmedFor !== sessionID) {
             warmedFor = sessionID
             setTimeout(() => void load(), 500)
+          }
+          // A changed family size means a subagent spawned or finished: nudge
+          // ONE more pass so its usage lands in ~0.5s instead of a full poll.
+          // The size is read from discovery's result, so the follow-up passes
+          // see the new member and then stop: bounded at two nudges per spawn.
+          const famCount = familyIds(data_, sessionID).length
+          if (famCount !== famSeen) {
+            famSeen = famCount
+            if (famTimer === null) {
+              famTimer = setTimeout(() => {
+                famTimer = null
+                void load()
+              }, 500)
+            }
           }
         }
       } catch (e) {
@@ -863,6 +972,11 @@ const HarnessTui = {
                 `reasoning ${numfmt(t.reasoning)} · cache ${kfmt(cache.read)}`,
               ]
               if (Number(cache.write ?? 0) > 0) out.push(`cache write ${numfmt(cache.write)}`)
+              // The value above is session + subagents; say what the workers
+              // contributed so the family total is traceable, not mysterious.
+              if ((data.subCount ?? 0) > 0) {
+                out.push(`+ ${data.subCount} subagent${data.subCount === 1 ? "" : "s"} · ${numfmt(data.subTokens)} tok`)
+              }
               return out
             }
             return (
@@ -1045,7 +1159,12 @@ const HarnessTui = {
         render: (props: Rec) => {
           rendered(props)
           return (
-            <box onMouseDown={toggleSidebar}>
+            // flexShrink 1 + minWidth 0 are the whole point: opencode's own
+            // home footer renders its VERSION text right after this slot with
+            // flexShrink 0, so a chip that refuses to shrink pushes that text
+            // off the right edge — the app stops showing its own version.
+            // The chip yields instead: it truncates, the version stays.
+            <box flexGrow={1} flexShrink={1} minWidth={0} onMouseDown={toggleSidebar}>
               <text fg={th.muted} wrapMode="none" truncate>
                 {headline()}
               </text>
