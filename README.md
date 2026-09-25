@@ -141,7 +141,7 @@ harness/            cli, orchestrator, memory, risk, rlm, store, compact, doctor
 harness/data/skills bundled skills (14, incl. ponytail — MIT, see NOTICE.md)
 docs/               one page per feature (start at docs/quickstart.md, docs/plugin.md)
 scripts/            opencode_smoke.py (CI proof), optional skill-pack installers
-.github/workflows/  ci.yml (tests + live smoke) · release.yml (plugin-v* → assets)
+.github/workflows/  ci.yml (tests) · release.yml (plugin-v* → assets)
 ```
 
 ## Docs

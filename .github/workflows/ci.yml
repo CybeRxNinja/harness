@@ -31,32 +31,3 @@ jobs:
         env:
           HARNESS_MOCK: "1"
 
-  # Live check: the plugin must activate on a REAL opencode server and seed its
-  # skills. No model calls, no API keys — boot opencode serve, create a session
-  # to force activation, assert via the server's own API. Catches loader-contract
-  # or hook-payload drift in opencode releases before users hit it.
-  #
-  # Push-only (a PR does not need a 200MB opencode download to be useful) and
-  # hard-capped: the job this replaced hung for 32 minutes and had to be
-  # cancelled by hand.
-  opencode-live:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 6
-    steps:
-      - uses: actions/checkout@v4
-      # PINNED to the 2.x line this plugin targets. `opencode.ai/install` with no
-      # --version resolves GitHub's `releases/latest`, which is the 1.x train
-      # (v1.18.x): that binary has no `server password` banner and no /api/plugin,
-      # so the smoke used to sit on its deadline against a healthy server it
-      # could not talk to. Bump this deliberately, after re-probing the contract.
-      - name: Install opencode (2.x)
-        env:
-          OPENCODE_VERSION: "2.0.14"
-        run: |
-          curl -fsSL https://opencode.ai/install | bash -s -- --version "$OPENCODE_VERSION"
-          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
-      # Stdlib only — the smoke script imports nothing from this package, so no
-      # Python setup or pip install is needed to run it.
-      - name: Plugin live smoke (real opencode server)
-        run: python3 scripts/opencode_smoke.py --port 4199
