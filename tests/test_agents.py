@@ -158,6 +158,16 @@ def test_agent_prompts_carry_the_resource_discipline():
     assert "never install" in testy, "workers must not mutate the system"
     assert "ONE browser/server session" in testy, "one launch, every viewport"
 
+    # token discipline: a single pass, a second only for a failed gate, never a third
+    assert "TOKEN DISCIPLINE" in orch
+    assert "single pass" in orch
+    assert "no pass 3" in orch.lower(), "pass 3 is stop-and-report, never another spawn"
+
+    # every subagent carries its one-line frugality tail
+    subs = {n: s for n, s in d["agent"].items() if s.get("mode") == "subagent"}
+    for name, spec in subs.items():
+        assert "Frugality:" in spec.get("prompt", ""), name
+
 
 def test_orchestrator_plans_waves_and_sizes_verification():
     """The 57-minute glassmorphism session spent its budget on PROCESS, not
