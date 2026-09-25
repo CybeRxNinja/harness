@@ -26,14 +26,14 @@ capped by `budgets.max_parallel` (default 2).
 
 ## Proof of work
 
-Everything below is verified in CI (`ci.yml` gates on `HARNESS_MOCK=1 pytest`
-and the live smoke) and re-runnable locally:
+Everything below is verified in CI (`ci.yml` gates on `HARNESS_MOCK=1 pytest`)
+and re-runnable locally (the former live smoke is removed):
 
 | claim | proof |
 | --- | --- |
-| plugin loads and activates on stock opencode | `python scripts/opencode_smoke.py` boots `opencode serve` and asserts `status == "active"` → `SMOKE OK` |
-| TUI half is real (panel, chip, commands) | smoke asserts `features.tui` — set only when a `tui.tsx` entrypoint is present |
-| 14 bundled skills seeded into opencode's skill store | smoke counts them against a live server |
+| plugin loads and activates on stock opencode | formerly proven by a live smoke booting `opencode serve` and asserting `status == "active"` → `SMOKE OK` |
+| TUI half is real (panel, chip, commands) | the smoke asserted `features.tui` — set only when a `tui.tsx` entrypoint is present |
+| 14 bundled skills seeded into opencode's skill store | the smoke counted them against a live server |
 | plugin is visible in the Plugins panel | the TUI panel filters on `features.tui`; the directory install ships both entrypoints |
 | memory remembers without being asked | `tests/test_memory_auto.py`: turns auto-capture durable facts + progress; 2-evidence lessons auto-promote to `MEMORY.md`; credentials refused |
 | dangerous commands ask, safe ones don't | `tests/test_risk.py`: 94 ask-rules generated from `harness/risk.py` (`git push`, `rm -rf`, `DROP TABLE`, deploys) — greps, diffs, fetches, tests never prompt |
@@ -42,9 +42,9 @@ and the live smoke) and re-runnable locally:
 | the model's plan lands in the harness todo space | live: `opencode run "…call todowrite…"` → rows in `<project>/.opencode/harness/sessions.db` under the run's session id, painted by the panel off a real pty capture |
 | 203 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
 
-Latest release: **[`plugin-v0.6`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.6)**
-— verified end-to-end by installing *from the release* (`harness plugin
-install --from-release latest` → byte-identical assets → live smoke `SMOKE OK`).
+Latest release: **[`plugin-v0.10`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.10)**
+— previously verified end-to-end by installing *from the release* (`harness plugin
+install --from-release latest` → byte-identical assets → live smoke passed).
 
 ## What the plugin does
 
@@ -140,7 +140,7 @@ harness/plugin/     the plugin: server + TUI entrypoints (harness.ts, tui.tsx) �
 harness/            cli, orchestrator, memory, risk, rlm, store, compact, doctor, ...
 harness/data/skills bundled skills (14, incl. ponytail — MIT, see NOTICE.md)
 docs/               one page per feature (start at docs/quickstart.md, docs/plugin.md)
-scripts/            opencode_smoke.py (CI proof), optional skill-pack installers
+scripts/            optional skill-pack installers
 .github/workflows/  ci.yml (tests) · release.yml (plugin-v* → assets)
 ```
 

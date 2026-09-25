@@ -382,6 +382,6 @@ mismatch you see elsewhere is instantly attributable.
   version straight from the binary, and the effective LSP state (`enabled /
   overridden / disabled / unset` for this project's config).
 - A long chat: when the session compacts, the recalled memory brief is applied.
-- `python scripts/opencode_smoke.py` (CI runs this too): boots a real
-  `opencode serve`, forces activation, asserts the plugin is `active` with the
+- A live smoke (removed; CI no longer runs it): booted a real
+  `opencode serve`, forced activation, asserted the plugin was `active` with
   the bundled skills seeded.

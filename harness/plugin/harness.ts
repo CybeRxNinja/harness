@@ -20,7 +20,8 @@
 //   2. native tools       ctx.tool.transform(editor => editor.add(tool))
 //      skills_list / skill_view / memory_recall, plus todowrite / todoread —
 //      the plan tools opencode 2.x no longer ships, backed by the harness todo
-//      space (the same `todos` table the sidebar panel reads).
+//      space (the same `todos` table the sidebar panel reads) — plus `wait`,
+//      a visible countdown sleep backed by the `waits` table the sidebar reads.
 //   3. output condensing  ctx.tool.hook("execute.after", fn)
 //   4. compaction brief   ctx.session.hook("compaction", fn)
 //
@@ -356,6 +357,57 @@ async function writeTodos(projectDir: string, sessionID: string, todos: any): Pr
   }
 }
 
+/** Cap on one `wait` call: a sidebar countdown, not a parking lot. */
+const MAX_WAIT_S = 600
+
+/**
+ * Sleep without blocking the opencode server's event loop (same async rule
+ * as `run` above: a timer, never a spin).
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * The `wait` tool's countdown rows: `waits(id, label, deadline)` in the same
+ * project state DB as the todo space, so the TUI reads it in its one
+ * read-only open. `deadline` is epoch MILLISECONDS (Date.now() based); the
+ * row lives only for the sleep and is deleted on expiry. Best-effort on
+ * purpose: a lost countdown must never fail the wait itself.
+ */
+async function recordWait(projectDir: string, id: string, label: string, deadline: number): Promise<void> {
+  const db = await todoDb(projectDir, true)
+  if (!db) return
+  try {
+    db.run("CREATE TABLE IF NOT EXISTS waits(id TEXT PRIMARY KEY, label TEXT, deadline INTEGER)")
+    db.run("INSERT OR REPLACE INTO waits(id, label, deadline) VALUES(?,?,?)", id, label, deadline)
+  } catch {
+    /* sidebar countdown best-effort */
+  } finally {
+    try {
+      db.close()
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
+async function clearWait(projectDir: string, id: string): Promise<void> {
+  const db = await todoDb(projectDir)
+  if (!db) return
+  try {
+    db.run("DELETE FROM waits WHERE id = ?", id)
+  } catch {
+    /* already gone */
+  } finally {
+    try {
+      db.close()
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
 /** Words long enough to be worth matching; falls back to the phrase itself. */
 function terms(query: string): string[] {
   const ws = String(query ?? "")
@@ -584,6 +636,49 @@ const HarnessPlugin = {
             const rows = sid ? await readTodos(directory, sid) : []
             if (!rows.length) return { content: "(no todos in this session — call todowrite to set them)" }
             return { content: rows.map(todoLine).join("\n") }
+          },
+        })
+
+        // A visible countdown sleep: the sidebar's Waits row counts the stored
+        // deadline down while this sleeps, then this answers with a nudge to
+        // check the task and act. Validation answers immediately (no record, no
+        // sleep) so a bad call is a cheap correction, not a stuck wait.
+        add({
+          name: "wait",
+          description:
+            "Wait for something with a visible sidebar countdown, then check it. " +
+            "Records the wait in project state (the sidebar's Waits row counts it down), " +
+            "sleeps until the deadline without blocking the server, removes the record, " +
+            "and returns a nudge telling you to check the task's status and act on it.",
+          input: {
+            type: "object",
+            properties: {
+              label: { type: "string", description: "What is being waited on (shown in the sidebar)" },
+              timeout_s: { type: "number", description: "Seconds to wait (1..600)" },
+              hint: { type: "string", description: "What to check when the wait expires" },
+            },
+            required: ["label", "timeout_s"],
+            additionalProperties: false,
+          },
+          options: direct,
+          execute: async (input: Rec) => {
+            const label = String(input?.label ?? "").replace(/\s+/g, " ").trim().slice(0, 80)
+            if (!label) return { content: "wait needs a label — pass {label, timeout_s} with timeout_s in seconds" }
+            const raw = Number(input?.timeout_s)
+            if (!Number.isFinite(raw) || raw <= 0)
+              return { content: `wait needs timeout_s in seconds (1..${MAX_WAIT_S}) — got ${String(input?.timeout_s ?? "none")}` }
+            const secs = Math.min(MAX_WAIT_S, Math.max(1, Math.floor(raw)))
+            const hint = String(input?.hint ?? "").replace(/\s+/g, " ").trim().slice(0, 200)
+            const deadline = Date.now() + secs * 1000
+            const id = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+            await recordWait(directory, id, label, deadline)
+            try {
+              await sleep(secs * 1000)
+            } finally {
+              await clearWait(directory, id)
+            }
+            const check = hint ? hint : `the status of "${label}"`
+            return { content: `Wait "${label}" expired after ${secs}s — check ${check} and act on what you find.` }
           },
         })
       })

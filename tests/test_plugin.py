@@ -971,15 +971,15 @@ def test_plugin_features(tmp_path):
     # not depend on the lost API still register, one bad editor.add does not
     # sink the other tools, and a drifted DB schema degrades to an answer.
     assert out["degradeNoSkillTransform"] is True
-    assert out["degradeNoSkillTransformTools"] == 5 and out["degradeNoSkillTransformHooks"] == 2
+    assert out["degradeNoSkillTransformTools"] == 6 and out["degradeNoSkillTransformHooks"] == 2
     assert out["degradeNoToolTransform"] is True
     assert out["degradeNoToolTransformSeeds"] >= 11 and out["degradeNoToolTransformHooks"] == 2
     assert out["degradeNoToolHook"] is True
-    assert out["degradeNoToolHookTools"] == 5 and out["degradeNoToolHookCondense"] is False
+    assert out["degradeNoToolHookTools"] == 6 and out["degradeNoToolHookCondense"] is False
     assert out["degradeNoSessionHook"] is True
-    assert out["degradeNoSessionHookTools"] == 5 and out["degradeNoSessionHookBrief"] is False
+    assert out["degradeNoSessionHookTools"] == 6 and out["degradeNoSessionHookBrief"] is False
     assert out["degradePartialAdd"] is True
-    assert out["degradePartialAddTools"] == ["memory_recall", "skills_list", "todoread", "todowrite"]
+    assert out["degradePartialAddTools"] == ["memory_recall", "skills_list", "todoread", "todowrite", "wait"]
     assert out["degradeNoList"] is True and out["degradeNoListSeeds"] >= 11
     assert out["degradeSchemaDrift"] == "(nothing recalled — verify from the transcript instead)", out["degradeSchemaDrift"]
     assert out["degradeSchemaDriftBrief"] == 0
@@ -998,14 +998,14 @@ def test_plugin_setup_registers_through_ctx(tmp_path):
     assert out["id"] == "harness"
     assert out["returned"] is None, "setup must not return a hooks object"
     assert out["hooks"] == ["tool:execute.after", "session:compaction"]
-    assert [t["name"] for t in out["tools"]] == ["skills_list", "skill_view", "memory_recall", "todowrite", "todoread"]
+    assert [t["name"] for t in out["tools"]] == ["skills_list", "skill_view", "memory_recall", "todowrite", "todoread", "wait"]
     for t in out["tools"]:
         assert t["input"] == "object" and t["execute"] == "function"
         # codemode:false == exposed as a direct tool (the v2 default hides it
         # in the Code Mode catalog, where calling it by name fails)
         assert t["direct"] is True, f"{t['name']} is not a direct tool"
     # every executor answers with a content string (the v2 tool result shape)
-    assert set(out["execs"]) == {"skills_list", "skill_view", "memory_recall", "todowrite", "todoread"}
+    assert set(out["execs"]) == {"skills_list", "skill_view", "memory_recall", "todowrite", "todoread", "wait"}
     assert all(v == "string" for v in out["execs"].values()), out["execs"]
     # bundled seeds are registered in opencode's skill shape
     assert out["skills"], "no skills seeded"
@@ -1020,6 +1020,119 @@ def test_plugin_setup_registers_through_ctx(tmp_path):
     assert out["views"]["noId"]["ok"] is True and "needs an id" in out["views"]["noId"]["text"]
     # condensing shrinks oversized success output and leaves errors untouched
     assert out["condensed"] == [True, True]
+
+
+# The `wait` tool contract, driven live: registered via ctx as a direct tool,
+# bad input answers immediately (no record, no sleep), a 1s expiry sleeps then
+# clears its row and nudges with the label, and the 600s cap is proven without
+# a 600s sleep by parking the timer and reading the stored deadline mid-flight.
+WAIT = r"""
+const file = process.argv[2]
+const dir = process.argv[3]
+const plug: any = (await import(file)).default
+import { Database } from "bun:sqlite"
+import { join } from "node:path"
+
+const fail = (m: string): never => { throw new Error(m) }
+
+const tools: any[] = []
+const ctx: any = {
+  location: { directory: dir },
+  options: {},
+  skill: {
+    list: async () => [],
+    transform: async (cb: any) => { await cb({ list: () => [], add: (_s: any) => {} }) },
+  },
+  tool: {
+    transform: async (cb: any) => { await cb({ add: (t: any) => tools.push(t) }) },
+    hook: async () => {},
+  },
+  session: { hook: async () => {} },
+}
+await plug.setup(ctx)
+const byName: any = Object.fromEntries(tools.map((t: any) => [t.name, t]))
+if (!byName.wait) fail(`wait not registered; got [${tools.map((t: any) => t.name)}]`)
+if (byName.wait.options?.codemode !== false) fail("wait must be a direct tool (codemode:false)")
+
+const out: any = { registered: true }
+const text = async (input: any): Promise<string> => String((await byName.wait.execute(input, {})).content ?? "")
+
+// bad input answers immediately: no record, no sleep
+const tBad = Date.now()
+out.noInput = await text({})
+out.noTimeout = await text({ label: "x" })
+out.zeroTimeout = await text({ label: "x", timeout_s: 0 })
+out.emptyLabel = await text({ label: "   ", timeout_s: 5 })
+out.badElapsedMs = Date.now() - tBad
+
+// a real expiry sleeps, clears its row, and nudges with the label
+const tExp = Date.now()
+out.expiry = await text({ label: "smoke label", timeout_s: 1, hint: "the fake job" })
+out.expiryElapsedMs = Date.now() - tExp
+{
+  const db = new Database(join(dir, ".opencode", "harness", "sessions.db"))
+  try {
+    const rows = db.query("SELECT count(*) AS n FROM waits").all() as any[]
+    out.rowCleaned = Number(rows[0]?.n ?? -1) === 0
+  } finally {
+    db.close()
+  }
+}
+
+// the cap without the wait: park the timer, read the stored deadline mid-flight
+const realSetTimeout = setTimeout
+let captured: any = null
+;(globalThis as any).setTimeout = (fn: any, ms: number) => { captured = { fn, ms }; return 0 as any }
+const t0 = Date.now()
+const pending = byName.wait.execute({ label: "cap probe", timeout_s: 9999 }, {})
+await new Promise((r) => realSetTimeout(r, 300))
+{
+  const db = new Database(join(dir, ".opencode", "harness", "sessions.db"))
+  try {
+    const rows = db.query("SELECT label, deadline FROM waits").all() as any[]
+    out.capRows = rows.length
+    out.capLabel = String(rows[0]?.label ?? "")
+    out.capDeadlineSkewMs = Math.abs(Number(rows[0]?.deadline ?? 0) - (t0 + 600_000))
+  } finally {
+    db.close()
+  }
+}
+if (!captured) fail("sleep never scheduled")
+out.capSleptMs = captured.ms
+;(globalThis as any).setTimeout = realSetTimeout
+captured.fn()
+out.capText = String((await pending).content ?? "")
+
+console.log(JSON.stringify(out))
+"""
+
+
+@pytest.mark.skipif(BUN is None, reason="bun is not installed")
+def test_wait_tool_contract(tmp_path):
+    from harness.cli import _plugin_files
+    script = tmp_path / "wait.ts"
+    script.write_text(WAIT)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    r = subprocess.run([BUN, "run", str(script), _plugin_files()[0], str(proj)],
+                       capture_output=True, text=True, timeout=60, cwd=str(REPO_ROOT))
+    assert r.returncode == 0, r.stderr[-2000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+
+    assert out["registered"] is True
+    # validation answers at once (four bad calls, no sleep anywhere)
+    for key in ("noInput", "noTimeout", "zeroTimeout", "emptyLabel"):
+        assert "wait needs" in out[key], (key, out[key])
+    assert out["badElapsedMs"] < 1500, out["badElapsedMs"]
+    # a real expiry sleeps (~1s), clears its countdown row, and nudges the label
+    assert "smoke label" in out["expiry"] and "expired after 1s" in out["expiry"], out["expiry"]
+    assert 800 <= out["expiryElapsedMs"] < 10000, out["expiryElapsedMs"]
+    assert out["rowCleaned"] is True
+    # timeout_s=9999 clamps to the +600s cap: one stored row, exact sleep, nudge
+    assert out["capRows"] == 1 and out["capLabel"] == "cap probe", out
+    assert out["capDeadlineSkewMs"] < 15000, out["capDeadlineSkewMs"]
+    assert out["capSleptMs"] == 600000, out["capSleptMs"]
+    assert "cap probe" in out["capText"] and "after 600s" in out["capText"], out["capText"]
 
 
 def test_plugin_install_idempotent(tmp_path, monkeypatch):

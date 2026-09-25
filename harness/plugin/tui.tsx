@@ -1,8 +1,8 @@
 // Harness CLI plugin for the opencode TUI.
 //
 // It fills opencode's EXISTING side panel (the `sidebar.content` slot) with a
-// stats/info panel — Window, Tokens, Models, Todo, Workers, Skills, Agents,
-// Memory — and nothing else moves: no routes, no docked overlay, no replaced
+// stats/info panel — Window, Tokens, Models, Todo, Workers, Waits, Skills,
+// Agents, Memory — and nothing else moves: no routes, no docked overlay, no replaced
 // slots. It is
 // built to read as part of opencode rather than bolted onto it:
 //
@@ -44,6 +44,9 @@
 //     by PROJECT — `rlm.spawn` leaves `workers.session` empty, so a worker is
 //     not this session's. It shows the persisted status plus the age of the
 //     last update; the authoritative stale verdict stays `harness doctor`'s.
+//   * The Waits row reads the `wait` tool's countdowns out of the same DB
+//     (`waits`: label + deadline), PROJECT-wide like Workers. It auto-expands
+//     while any wait is pending and hides when none is.
 //   * `ctx.keymap.layer(...)` throws "Keymap.Provider is missing" unless it is
 //     called from inside a slot's render component, so commands are registered
 //     from the `app` slot (the pattern the CLI-plugin docs use).
@@ -104,6 +107,23 @@ function age(updated: unknown): string {
   if (secs < 60) return `${secs}s`
   if (secs < 3600) return `${Math.round(secs / 60)}m`
   return `${Math.round(secs / 3600)}h`
+}
+
+/**
+ * "time left" for a wait row, from its `deadline` epoch MILLISECONDS (the
+ * server half's `wait` tool stores Date.now() + timeout_s * 1000 — not the
+ * workers' epoch seconds above). Past-due reads as "due": the record is
+ * removed on expiry, so this only covers the race between the last poll and
+ * the delete. Remainders are zero-padded so the column stays put at ~44 wide.
+ */
+function left(deadline: unknown): string {
+  const ms = Number(deadline ?? 0) - Date.now()
+  if (!Number.isFinite(ms) || ms <= 0) return "due"
+  const s = Math.ceil(ms / 1000)
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`
 }
 
 /**
@@ -273,7 +293,7 @@ const HarnessTui = {
     // Reactive view state. storage.memory is a reactive [store, update] pair:
     // clicking a row writes to it and the sidebar repaints. Without it the panel
     // still renders, just cannot expand rows.
-    let view: Rec = { ...defaultSections(), sessionID: "", skills: 0, agents: 0, todos: 0, models: 0 }
+    let view: Rec = { ...defaultSections(), sessionID: "", skills: 0, agents: 0, todos: 0, models: 0, waits: 0 }
     let setView: ((fn: (draft: Rec) => void) => void) | null = null
     try {
       const pair = ctx.storage?.memory?.(STATE, { initial: { ...defaultSections() } })
@@ -347,6 +367,8 @@ const HarnessTui = {
       todosFromProject: false,
       workers: [] as string[],
       workersActive: 0,
+      waits: [] as string[],
+      waitSig: "",
     }
     let sqlite: any = null
     let fs: any = null
@@ -375,13 +397,18 @@ const HarnessTui = {
 
     /**
      * Everything the panel reads off disk, in ONE read-only open of the project
-     * state DB: the todo space, the worker pool and the fact store.
+     * state DB: the todo space, the worker pool, the wait countdowns and the
+     * fact store.
      *
      * Todos: this session's list wins; with none, the newest list in the project
      * stands in, so the row shows the plan the project is following rather than a
      * dead "0 items". Workers: PROJECT-wide on purpose — `rlm.spawn` writes a row
      * before the pool runs it and leaves `workers.session` empty, so a worker
      * belongs to the project, not to whichever opencode session asked for it.
+     * Waits: PROJECT-wide like workers — a countdown belongs to the project, not
+     * to the session that started it. `waitSig` is the STABLE identity (label +
+     * deadline, not the ticking countdown) so a manual collapse sticks while the
+     * same waits are pending, exactly like the todo signature below.
      *
      * Each query is guarded alone: a drifted schema costs that one section.
      */
@@ -394,6 +421,8 @@ const HarnessTui = {
         factsCount: 0,
         workers: [] as string[],
         workersActive: 0,
+        waits: [] as string[],
+        waitSig: "",
       }
       try {
         if (fs === null) fs = await import("node:fs")
@@ -431,6 +460,18 @@ const HarnessTui = {
             })
           } catch {
             /* no workers table yet */
+          }
+          try {
+            // The `wait` tool's countdown rows, soonest deadline first. The
+            // display ticks every pass but the signature below does not, so a
+            // manual collapse survives the countdown.
+            const wrows = db
+              .query("SELECT label, deadline FROM waits ORDER BY deadline LIMIT ?")
+              .all(ROW_LIMIT) as Rec[]
+            out.waitSig = wrows.map((r) => `${String(r?.label ?? "")}~${Number(r?.deadline ?? 0)}`).join("\u0001")
+            out.waits = wrows.map((r) => `${cut(r?.label, 15)} · ${left(r?.deadline)} left`)
+          } catch {
+            /* no waits table yet */
           }
           try {
             // The VALUE is a real count, not the displayed window: LIMIT 6
@@ -667,6 +708,8 @@ const HarnessTui = {
         data.factsCount = state.factsCount
         data.workers = state.workers
         data.workersActive = state.workersActive
+        data.waits = state.waits
+        data.waitSig = state.waitSig
 
         // warm the session store for the next poll (see the note above on why
         // this cannot happen before the reads)
@@ -716,6 +759,7 @@ const HarnessTui = {
           d.todosProject = data.todosFromProject
           d.workersActive = data.workersActive
           d.workers = data.workers.length
+          d.waits = data.waits.length
           d.models = data.steps.filter((s: Rec) => s.kind === "row").length
           // Providers the session actually ROUTED through: the store-wide
           // count ("6 providers" installed, 3 used) read as wrong data.
@@ -732,6 +776,17 @@ const HarnessTui = {
             d.todoSig = todoSig
             const open = new Set<string>(Array.isArray(d.open) ? d.open : [])
             if (todoSig) open.add("todo")
+            d.open = [...open]
+          }
+          // A wait that appears or changes opens its own row while anything
+          // is pending; when none is, the row leaves `open` so the footer
+          // count stays honest (the row itself hides on `waits`, below).
+          const waitSig = String(data.waitSig ?? "")
+          if (waitSig !== (d.waitSig ?? "")) {
+            d.waitSig = waitSig
+            const open = new Set<string>(Array.isArray(d.open) ? d.open : [])
+            if (waitSig) open.add("waits")
+            else open.delete("waits")
             d.open = [...open]
           }
           // Surface a load failure in the panel itself: cli-side console.error
@@ -1066,6 +1121,27 @@ const HarnessTui = {
                   }}
                   empty="(no workers in this project)"
                 />
+                {/* Project-wide like Workers above: a countdown belongs to the
+                    project, not to whichever session started it. Hidden while
+                    empty, auto-expanded while anything is pending (see load). */}
+                <Row
+                  id="waits"
+                  label="Waits"
+                  value={() => {
+                    void view.rev
+                    const n = view.waits ?? 0
+                    return n === 1 ? "1 waiting" : `${n} waiting`
+                  }}
+                  hide={() => {
+                    void view.rev
+                    return !(view.waits ?? 0)
+                  }}
+                  lines={() => {
+                    void view.rev
+                    return data.waits
+                  }}
+                  empty="(no waits pending)"
+                />
                 <Row
                   id="skills"
                   label="Skills"
@@ -1190,7 +1266,8 @@ const HarnessTui = {
  * Initial view state: which rows are expanded (`open`, a list — several at
  * once) plus the counters the rows render. `rev` is bumped on every load to
  * trigger a repaint; `scanning` is the placeholder flag (reactive, never a
- * plain var); `todoSig` is the todo list the auto-expand last reacted to.
+ * plain var); `todoSig` is the todo list the auto-expand last reacted to,
+ * `waitSig` the wait set it last reacted to.
  */
 function defaultSections(): Rec {
   return { open: [] as string[], rev: 0, scanning: false }
