@@ -39,12 +39,14 @@ All four are registered through the v2 plugin context from `setup(ctx)`:
    (`harness/data/skills/<category>/<name>/SKILL.md`) into opencode's skill store
    so they're loadable by id without editing `opencode.json`.
 2. **Native tools** — `ctx.tool.transform` adds
-   `skills_list`/`skill_view`/`memory_recall` plus `todowrite`/`todoread` as
-   *direct* tools (`options: { codemode: false }`; the v2 default is
+   `skills_list`/`skill_view`/`memory_recall` plus `todowrite`/`todoread` and
+   `wait` as *direct* tools (`options: { codemode: false }`; the v2 default is
    Code-Mode-only, where a by-name call fails with "No tool named … is currently
    available"). They read local disk + SQLite directly (no gateway, no extra
    process). `todowrite`/`todoread` are the plan tools opencode 2.x no longer
-   ships, backed by the harness todo space (below).
+   ships, backed by the harness todo space (below). `wait` takes
+   `{label, timeout_s (1–600s), hint?}` and returns an expiry nudge to check
+   the task and act.
 3. **Output condensing** — the `ctx.tool.hook("execute.after")` hook collapses
    oversized tool results in place (errors pass through untouched).
 4. **Compaction memory** — the `ctx.session.hook("compaction")` hook recalls
@@ -124,7 +126,7 @@ geometry opencode's MCP rows use). That keeps the numbers aligned at any panel
 width, with no width constant to guess:
 
 ```
-harness ses_f368b7d9 · 14 skills
+harness ses_EXAMPLE · 15 skills
 ▾ Window                    █░░░░░░░ 12%
     128,451 / 1,048,576 in context
     muse-spark-1.3-cont… · agent orchestrator
@@ -141,7 +143,7 @@ harness ses_f368b7d9 · 14 skills
 ▾ Workers                      2 active
     ◐ map-auth · running 3m
     ○ docs-pass · queued 4s
-▸ Skills                      14 installed
+▸ Skills                      15 installed
     ▪ using-agent-skills
     ▪ planning-and-task-breakdown
     … +9 more
@@ -382,6 +384,8 @@ mismatch you see elsewhere is instantly attributable.
   version straight from the binary, and the effective LSP state (`enabled /
   overridden / disabled / unset` for this project's config).
 - A long chat: when the session compacts, the recalled memory brief is applied.
-- A live smoke (removed; CI no longer runs it): booted a real
-  `opencode serve`, forced activation, asserted the plugin was `active` with
-  the bundled skills seeded.
+- `wait` parks the turn on a labelled countdown and returns an expiry nudge;
+  while it pends, the sidebar's `Waits` row counts it down.
+- Former live smoke (deleted — `scripts/opencode_smoke.py`; CI runs only the
+  `test` job): used to boot a real `opencode serve`, force activation, and
+  assert the plugin was `active` with the bundled skills seeded.

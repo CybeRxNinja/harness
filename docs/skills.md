@@ -8,6 +8,7 @@ Pitfalls/Verification; lessons-not-logs.
 
 ```
 meta/using-agent-skills        route work to the right skill
+meta/self-maintenance         maintain/improve harness when asked, or automatic only when natural + genuinely improves UX/efficiency
 define/spec-driven-development
 plan/planning-and-task-breakdown
 build/incremental-implementation

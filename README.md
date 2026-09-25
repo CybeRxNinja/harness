@@ -15,7 +15,7 @@ inherits your default model.
 
 ```
 you ──> stock opencode ──> harness plugin (server.ts + tui.tsx)
-                                ├─ native tools: skills_list / skill_view / memory_recall + todowrite / todoread
+                                ├─ native tools: skills_list / skill_view / memory_recall + todowrite / todoread / wait
                                 ├─ compaction hook → durable memory and open todos survive summarization
                                 ├─ orchestrator + workers (RLM pool), plans, checkpoints
                                 └─ sidebar panel: Window · Tokens · Models · Todo · Workers · Skills · Agents · Memory
@@ -33,13 +33,13 @@ and re-runnable locally (the former live smoke is removed):
 | --- | --- |
 | plugin loads and activates on stock opencode | formerly proven by a live smoke booting `opencode serve` and asserting `status == "active"` → `SMOKE OK` |
 | TUI half is real (panel, chip, commands) | the smoke asserted `features.tui` — set only when a `tui.tsx` entrypoint is present |
-| 14 bundled skills seeded into opencode's skill store | the smoke counted them against a live server |
+| 15 bundled skills seeded into opencode's skill store | the smoke counted them against a live server |
 | plugin is visible in the Plugins panel | the TUI panel filters on `features.tui`; the directory install ships both entrypoints |
 | memory remembers without being asked | `tests/test_memory_auto.py`: turns auto-capture durable facts + progress; 2-evidence lessons auto-promote to `MEMORY.md`; credentials refused |
 | dangerous commands ask, safe ones don't | `tests/test_risk.py`: 94 ask-rules generated from `harness/risk.py` (`git push`, `rm -rf`, `DROP TABLE`, deploys) — greps, diffs, fetches, tests never prompt |
 | RLM workers reach a terminal state | `tests/test_rlm.py`: `done\|error\|timeout\|stale`, delivered-once mailbox, `result.md`, pool sized by `budgets.max_parallel` |
 | entrypoints never break a boot | `tests/test_plugin.py` transpiles both files with `Bun.Transpiler`; bad `setup()` returns are pinned by tests |
-| the model's plan lands in the harness todo space | live: `opencode run "…call todowrite…"` → rows in `<project>/.opencode/harness/sessions.db` under the run's session id, painted by the panel off a real pty capture |
+| the model's plan lands in the harness todo space | verified on a real server: `opencode run "…call todowrite…"` → rows landed in `<project>/.opencode/harness/sessions.db` under the run's session id, painted by the panel off a real pty capture |
 | 203 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
 
 Latest release: **[`plugin-v0.10`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.10)**
@@ -51,14 +51,16 @@ install --from-release latest` → byte-identical assets → live smoke passed).
 Installed into `~/.config/opencode/plugins/harness/` and auto-loaded by
 opencode v2:
 
-- **Skills** — 14 bundled skills seeded into opencode's skill store
+- **Skills** — 15 bundled skills seeded into opencode's skill store
   (`ctx.skill.transform`): build ladder (incl. **ponytail**, MIT), review,
   audit, spec-driven development, security, and more.
-- **Native tools** — `skills_list`, `skill_view`, `memory_recall` registered
-  through `ctx.tool.transform` (no MCP hop), plus `todowrite`/`todoread` — the
-  plan tools opencode 2.x dropped — backed by the harness todo space
-  (`<project>/.opencode/harness/sessions.db` → `todos`), the same list the
-  sidebar reads and the compaction brief carries. `AGENTS.md` and three bundled
+- **Native tools** — `skills_list`, `skill_view`, `memory_recall`,
+  `todowrite`/`todoread`, `wait` registered through `ctx.tool.transform` (no
+  MCP hop): `todowrite`/`todoread` are the plan tools opencode 2.x dropped,
+  backed by the harness todo space (`<project>/.opencode/harness/sessions.db`
+  → `todos`) — the same list the sidebar reads and the compaction brief
+  carries; `wait` takes `{label, timeout_s, hint?}` and returns an expiry
+  nudge to check the task and act. `AGENTS.md` and three bundled
   skills (`planning-and-task-breakdown`, `incremental-implementation`,
   `using-agent-skills`) tell the agents to keep it current on evidence.
 - **Memory** — on compaction (`ctx.session.hook("compaction")`) a recalled
@@ -138,7 +140,7 @@ harness config get|set|show [--scope user|project]
 ```
 harness/plugin/     the plugin: server + TUI entrypoints (harness.ts, tui.tsx) — the product
 harness/            cli, orchestrator, memory, risk, rlm, store, compact, doctor, ...
-harness/data/skills bundled skills (14, incl. ponytail — MIT, see NOTICE.md)
+harness/data/skills bundled skills (15, incl. ponytail — MIT, see NOTICE.md)
 docs/               one page per feature (start at docs/quickstart.md, docs/plugin.md)
 scripts/            optional skill-pack installers
 .github/workflows/  ci.yml (tests) · release.yml (plugin-v* → assets)

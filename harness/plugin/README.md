@@ -43,7 +43,7 @@ v2. Everything is registered through `ctx`:
 | compaction brief | `ctx.session.hook("compaction", fn)` → append to `event.system` |
 
 Registered tools: `skills_list`, `skill_view`, `memory_recall`, `todowrite`,
-`todoread`. The last two are the plan tools opencode 2.x dropped; they persist
+`todoread`, `wait`. `todowrite`/`todoread` are the plan tools opencode 2.x dropped; they persist
 into the harness todo space (`<project>/.opencode/harness/sessions.db` → `todos`,
 keyed by the opencode session id), which is also what the sidebar's Todo row and
 the compaction brief read — and every `todowrite` is **mirrored into opencode's
@@ -52,6 +52,10 @@ so opencode's own storage holds the plan too. The mirror never creates a
 foreign database and never fails the tool call (see `mirrorOpencodeTodos`).
 `execute(input, context)` — `context.sessionID` is the
 active session, and a todo tool with no session answers instead of writing.
+`wait` takes `{label, timeout_s 1..600, hint?}`: it records a visible sidebar
+countdown (the sidebar's Waits row counts it down), sleeps until the deadline
+without blocking the server, removes the record, and returns an expiry nudge
+telling you to check the task's status and act on it.
 
 `input` is a JSON Schema; `execute(input, tool)` returns `{ content }`. Set
 `options.codemode: false` or the tool is Code-Mode-only (reachable as
@@ -69,7 +73,7 @@ no model pins: they inherit your opencode default model.
 | target | what harness contributes |
 | --- | --- |
 | `home.footer.status` | `harness · 12% ctx · $0.03 · 5.9m tok`, click toggles the sidebar (pressure first, lifetime total last). The chip carries `flexGrow=1 flexShrink=1 minWidth=0` on purpose: opencode renders its own **version** text right after this slot with `flexShrink 0`, so a non-shrinking chip would push it off-screen — the chip truncates instead, the version stays |
-| `sidebar.content` | the stats rows: Window / Tokens / Models / Todo / Workers / Skills / Agents / Memory, each click-to-expand (several at once). Todo/Workers/Memory hide when empty; any list past five rows ends with `… +N more` so counts always match their list |
+| `sidebar.content` | the stats rows: Window / Tokens / Models / Todo / Workers / Waits / Skills / Agents / Memory, each click-to-expand (several at once). Todo/Workers/Waits/Memory hide when empty (Waits appears/auto-expands while waits pend, hides when none); any list past five rows ends with `… +N more` so counts always match their list |
 | `sidebar.footer` | `harness · click a row` / `harness · N expanded` |
 | `app` | the `app` slot hosts the `ctx.keymap.layer` call (see below) |
 

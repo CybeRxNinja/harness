@@ -32,3 +32,19 @@ stock opencode behavior:
   for tool execution detail); view settings persist across restarts.
 - The sidebar's `reasoning N` line in the Window/Tokens detail shows how many
   reasoning tokens the last message used.
+
+## Waits
+
+The sidebar's `Waits` row sits after Workers and tracks pending `wait` tool
+calls (project-wide, like Workers — a countdown belongs to the project, not
+to the session that started it):
+
+- Appears and auto-expands while any wait pends; hides entirely when none
+  (a wait that appears or changes opens the row; when the last one clears,
+  the row leaves the expanded set too).
+- Value is occupancy (`1 waiting` / `N waiting`); each line is
+  `label · 2m14s left` — the wait's label plus remaining countdown
+  (`Ns` under a minute, `MmSSs` under an hour, `HhMMm` beyond; past-due
+  reads `due`).
+- Source: the `waits` table (`label` + `deadline`) in the project's
+  `sessions.db`, soonest deadline first.
