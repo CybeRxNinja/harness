@@ -271,12 +271,17 @@ function asArray(listed: any): Rec[] {
   return []
 }
 
-/** Resolve `undefined` after `ms` — used to time-box a promise that may block. */
-function settle(p: any, ms: number): Promise<void> {
+/**
+ * Time-box a promise that may block: `true` when it settled in time, `false`
+ * when the time-box won (the slow path keeps running in the background — the
+ * caller just stops waiting). A rejection counts as settled: it finished, it
+ * just failed. Callers that only need the wait to end ignore the value.
+ */
+function settle(p: any, ms: number): Promise<boolean> {
   return Promise.race([
-    Promise.resolve(p).catch(() => {}),
-    new Promise<void>((resolve) => setTimeout(resolve, ms)),
-  ]).then(() => {})
+    Promise.resolve(p).then(() => true).catch(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
+  ])
 }
 
 /**
@@ -547,6 +552,22 @@ const HarnessTui = {
     }
 
     let scanned = false
+    /**
+     * Slow-scan attempts so far. A cold location store answers empty on the
+     * first pass and fills on the next, so one empty pass must not latch
+     * `scanned` (see load) — but a setup with genuinely no skills must still
+     * settle, so the re-attempts stop after SLOW_MAX_TRIES passes.
+     */
+    let slowTries = 0
+    const SLOW_MAX_TRIES = 5
+    /**
+     * Verdict of the last slow pass: did all four store syncs beat the
+     * time-box? Written by scanSlow itself (see below) — the outer settle()
+     * around it maps ANY settlement to true, so its answer cannot gate the
+     * latch: when a pass times out exactly on the time-box edge, the outer
+     * race can resolve first and report success for a scan that failed.
+     */
+    let slowOk = false
 
     /**
      * The slow half of a scan: the lazily-synced location stores
@@ -561,11 +582,18 @@ const HarnessTui = {
      * Every sync is individually time-boxed: one unreachable provider registry
      * must not strand the whole panel on its placeholder.
      */
-    const scanSlow = async (loc: any, data_: Rec): Promise<void> => {
+    const scanSlow = async (loc: any, data_: Rec): Promise<boolean> => {
       const store = data_?.location
+      // Fresh verdict first (this prefix runs synchronously, so a pass that
+      // never finishes still leaves slowOk false — see the declaration).
+      slowOk = false
 
       // Location stores ARE lazy: they need sync first or list() is empty.
-      await Promise.all([
+      // Each sync reports whether it beat the time-box: one unreachable
+      // provider registry must not strand the whole panel on its
+      // placeholder, and a pass whose syncs never landed must not latch
+      // `scanned` either (see load).
+      const synced = await Promise.all([
         settle(store?.model?.sync?.(loc), SCAN_MS),
         settle(store?.provider?.sync?.(loc), SCAN_MS),
         settle(store?.agent?.sync?.(loc), SCAN_MS),
@@ -593,6 +621,11 @@ const HarnessTui = {
       data.skills = asArray(store?.skill?.list?.(loc))
         .map((s: Rec) => String(s?.id ?? s?.name ?? ""))
         .filter((s: string) => s.startsWith(HARNESS_PREFIX))
+      // The verdict travels on slowOk, not the return: the outer settle()
+      // maps even a `false` return to true (see load), so load must not read
+      // this call's answer from the race.
+      slowOk = synced.every(Boolean)
+      return slowOk
     }
 
     /**
@@ -739,10 +772,22 @@ const HarnessTui = {
         }
 
         // Slow sources only when they can have changed: session change, first
-        // load, or an explicit refresh (see scanSlow).
+        // load, or an explicit refresh (see scanSlow). Unlatched polls
+        // re-enter too, so a cold first pass gets a second chance.
         if (full || !scanned) {
+          // The outer time-box is a hang-guard only — its answer is ignored
+          // on purpose (see slowOk): it reports true for any settlement,
+          // including a pass that timed out exactly on the edge.
           await settle(scanSlow(loc, data_), SCAN_MS)
-          scanned = true
+          // A cold store answers empty on the first pass and fills on the
+          // next: latching on that first pass froze the panel at "0 skills"
+          // forever, because the 8s poll never re-ran the slow half. Latch
+          // only on a pass whose syncs landed AND showed something — or
+          // after SLOW_MAX_TRIES passes, so a setup with genuinely no
+          // skills still settles instead of syncing forever.
+          slowTries += 1
+          const populated = data.skills.length > 0 || data.agents.length > 0
+          if (slowOk && (populated || slowTries >= SLOW_MAX_TRIES)) scanned = true
         }
         // Cheap, and only correct AFTER the message store has filled — so it
         // runs on every pass, not on the slow half.
@@ -819,6 +864,10 @@ const HarnessTui = {
           // facts never reached the view state before this — header and Memory
           // printed 0 even with facts on disk.
           d.facts = data.factsCount
+          // Whether the slow location stores have settled: the Skills rows
+          // read it to print "syncing…" while cold instead of the settled
+          // "none seeded" line.
+          d.scanned = scanned
           // A todo list that appears or changes opens its own row: the list is
           // the point of the section, and a collapsed "3 items" hides the plan
           // the model is following. A manual collapse sticks until the list
@@ -863,6 +912,10 @@ const HarnessTui = {
       const next = String(sid ?? "")
       if (!next || next === sessionID) return
       sessionID = next
+      // A new session can mean a new project directory with cold stores
+      // again: the slow half must re-prove itself, not inherit the latch.
+      scanned = false
+      slowTries = 0
       void load(true) // a new session invalidates every slow source
     }
 
@@ -1200,6 +1253,10 @@ const HarnessTui = {
                   value={() => `${view.skills ?? 0} installed`}
                   lines={() => {
                     void view.rev
+                    // Cold stores answer empty on the first pass: while the
+                    // slow half has not latched, say syncing instead of the
+                    // settled "none seeded" line below.
+                    if (!data.skills.length && !view.scanned) return ["syncing…"]
                     return data.skills.map((s) => `▪ ${shortSkill(s)}`)
                   }}
                   empty="(none seeded at this location)"
