@@ -33,7 +33,7 @@ harness tui --setup-only  # prep only, then run `opencode` yourself
 
 ## What the plugin does
 
-All four are registered through the v2 plugin context from `setup(ctx)`:
+All five are registered through the v2 plugin context from `setup(ctx)`:
 
 1. **Skill seeding** — `ctx.skill.transform` registers the bundled skills
    (`harness/data/skills/<category>/<name>/SKILL.md`) into opencode's skill store
@@ -53,6 +53,9 @@ All four are registered through the v2 plugin context from `setup(ctx)`:
    project facts locally and appends them, together with the session's still-open
    todos, to the summarization request — so a plan that only lived in the
    transcript is not what a compaction destroys.
+5. **Auto-memory** — the `ctx.session.hook("context")` hook persists durable
+   facts + progress notes from live turns (which never run through the Python
+   loop), deduped per assistant message; never throws into generation.
 
 The loader only accepts a default-exported object with a string `id` plus an
 `effect` or `setup` function, and `setup` must return a cleanup function or

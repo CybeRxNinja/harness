@@ -549,6 +549,25 @@ def test_plugin_files_exist():
     assert not re.search(r"^\s*import\s+(type\s+)?[{\*\w]", tui, re.M), "TUI plugin must not use static imports"
 
 
+def test_plugin_auto_memory_context_hook_registered():
+    """Live sessions never run through the Python loop, so durable facts need
+    the session `context` hook: it fires before each generation with the full
+    message history, and the previous assistant message is always visible.
+    The hook must be registered alongside the compaction brief, in its own
+    guard block so a host that rejects `context` loses only auto-memory."""
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[0]).read_text()
+    assert 'ctx.session.hook("compaction"' in text
+    assert 'ctx.session.hook("context"' in text, "auto-memory capture needs the session context hook"
+    assert text.count('await ctx.session.hook(') == 2, "compaction brief + auto-memory, nothing else"
+    assert "captureMemory(" in text, "the context hook must capture into the state DB"
+    # independent degrade: a host that accepts compaction but rejects context
+    # loses only auto-memory, never the brief (and never activation)
+    assert "compaction hook failed" in text
+    assert "auto-memory hook failed" in text
+    assert "auto-memory capture failed" in text, "a capture throw must never break generation"
+
+
 def test_tui_plugin_is_a_sidebar_panel_not_a_layout_change():
     """The TUI entrypoint fills opencode's EXISTING sidebar with the stats panel.
 
@@ -989,9 +1008,9 @@ def test_plugin_features(tmp_path):
     # not depend on the lost API still register, one bad editor.add does not
     # sink the other tools, and a drifted DB schema degrades to an answer.
     assert out["degradeNoSkillTransform"] is True
-    assert out["degradeNoSkillTransformTools"] == 6 and out["degradeNoSkillTransformHooks"] == 2
+    assert out["degradeNoSkillTransformTools"] == 6 and out["degradeNoSkillTransformHooks"] == 3
     assert out["degradeNoToolTransform"] is True
-    assert out["degradeNoToolTransformSeeds"] >= 11 and out["degradeNoToolTransformHooks"] == 2
+    assert out["degradeNoToolTransformSeeds"] >= 11 and out["degradeNoToolTransformHooks"] == 3
     assert out["degradeNoToolHook"] is True
     assert out["degradeNoToolHookTools"] == 6 and out["degradeNoToolHookCondense"] is False
     assert out["degradeNoSessionHook"] is True
@@ -1015,7 +1034,7 @@ def test_plugin_setup_registers_through_ctx(tmp_path):
 
     assert out["id"] == "harness"
     assert out["returned"] is None, "setup must not return a hooks object"
-    assert out["hooks"] == ["tool:execute.after", "session:compaction"]
+    assert out["hooks"] == ["tool:execute.after", "session:compaction", "session:context"]
     assert [t["name"] for t in out["tools"]] == ["skills_list", "skill_view", "memory_recall", "todowrite", "todoread", "wait"]
     for t in out["tools"]:
         assert t["input"] == "object" and t["execute"] == "function"

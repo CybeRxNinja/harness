@@ -192,12 +192,13 @@ def test_capture_turn_still_notes_progress_for_an_ordinary_turn(con, root, cfg):
 def test_prune_drops_notes_but_keeps_progress_and_lessons(con):
     from harness import memory as M
     old = int(time.time()) - 90 * 86400
-    con.execute("INSERT INTO facts(text,source,ts) VALUES(?,?,?)", ("an old note", "turn", old))
+    con.execute("INSERT INTO facts(text,source,ts) VALUES(?,?,?)", ("an old note", "chat", old))
+    con.execute("INSERT INTO facts(text,source,ts) VALUES(?,?,?)", ("an old turn", "turn", old))
     con.execute("INSERT INTO facts(text,source,ts) VALUES(?,?,?)", ("an old done", "done", old))
     con.execute("INSERT INTO facts(text,source,ts) VALUES(?,?,?)", ("an old lesson", "lesson", old))
     assert M.prune(con, 30) == 1
     left = {f["text"] for f in M.recent(con, 10)}
-    assert "an old note" not in left and {"an old done", "an old lesson"} <= left
+    assert "an old note" not in left and {"an old turn", "an old done", "an old lesson"} <= left
 
 
 # --- lessons: evidence-gated promotion --------------------------------------

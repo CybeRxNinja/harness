@@ -24,6 +24,9 @@
 //      a visible countdown sleep backed by the `waits` table the sidebar reads.
 //   3. output condensing  ctx.tool.hook("execute.after", fn)
 //   4. compaction brief   ctx.session.hook("compaction", fn)
+//   5. auto-memory        ctx.session.hook("context", fn) — durable facts +
+//      progress notes from live turns (the Python loop path is not what live
+//      opencode sessions run through, so nothing else ever stores them)
 //
 // Provider / agents are NOT duplicated here: they come from opencode.json.
 
@@ -425,6 +428,276 @@ async function recallFacts(query: string, projectDir: string): Promise<string> {
   return ""
 }
 
+// ---------------------------------------------------------------------------
+// 5. Auto-memory: live turns persist durable facts with zero model effort.
+//
+// The Python loop path (run_turn -> capture_turn in harness/memory.py) is
+// healthy, but live opencode sessions never run through it — the plugin only
+// ever READ facts (memory_recall, compaction brief), so nothing was stored
+// and recall + the Memory panel sat on stale mock junk.
+//
+// There is NO post-turn hook in opencode 2.x to hang this on. Evidence: the
+// server binary's hook-name literals are compaction|context|generate|title|
+// model.request|http.request|http.response|execute.before|after|sdk|language
+// (+ experimental.ws.handshake) — none fires after a turn carrying its text —
+// and ctx.event.subscribe needs the Effect runtime this import-free file
+// cannot use. The session "context" hook is the closest automatic point: it
+// fires before each generation with the full message history ({sessionID,
+// agent, messages} — the same payload the plan-mode plugin splices reminders
+// into), so the previous assistant message is always visible. Two honest
+// costs of that placement: the turn's FINAL message is captured on the NEXT
+// context build (next turn, or compaction), and progress granularity is
+// per-assistant-message deduped by text, not per-turn. The Python loop still
+// owns exact per-turn done/blocked marking — that needs a verified signal
+// (a test run that actually came back clean) this hook cannot see, so notes
+// written here are always `progress`, never `done`.
+//
+// Row parity with harness/memory.py (same facts(text,source,ts-seconds)
+// shape the TUI humanizer and recall already parse — no new schema):
+// durable lines go in with source "turn" (what remember() writes), progress
+// notes as `progress [ses]: headline` with source "progress" (what
+// progress() writes), with _is_junk_turn parity (empty, or a mock echo next
+// to real facts, gets no note), secret refusal, dupe check and the
+// writer-side fact cap ("cap by the writer, retention by prune()").
+// Opt-out: memory.enabled=false in <project>/.opencode/harness.jsonc or the
+// user harness.jsonc (fail-open; no parent-dir walk-up — one line below says
+// so). The title/compaction plumbing agents generate no user-visible turns
+// and are skipped. Never throws into generation; a host without session
+// hooks just loses auto-memory, same degrade rule as the other hooks.
+// ---------------------------------------------------------------------------
+
+const MEM_MAX_FACT_LEN = 1000
+const MEM_HEADLINE_LIMIT = 160
+const MEM_LINES_PER_MSG = 3
+const MEM_SEEN_PER_SESSION = 200
+const MEM_DEFAULT_MAX_FACTS = 2000
+
+/** Same durable-line vocabulary as IMPORTANT_MARKERS in harness/memory.py. */
+const MEM_MARKERS = [
+  "decision:", "decided", "root cause", "fixed:", "fix:", "fixed ", "added:",
+  "verified:", "verified ", "lesson:", "migration", "breaking", "blocked",
+  "blocker:", "next step", "todo:", "note:", "important:", "gotcha",
+  "remember:", "constraint:", "requirement:", "must ", "never ", "always ",
+]
+const MEM_OUTCOME =
+  /\b(passed|failing|failed|regression|tests? (pass|fail)|reproduced|timeout|permission denied|not found|traceback)\b/i
+/** Same credential shapes as SECRET_RES in harness/memory.py. */
+const MEM_SECRETS = [
+  /\b(sk|xoxb|ghp|gho|aiza|AKIA)[-_A-Za-z0-9]{12,}/,
+  /\b(api[_-]?key|password|passwd|secret|token)\b\s*[:=]\s*\S{8,}/i,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/,
+]
+
+/** One-line form for storage and duplicate detection (mirrors normalize()). */
+function memNormalize(text: unknown): string {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim()
+  return t.replace(/^(?:[-*•]\s+|\d+[.)]\s+)/, "")
+}
+
+function memSecret(text: string): boolean {
+  return MEM_SECRETS.some((r) => r.test(text))
+}
+
+/** The durable lines of one assistant message (mirrors important_lines()). */
+function memImportantLines(text: string, limit = MEM_LINES_PER_MSG): string[] {
+  const out: string[] = []
+  let fenced = false
+  for (const raw of String(text ?? "").split("\n")) {
+    const stripped = raw.trim()
+    if (stripped.startsWith("```") || stripped.startsWith("~~~")) {
+      fenced = !fenced
+      continue
+    }
+    if (fenced) continue
+    const line = memNormalize(raw)
+    if (line.length < 20 || line.length > 400) continue
+    if (/^[|+>$/#!]/.test(line) || line.startsWith("/")) continue
+    if (/^(\.\.\.|\d+\s*[|:])/.test(line)) continue
+    const low = line.toLowerCase()
+    if (!(MEM_MARKERS.some((m) => low.startsWith(m) || low.includes(` ${m}`)) || MEM_OUTCOME.test(line))) continue
+    if (!out.includes(line)) out.push(line)
+  }
+  return out.slice(0, limit)
+}
+
+/** One-line summary of a message, for the progress note (mirrors headline()). */
+function memHeadline(text: string, limit = MEM_HEADLINE_LIMIT): string {
+  for (const raw of String(text ?? "").split("\n")) {
+    const line = memNormalize(raw)
+    if (line.length >= 8) return line.slice(0, limit)
+  }
+  return ""
+}
+
+/** True when a message deserves no progress note (mirrors _is_junk_turn()). */
+function memIsJunk(headlineText: string, hasFacts = false): boolean {
+  const h = memNormalize(headlineText)
+  return !h || (h.startsWith("[mock:") && hasFacts)
+}
+
+/** Assistant text out of a session message, tolerating both known shapes
+ * ({role, content} and {info, parts}; content/parts as text parts, strings,
+ * or one string). Unknown shapes yield "" rather than a throw. */
+function memMessageText(m: Rec): string {
+  try {
+    const parts = Array.isArray(m?.content) ? m.content : Array.isArray(m?.parts) ? m.parts : null
+    if (parts) {
+      return parts
+        .map((p: any) => (typeof p === "string" ? p : p?.type === "text" && typeof p?.text === "string" ? p.text : ""))
+        .join("\n")
+    }
+    if (typeof m?.content === "string") return m.content
+    if (typeof m?.text === "string") return m.text
+  } catch {
+    /* malformed message */
+  }
+  return ""
+}
+
+function memAssistantTexts(messages: any): string[] {
+  if (!Array.isArray(messages)) return []
+  const out: string[] = []
+  for (const m of messages) {
+    const role = String(m?.role ?? m?.info?.role ?? "")
+    if (role !== "assistant") continue
+    const t = memMessageText(m)
+    if (t && memNormalize(t)) out.push(t)
+  }
+  return out
+}
+
+/**
+ * The memory block of the config layer, read cheaply: project
+ * <root>/.opencode/harness.jsonc (project_config_file in harness/paths.py)
+ * then the user file ($HARNESS_HOME, else ~/.harness). Comment lines are
+ * stripped with the same (^|\\s)// rule the Python loader uses; only
+ * enabled/max_facts are picked out, so a half-written file cannot break
+ * anything. Fail-open: unreadable means enabled with defaults. No walk-up
+ * to parent project dirs — the one place this is cheaper than load_config.
+ */
+async function memoryConfig(projectDir: string): Promise<{ enabled: boolean; maxFacts: number }> {
+  let enabled = true
+  let maxFacts = MEM_DEFAULT_MAX_FACTS
+  const candidates = [
+    `${projectDir}/.opencode/harness.jsonc`,
+    `${process.env.HARNESS_HOME || `${process.env.HOME}/.harness`}/harness.jsonc`,
+  ]
+  for (const file of candidates) {
+    let raw = ""
+    try {
+      if (!(await Bun.file(file).exists())) continue
+      raw = await Bun.file(file).text()
+    } catch {
+      continue
+    }
+    const code = raw
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|\s)\/\/.*$/gm, "$1")
+    const mem = code.match(/"memory"\s*:\s*\{([^}]*)\}/)?.[1] ?? ""
+    if (/"enabled"\s*:\s*false/.test(mem)) enabled = false
+    const cap = mem.match(/"max_facts"\s*:\s*(-?\d+)/)?.[1]
+    if (cap !== undefined) {
+      const n = parseInt(cap, 10)
+      if (Number.isFinite(n)) maxFacts = n
+    }
+  }
+  return { enabled, maxFacts }
+}
+
+/** Read-write open of the project state DB, creating the facts table in the
+ * store.py shape when this project has never run the harness CLI (the same
+ * create-on-write precedent as the todos table). Null when unusable. */
+async function memDb(projectDir: string): Promise<any> {
+  try {
+    const { Database } = await import("bun:sqlite").catch(() => ({}) as any)
+    if (!Database) return null
+    const { mkdirSync } = await import("node:fs")
+    mkdirSync(`${projectDir}/.opencode/harness`, { recursive: true })
+    const db = new Database(stateDb(projectDir))
+    db.run("PRAGMA busy_timeout=3000")
+    db.run("CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, source TEXT, ts INTEGER)")
+    return db
+  } catch {
+    return null
+  }
+}
+
+/** Store one durable fact (mirrors save_fact(): length floor, secret
+ * refusal on both forms, case-insensitive dupe check, writer-side cap). */
+function memSaveFact(db: any, text: string, source: string, maxFacts: number): number {
+  try {
+    const norm = memNormalize(text).slice(0, MEM_MAX_FACT_LEN)
+    if (norm.length < 8 || memSecret(norm) || memSecret(String(text ?? ""))) return 0
+    const dupe = db.query("SELECT 1 FROM facts WHERE lower(text)=lower(?) LIMIT 1").get(norm) as any
+    if (dupe) return 0
+    db.run("INSERT INTO facts(text,source,ts) VALUES(?,?,?)", norm, source, Math.floor(Date.now() / 1000))
+    const id = Number(db.query("SELECT last_insert_rowid() AS id").get()?.id ?? 0)
+    if (maxFacts > 0) {
+      const n = Number((db.query("SELECT COUNT(*) AS n FROM facts").get() as any)?.n ?? 0)
+      if (n > maxFacts) {
+        db.run("DELETE FROM facts WHERE id NOT IN (SELECT id FROM facts ORDER BY id DESC LIMIT ?)", maxFacts)
+      }
+    }
+    return id || 0
+  } catch {
+    return 0
+  }
+}
+
+/** Texts of this session already captured (in-process cursor: the hook fires
+ * once per generation, often with the same history twice). Survives nothing
+ * by design — the DB dupe check is the cross-restart backstop. */
+const memSeen = new Map<string, string[]>()
+
+/**
+ * Capture one context-hook firing into the state DB: durable lines of each
+ * new assistant message (source "turn") plus one progress note from the
+ * newest message's headline. Best-effort and silent: never throws.
+ */
+async function captureMemory(projectDir: string, sessionID: string, agent: unknown, messages: any): Promise<void> {
+  if (!sessionID || !Array.isArray(messages) || !messages.length) return
+  if (/^(title|compaction)$/i.test(String(agent ?? ""))) return
+  const cfg = await memoryConfig(projectDir)
+  if (!cfg.enabled) return
+  const texts = memAssistantTexts(messages)
+  if (!texts.length) return
+  let seen = memSeen.get(sessionID)
+  if (!seen) {
+    seen = []
+    memSeen.set(sessionID, seen)
+  }
+  const fresh = texts.filter((t) => {
+    const n = memNormalize(t)
+    return n !== "" && !seen.includes(n)
+  })
+  if (!fresh.length) return
+  for (const t of fresh) {
+    seen.push(memNormalize(t))
+    while (seen.length > MEM_SEEN_PER_SESSION) seen.shift()
+  }
+  const db = await memDb(projectDir)
+  if (!db) return
+  try {
+    let hasFacts = false
+    for (const t of fresh) {
+      for (const line of memImportantLines(t)) {
+        if (memSaveFact(db, line, "turn", cfg.maxFacts)) hasFacts = true
+      }
+    }
+    const head = memHeadline(fresh[fresh.length - 1])
+    if (!memIsJunk(head, hasFacts)) {
+      memSaveFact(db, `progress [${sessionID.slice(0, 24)}]: ${head}`.slice(0, MEM_MAX_FACT_LEN), "progress", cfg.maxFacts)
+    }
+  } finally {
+    try {
+      db.close()
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
 function condenseText(raw: string): string {
   const lines = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").split("\n")
   const kept: string[] = []
@@ -731,6 +1004,25 @@ const HarnessPlugin = {
       })
     } catch (e) {
       log(`compaction hook failed: ${short(e)}`)
+    }
+
+    // 5. Auto-memory on the session "context" hook (see the section above for
+    //    why this hook: no post-turn hook exists in opencode 2.x). Own guard
+    //    block so a host that accepts "compaction" but rejects "context"
+    //    loses only auto-memory, never the brief.
+    try {
+      // guarded: a host without session hooks just loses auto-memory, not activation
+      if (typeof ctx?.session?.hook !== "function") throw new Error("ctx.session.hook unavailable")
+      await ctx.session.hook("context", async (event: Rec) => {
+        try {
+          await captureMemory(directory, String(event?.sessionID ?? ""), event?.agent, event?.messages)
+        } catch (e) {
+          // never break generation, but never fail silently either
+          log(`auto-memory capture failed: ${short(e)}`)
+        }
+      })
+    } catch (e) {
+      log(`auto-memory hook failed: ${short(e)}`)
     }
 
     // Nothing returned on purpose: a returned non-function value is treated as

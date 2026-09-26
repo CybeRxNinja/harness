@@ -381,7 +381,7 @@ def prune(con, retention_days: int = 30) -> int:
 
     Notes decay; why-decisions and where-the-work-got-to do not.
     """
-    keep = ("lesson", "decision", "done", "blocked", "progress")
+    keep = ("lesson", "decision", "done", "blocked", "progress", "turn", "agent")
     cutoff = int(time.time()) - int(retention_days) * 86400
     try:
         cur = con.execute(
