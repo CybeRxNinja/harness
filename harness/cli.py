@@ -315,7 +315,16 @@ def ensure_opencode_config() -> str:
         if not isinstance(_perm, dict):
             continue
         _bash = _perm.get("bash")
-        if isinstance(_bash, str):
+        if "bash" not in _perm:
+            # Shipped JSON carries no bash value and the anchor merge above
+            # only fills keys the JSON ships, so a fresh install (or an old
+            # config that never gained one) leaves the agent with no `shell`
+            # tool and zen's free-tier gate 403s it. Only the missing key is
+            # filled: a bash dict the owner wrote (no harness anchor, below)
+            # is never touched.
+            _perm["bash"] = _risk.bash_permission_map()
+            migrated.append(f"{_name}: bash missing -> generated (shell tool advertised; safe commands run, destructive ones ask)")
+        elif isinstance(_bash, str):
             _perm["bash"] = _risk.bash_permission_map()
             migrated.append(f"{_name}: bash {_bash} -> generated (safe commands run, destructive ones ask)")
         elif isinstance(_bash, dict):

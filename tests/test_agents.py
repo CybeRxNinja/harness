@@ -306,3 +306,31 @@ def test_a_stale_generated_bash_map_is_refreshed_but_a_user_map_stays(tmp_path, 
     assert cur.get("pip install *") == "ask", "new rules must reach old installs"
     # a user's own permission object has no harness anchor and is never touched
     assert d["agent"]["mine"]["permission"]["bash"] == {"*": "deny"}
+
+
+def test_missing_bash_key_gains_generated_map_but_owner_dict_untouched(tmp_path, monkeypatch):
+    """A harness agent whose permission block has NO bash key (fresh installs:
+    the shipped JSON carries no bash value and the anchor merge only fills
+    shipped keys) would lose opencode's `shell` tool and trip zen's free-tier
+    403. The merge must fill exactly the missing key with the generated risk
+    map — shell advertised, edit:deny preserved — while an owner-written bash
+    dict stays byte-identical."""
+    import json
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg5"))
+    from harness import risk
+    from harness.cli import _opencode_config_path, ensure_opencode_config
+    dest = _opencode_config_path()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    owner_bash = {"*": "deny", "git status *": "allow"}
+    dest.write_text(json.dumps({"agent": {
+        "ask": {"permission": {"edit": "deny", "task": "deny"}},
+        "mine": {"description": "my own agent",
+                 "permission": {"edit": "deny", "bash": dict(owner_bash)}},
+    }}))
+    ensure_opencode_config()
+    d = json.loads(dest.read_text())
+    bash = d["agent"]["ask"]["permission"]["bash"]
+    assert bash == risk.bash_permission_map(), "missing key gains exactly the generated map"
+    assert bash["*"] == "allow", "shell tool advertised, no zen 403"
+    assert d["agent"]["ask"]["permission"]["edit"] == "deny", "read-only floor survives"
+    assert d["agent"]["mine"]["permission"]["bash"] == owner_bash, "owner dict byte-identical"
