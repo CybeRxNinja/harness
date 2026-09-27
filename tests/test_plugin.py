@@ -607,6 +607,35 @@ def test_plugin_lesson_loop_needs_two_distinct_excerpts():
     assert "if (memSecret(line)) continue" in text
 
 
+def test_plugin_generic_lessons_stage_but_never_auto_promote():
+    """Status chatter must never become a lesson on its own.
+
+    Ordinary progress lines stage under generic buckets (outcome/lesson/note/
+    todo/fixed/verified/added, or anything shorter than 4 chars such as fix):
+    promoting those at 2 excerpts filled MEMORY.md with noise. The stoplist +
+    memPromotable gate keeps such rows staged for manual memory approve (never
+    promoted, never consumed), while specific buckets still promote at >=2
+    distinct excerpts through the unchanged evidence path.
+    """
+    srv = _srv_text()
+    assert 'const MEM_GENERIC_LESSONS = ["outcome", "lesson", "note", "todo", "fixed", "verified", "added"]' in srv
+    assert "function memPromotable(name: string): boolean" in srv
+    prom = srv[srv.index("function memPromotable"):srv.index("function memStageLesson")]
+    assert "trim().toLowerCase()" in prom
+    assert "n.length >= 4" in prom
+    assert "!MEM_GENERIC_LESSONS.includes(n)" in prom
+    generic_line = srv[srv.index("const MEM_GENERIC_LESSONS"):srv.index("const MEM_GENERIC_LESSONS") + 200]
+    for specific in ("decision", "root cause", "migration", "blocker", "gotcha"):
+        assert specific not in generic_line, specific
+    body = srv[srv.index("async function memAutoRefine"):srv.index("async function captureLessons")]
+    assert "if (!memPromotable(name)) continue" in body
+    guard = body.index("if (!memPromotable(name)) continue")
+    assert guard < body.index("const ev = memEvidence(db, name)")
+    assert guard < body.index("DELETE FROM pending WHERE kind=")
+    assert guard < body.index("ev.length < Math.max(2, minEvidence)")
+    assert "memAddLesson(memoryPath, name, text, capLines)" in body
+
+
 def test_plugin_condense_keeps_error_lines_and_budgets_by_command():
     """Oversized success output shrinks through filler-strip plus per-command
     head/tail budgets — but mid-window ERROR_LINEs are hoisted into the elided

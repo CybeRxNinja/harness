@@ -605,6 +605,11 @@ const MEM_MARKERS = [
 ]
 const MEM_OUTCOME =
   /\b(passed|failing|failed|regression|tests? (pass|fail)|reproduced|timeout|permission denied|not found|traceback)\b/i
+/** Buckets that stage for manual `memory approve` but NEVER auto-promote:
+ * status-report verbs that appear in ordinary progress chatter (a release note
+ * saying "fixed …" or "verified …" is not a lesson). Anything shorter than 4
+ * chars (e.g. the "fix" bucket) is generic too — see memPromotable. */
+const MEM_GENERIC_LESSONS = ["outcome", "lesson", "note", "todo", "fixed", "verified", "added"]
 /** Same credential shapes as SECRET_RES in harness/memory.py. */
 const MEM_SECRETS = [
   /\b(sk|xoxb|ghp|gho|aiza|AKIA)[-_A-Za-z0-9]{12,}/,
@@ -934,6 +939,17 @@ function memLessonName(line: string): string {
   return "outcome"
 }
 
+/**
+ * True when a bucket may auto-promote at >=2 distinct excerpts. Generic
+ * buckets (the MEM_GENERIC_LESSONS stoplist, or anything shorter than 4
+ * chars) still stage — the manual `memory approve` path reads them — but
+ * status chatter must never become a "lesson" on its own.
+ */
+function memPromotable(name: string): boolean {
+  const n = String(name ?? "").trim().toLowerCase()
+  return n.length >= 4 && !MEM_GENERIC_LESSONS.includes(n)
+}
+
 /** Stage one evidence excerpt (mirrors stage_lesson(): no dedupe here —
 // distinctness is the promotion gate, computed in memEvidence). */
 function memStageLesson(db: any, name: string, excerpt: string, gist: string): number {
@@ -1015,6 +1031,9 @@ async function memAutoRefine(db: any, memoryPath: string, capLines: number, minE
     const vals = (Array.isArray(r) ? r : Object.values(r ?? {})) as any[]
     const name = String(vals[0] ?? "")
     if (!name) continue
+    // Generic buckets stage for manual `memory approve` but never auto-promote:
+    // their rows stay pending (not consumed) so a human can still review them.
+    if (!memPromotable(name)) continue
     const ev = memEvidence(db, name)
     if (ev.length < Math.max(2, minEvidence)) continue
     let gist = name
