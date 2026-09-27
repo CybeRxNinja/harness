@@ -56,6 +56,9 @@ const ctx: any = {
     },
     hook: async (name: string, fn: any) => {
       hooks.push(`tool:${name}`)
+      // condense probes target the execute.after hook only: execute.before
+      // tracks worker rows and must not see tool-result shapes
+      if (name !== "execute.after") return
       const big = Array.from({ length: 400 }, (_, i) => `line ${i % 2} ${"x".repeat(40)}`)
       const ok = { status: "completed", result: { content: [{ type: "text", text: big.join("\n") }] } }
       await fn(ok)
@@ -568,6 +571,115 @@ def test_plugin_auto_memory_context_hook_registered():
     assert "auto-memory capture failed" in text, "a capture throw must never break generation"
 
 
+def test_plugin_history_feed_uses_high_water_mark():
+    """Live sessions never run through the headless writer, so the session
+    `context` hook (which already sees the full message history) appends only
+    the unseen tail into messages/messages_fts with the same 20k/8k
+    truncation — tracked by a persistent per-session high-water-mark
+    (context_mark) so a restart does not re-append everything. A rewritten
+    (shorter) history re-baselines from zero so a compaction summary still
+    gets captured."""
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[0]).read_text()
+    assert "async function captureHistory" in text
+    assert "messages_fts" in text and "HIST_MAX_CONTENT" in text and "HIST_MAX_FTS" in text
+    assert "SELECT seen FROM context_mark WHERE session = ?" in text
+    assert "INSERT OR REPLACE INTO context_mark(session,seen) VALUES(?,?)" in text
+    assert "if (start > messages.length) start = 0" in text
+    assert "await captureHistory(db, sessionID, messages)" in text
+
+
+def test_plugin_lesson_loop_needs_two_distinct_excerpts():
+    """Each durable assistant line stages one evidence excerpt into `pending`;
+    a lesson promotes into the project's MEMORY.md only at >=2 DISTINCT
+    excerpts (the same line staged twice is one piece of evidence, not two).
+    Staged rows are consumed on promotion; mock echoes and secrets never
+    stage; the entry keeps the writer's cap/dupe/secret guarantees."""
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[0]).read_text()
+    assert "function memStageLesson" in text and "async function memAutoRefine" in text
+    assert "MEM_MIN_EVIDENCE = 2" in text
+    assert "ev.length < Math.max(2, minEvidence)" in text
+    assert "SELECT diff FROM pending WHERE kind='lesson'" in text
+    assert "DELETE FROM pending WHERE kind='lesson' AND name=?" in text
+    assert "`${projectDir}/MEMORY.md`" in text
+    assert "if (memNormalize(memHeadline(t)).startsWith(\"[mock:\")) continue" in text
+    assert "if (memSecret(line)) continue" in text
+
+
+def test_plugin_condense_keeps_error_lines_and_budgets_by_command():
+    """Oversized success output shrinks through filler-strip plus per-command
+    head/tail budgets — but mid-window ERROR_LINEs are hoisted into the elided
+    output instead of being cut, and error-status results (or bodies that
+    already contain an error line) pass through untouched."""
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[0]).read_text()
+    assert "function stripFillers" in text and "function condenseBudget" in text
+    assert "CONDENSE_BUDGETS" in text and "CONDENSE_DEFAULT" in text
+    assert "const sacred = mid.filter((ln) => ERROR_LINE.test(ln))" in text
+    assert "if (!event || event.status === \"error\") return" in text
+    assert "if (ERROR_LINE.test(part.text)) continue" in text
+
+
+def test_plugin_worker_rows_track_subagent_calls():
+    """Every model tool call runs through the one Tool.execute dispatch, so
+    `execute.before` on a subagent call INSERTs the queued worker row and the
+    same call's `execute.after` marks it done/error. Both tool names match
+    (live `subagent` plus the legacy `task` alias); only queued/running rows
+    transition so a terminal row is never clobbered; the before hook has its
+    own guard block so losing it costs only the queued rows, never condensing.
+    """
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[0]).read_text()
+    assert 'await ctx.tool.hook("execute.before"' in text
+    assert 'new Set(["subagent", "task"])' in text
+    assert "async function workerStarted" in text and "async function workerFinished" in text
+    assert "INSERT OR IGNORE INTO workers(id,session,name,category,model,status,cost,updated)" in text
+    assert "UPDATE workers SET status=?, updated=? WHERE id=? AND status IN ('queued','running')" in text
+    assert "worker hook failed" in text
+
+
+def _srv_text():
+    """Read the server entrypoint under test.
+
+    HARNESS_SRV_PATH overrides the path so the fusion tests can run
+    unmodified against a pristine copy (e.g. `git show HEAD:` output staged
+    in .opencode/harness/tmp/) for failing-first proof; the product tree is
+    never touched. Mirrors test_tui.py's _tui_text().
+    """
+    import os
+    from pathlib import Path
+    override = os.environ.get("HARNESS_SRV_PATH")
+    if override:
+        return Path(override).read_text()
+    from harness.cli import _plugin_files
+    return Path(_plugin_files()[0]).read_text()
+
+
+
+
+def test_plugin_worker_finished_writes_memory_note():
+    """A finished subagent is a verified outcome, so workerFinished also drops
+    one memory note through the existing writer — done→done, error→blocked.
+    Same guarantees as the context hook: opt-out honored, secrets refused,
+    dupe-checked (a repeat fire writes the identical text, which the writer
+    drops). Best-effort: the worker row above is the record."""
+    srv = _srv_text()
+    body = srv[srv.index("async function workerFinished"):srv.index("const HarnessPlugin")]
+    assert 'event?.status === "error" ? "blocked" : "done"' in body, "error→blocked, success→done"
+    assert "SELECT name, session FROM workers WHERE id=?" in body
+    assert "worker ${wname" in body and '? "finished" : "errored"' in body
+    assert "if (note && !memSecret(note))" in body, "secret pre-check before the write"
+    assert "const cfg = await memoryConfig(projectDir)" in body
+    assert "if (cfg.enabled) memSaveFact(db, note" in body, "opt-out honored"
+    assert 'memSaveFact(db, note, "progress", cfg.maxFacts)' in body, "existing writer, capped"
+    note = body[body.index("const note ="):body.index("memSaveFact(db, note")]
+    assert "Date.now" not in note and "Math.random" not in note, "repeat fires write identical text (writer dupes it)"
+    assert "memory note best-effort" in body
+
+
+
+
 def test_tui_plugin_is_a_sidebar_panel_not_a_layout_change():
     """The TUI entrypoint fills opencode's EXISTING sidebar with the stats panel.
 
@@ -1008,9 +1120,9 @@ def test_plugin_features(tmp_path):
     # not depend on the lost API still register, one bad editor.add does not
     # sink the other tools, and a drifted DB schema degrades to an answer.
     assert out["degradeNoSkillTransform"] is True
-    assert out["degradeNoSkillTransformTools"] == 6 and out["degradeNoSkillTransformHooks"] == 3
+    assert out["degradeNoSkillTransformTools"] == 6 and out["degradeNoSkillTransformHooks"] == 4
     assert out["degradeNoToolTransform"] is True
-    assert out["degradeNoToolTransformSeeds"] >= 11 and out["degradeNoToolTransformHooks"] == 3
+    assert out["degradeNoToolTransformSeeds"] >= 11 and out["degradeNoToolTransformHooks"] == 4
     assert out["degradeNoToolHook"] is True
     assert out["degradeNoToolHookTools"] == 6 and out["degradeNoToolHookCondense"] is False
     assert out["degradeNoSessionHook"] is True
@@ -1034,7 +1146,7 @@ def test_plugin_setup_registers_through_ctx(tmp_path):
 
     assert out["id"] == "harness"
     assert out["returned"] is None, "setup must not return a hooks object"
-    assert out["hooks"] == ["tool:execute.after", "session:compaction", "session:context"]
+    assert out["hooks"] == ["tool:execute.after", "session:compaction", "session:context", "tool:execute.before"]
     assert [t["name"] for t in out["tools"]] == ["skills_list", "skill_view", "memory_recall", "todowrite", "todoread", "wait"]
     for t in out["tools"]:
         assert t["input"] == "object" and t["execute"] == "function"
@@ -1529,3 +1641,32 @@ def test_tui_footer_chip_yields_so_opencode_keeps_showing_its_version():
     tui = Path(_plugin_files()[1]).read_text()
     assert "<box flexGrow={1} flexShrink={1} minWidth={0} onMouseDown={toggleSidebar}>" in tui
     assert "the version stays" in tui, "the comment states why the chip shrinks"
+
+
+def test_plugin_skill_roots_project_overlay():
+    """Project-local skills shadow bundled ones without forking the package.
+
+    skillRoots(projectDir) inserts `<project>/.opencode/harness/skills` after
+    the HARNESS_SKILLS_DIR env override and before package data, so a project
+    overrides one skill by dropping a same-named SKILL.md in the overlay;
+    every seedSkills call site passes the project directory (setup seeding +
+    both skills_list/skill_view fallbacks); first-root-wins dedupe is what
+    makes the earlier overlay entry stick.
+    """
+    srv = _srv_text()
+    assert "async function skillRoots(projectDir?: string)" in srv
+    assert "async function seedSkills(projectDir?: string)" in srv
+    assert "skillRoots(projectDir)" in srv, "seeds must resolve through the project-aware roots"
+    roots = srv[srv.index("async function skillRoots"):srv.index("async function seedSkills")]
+    order = [
+        roots.index("process.env.HARNESS_SKILLS_DIR"),
+        roots.index("/.opencode/harness/skills"),
+        roots.index("harness.__file__"),
+        roots.index("/.harness/skills"),
+    ]
+    assert order == sorted(order), f"roots must order env → project overlay → package data → global: {order}"
+    assert srv.count("seedSkills(directory)") == 3, "setup + skills_list fallback + skill_view fallback"
+    assert "seedSkills()" not in srv, "no call site may seed without the project directory"
+    seeds = srv[srv.index("async function seedSkills"):srv.index("async function readSkill")]
+    assert "const seen = new Set<string>()" in seeds
+    assert "if (seen.has(name)) continue" in seeds, "first root wins: the overlay shadows package data"

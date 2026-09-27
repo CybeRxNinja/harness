@@ -23,6 +23,8 @@
 //      space (the same `todos` table the sidebar panel reads) — plus `wait`,
 //      a visible countdown sleep backed by the `waits` table the sidebar reads.
 //   3. output condensing  ctx.tool.hook("execute.after", fn)
+//   3b. worker rows        ctx.tool.hook("execute.before", fn) inserts the
+//      queued row, and the execute.after hook above marks it done/error
 //   4. compaction brief   ctx.session.hook("compaction", fn)
 //   5. auto-memory        ctx.session.hook("context", fn) — durable facts +
 //      progress notes from live turns (the Python loop path is not what live
@@ -471,6 +473,14 @@ const MEM_HEADLINE_LIMIT = 160
 const MEM_LINES_PER_MSG = 3
 const MEM_SEEN_PER_SESSION = 200
 const MEM_DEFAULT_MAX_FACTS = 2000
+const MEM_DEFAULT_CAP_LINES = 200
+const MEM_MIN_EVIDENCE = 2
+const MEM_MAX_EVIDENCE_LEN = 8000
+const MEM_MAX_GIST_LEN = 200
+/** History truncation parity with add_message() in harness/store.py. */
+const HIST_MAX_CONTENT = 20000
+const HIST_MAX_FTS = 8000
+const MEM_HEADER = "# MEMORY.md — durable facts (cap {cap} lines, evidence-backed lessons only)"
 
 /** Same durable-line vocabulary as IMPORTANT_MARKERS in harness/memory.py. */
 const MEM_MARKERS = [
@@ -595,17 +605,25 @@ async function memoryConfig(projectDir: string): Promise<{ enabled: boolean; max
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/(^|\s)\/\/.*$/gm, "$1")
     const mem = code.match(/"memory"\s*:\s*\{([^}]*)\}/)?.[1] ?? ""
+    // Nearest file wins (later candidates override), mirroring _deep_merge.
     if (/"enabled"\s*:\s*false/.test(mem)) enabled = false
+    else if (/"enabled"\s*:\s*true/.test(mem)) enabled = true
     const cap = mem.match(/"max_facts"\s*:\s*(-?\d+)/)?.[1]
     if (cap !== undefined) {
       const n = parseInt(cap, 10)
       if (Number.isFinite(n)) maxFacts = n
     }
+    // Same chain as max_facts above; clamped at write time like _write_entries.
+    const lines = mem.match(/"cap_lines"\s*:\s*(-?\d+)/)?.[1]
+    if (lines !== undefined) {
+      const n = parseInt(lines, 10)
+      if (Number.isFinite(n)) capLines = n
+    }
   }
-  return { enabled, maxFacts }
+  return { enabled, maxFacts, capLines }
 }
 
-/** Read-write open of the project state DB, creating the facts table in the
+/** Read-write open of the project state DB, creating the live tables in the
  * store.py shape when this project has never run the harness CLI (the same
  * create-on-write precedent as the todos table). Null when unusable. */
 async function memDb(projectDir: string): Promise<any> {
@@ -617,6 +635,15 @@ async function memDb(projectDir: string): Promise<any> {
     const db = new Database(stateDb(projectDir))
     db.run("PRAGMA busy_timeout=3000")
     db.run("CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, source TEXT, ts INTEGER)")
+    db.run(
+      "CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT, role TEXT, content TEXT, ts INTEGER)",
+    )
+    db.run("CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, session UNINDEXED, tokenize='porter')")
+    db.run("CREATE TABLE IF NOT EXISTS context_mark(session TEXT PRIMARY KEY, seen INTEGER)")
+    db.run("CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, name TEXT, diff TEXT, gist TEXT, ts INTEGER)")
+    db.run(
+      "CREATE TABLE IF NOT EXISTS workers(id TEXT PRIMARY KEY, session TEXT, name TEXT, category TEXT, model TEXT, status TEXT, cost REAL, updated INTEGER)",
+    )
     return db
   } catch {
     return null
@@ -650,6 +677,204 @@ function memSaveFact(db: any, text: string, source: string, maxFacts: number): n
  * by design — the DB dupe check is the cross-restart backstop. */
 const memSeen = new Map<string, string[]>()
 
+// ---------------------------------------------------------------------------
+// History feed: the retired headless writer (add_message in store.py) stored
+// every turn's user/assistant text into messages/messages_fts with 20k/8k
+// truncation, and recall()'s snippet half reads that FTS index. Live sessions
+// never run through it, so the index sat empty. The context hook already sees
+// the full {sessionID, messages} history, so it appends only the unseen tail:
+// a persistent per-session high-water-mark (context_mark, survives restarts —
+// the in-memory cursor alone would re-append everything after a restart).
+// Cost is bounded by the same 20k/8k truncation parity.
+// ---------------------------------------------------------------------------
+
+function histRole(m: Rec): string {
+  return String(m?.role ?? m?.info?.role ?? "unknown").slice(0, 32)
+}
+
+async function captureHistory(db: any, sessionID: string, messages: any): Promise<void> {
+  if (!sessionID || !Array.isArray(messages) || !messages.length) return
+  try {
+    let start = 0
+    try {
+      const row = db.query("SELECT seen FROM context_mark WHERE session = ?").get(sessionID) as any
+      start = Number(row?.seen ?? 0) || 0
+    } catch {
+      start = 0
+    }
+    // A rewritten history (e.g. a compaction summary replacing the transcript)
+    // sits below the old mark: re-baseline from zero so the summary is captured.
+    if (start > messages.length) start = 0
+    if (start >= messages.length) return
+    const now = Math.floor(Date.now() / 1000)
+    for (let i = start; i < messages.length; i++) {
+      const raw = memMessageText(messages[i] as Rec)
+      if (!memNormalize(raw)) continue
+      try {
+        db.run(
+          "INSERT INTO messages(session,role,content,ts) VALUES(?,?,?,?)",
+          sessionID,
+          histRole(messages[i] as Rec),
+          raw.slice(0, HIST_MAX_CONTENT),
+          now,
+        )
+        try {
+          db.run("INSERT INTO messages_fts(content,session) VALUES(?,?)", raw.slice(0, HIST_MAX_FTS), sessionID)
+        } catch {
+          /* fts is best-effort; the row above is the record */
+        }
+      } catch {
+        /* one bad row never blocks the rest */
+      }
+    }
+    try {
+      db.run("INSERT OR REPLACE INTO context_mark(session,seen) VALUES(?,?)", sessionID, messages.length)
+    } catch {
+      /* high-water-mark best-effort; the next firing retries the tail */
+    }
+  } catch {
+    /* never break generation */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Lesson loop: ports stage_lesson/auto_refine from harness/memory.py. Each
+// durable assistant line (the same memImportantLines vocabulary that feeds the
+// facts) stages one evidence excerpt into `pending`; when >=2 DISTINCT
+// excerpts share a lesson name the lesson auto-writes to the project's
+// MEMORY.md (cap-enforced, secret-refused, dupe-checked — same guarantees as
+// add_lesson) and the staged rows are consumed. Junk parity with
+// _is_junk_turn plus the secret rules: mock/empty/secret excerpts never stage.
+// Trigger is assistant text only — tool output is never staged.
+// ---------------------------------------------------------------------------
+
+/** Lesson bucket for one durable line: its leading marker, else "outcome". */
+function memLessonName(line: string): string {
+  const low = memNormalize(line).toLowerCase()
+  for (const m of MEM_MARKERS) {
+    if (low.startsWith(m) || low.includes(` ${m}`)) return m.replace(/[:\s]+$/, "").slice(0, 80) || "lesson"
+  }
+  return "outcome"
+}
+
+/** Stage one evidence excerpt (mirrors stage_lesson(): no dedupe here —
+// distinctness is the promotion gate, computed in memEvidence). */
+function memStageLesson(db: any, name: string, excerpt: string, gist: string): number {
+  try {
+    db.run("INSERT INTO pending(kind,name,diff,gist,ts) VALUES(?,?,?,?,?)",
+      "lesson",
+      String(name ?? "lesson").slice(0, 80),
+      String(excerpt ?? "").slice(0, MEM_MAX_EVIDENCE_LEN),
+      String(gist ?? "").slice(0, MEM_MAX_GIST_LEN),
+      Math.floor(Date.now() / 1000),
+    )
+    return Number(db.query("SELECT last_insert_rowid() AS id").get()?.id ?? 0) || 0
+  } catch {
+    return 0
+  }
+}
+
+/** The distinct excerpts staged for a lesson (mirrors evidence()). */
+function memEvidence(db: any, name: string): string[] {
+  try {
+    const rows = db.query("SELECT diff FROM pending WHERE kind='lesson' AND name=? ORDER BY id").all(name) as any[]
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const r of rows) {
+      const n = memNormalize(r?.diff).slice(0, 600)
+      if (n && !seen.has(n)) {
+        seen.add(n)
+        out.push(n)
+      }
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+/** Append one lesson entry to the project MEMORY.md (mirrors add_lesson():
+ * secret refusal, dupe check, line cap). Entries are `- [name] body` lines. */
+async function memAddLesson(memoryPath: string, name: string, text: string, capLines: number): Promise<boolean> {
+  const body = memNormalize(text)
+  if (!body || memSecret(body)) return false
+  const entry = `- [${String(name ?? "lesson").slice(0, 60)}] ${body.slice(0, 500)}`
+  try {
+    let header = ""
+    const entries: string[] = []
+    if (await Bun.file(memoryPath).exists()) {
+      let pastHeader = false
+      for (const ln of (await Bun.file(memoryPath).text()).split("\n")) {
+        if (ln.startsWith("- ")) pastHeader = true
+        if (ln.startsWith("- ")) entries.push(ln)
+        else if (!pastHeader) header = header ? `${header}\n${ln}` : ln
+      }
+      header = header.trim()
+    }
+    if (entries.includes(entry)) return false
+    entries.push(entry)
+    const cap = Math.max(1, Math.floor(Number(capLines) || MEM_DEFAULT_CAP_LINES))
+    const kept = entries.length > cap ? entries.slice(-cap) : entries
+    const head = header || MEM_HEADER.replace("{cap}", String(cap))
+    await Bun.write(memoryPath, `${head}\n${kept.length ? `${kept.join("\n")}\n` : ""}`)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Promote lessons with >=2 distinct excerpts (mirrors auto_refine()). */
+async function memAutoRefine(db: any, memoryPath: string, capLines: number, minEvidence = MEM_MIN_EVIDENCE): Promise<string[]> {
+  const promoted: string[] = []
+  let rows: any[] = []
+  try {
+    rows = db.query(
+      "SELECT name, COUNT(DISTINCT diff), COUNT(*) FROM pending WHERE kind='lesson' GROUP BY name",
+    ).all() as any[]
+  } catch {
+    return []
+  }
+  for (const r of rows) {
+    const vals = (Array.isArray(r) ? r : Object.values(r ?? {})) as any[]
+    const name = String(vals[0] ?? "")
+    if (!name) continue
+    const ev = memEvidence(db, name)
+    if (ev.length < Math.max(2, minEvidence)) continue
+    let gist = name
+    try {
+      const g = db.query("SELECT gist FROM pending WHERE kind='lesson' AND name=? ORDER BY id DESC LIMIT 1").get(name) as any
+      if (String(g?.gist ?? "").trim()) gist = String(g.gist).trim()
+    } catch {
+      /* keep the name */
+    }
+    const text = `${gist} :: ${ev.slice(0, 2).map((e) => e.slice(0, 200)).join(" | ")}`
+    if (await memAddLesson(memoryPath, name, text, capLines)) promoted.push(name)
+    try {
+      db.run("DELETE FROM pending WHERE kind='lesson' AND name=?", name)
+    } catch {
+      /* consume best-effort */
+    }
+  }
+  return promoted
+}
+
+async function captureLessons(db: any, projectDir: string, fresh: string[], capLines: number): Promise<string[]> {
+  try {
+    for (const t of fresh) {
+      // Mock-model echoes are the harness talking to itself, never evidence.
+      if (memNormalize(memHeadline(t)).startsWith("[mock:")) continue
+      for (const line of memImportantLines(t)) {
+        // Normalization must never hide a credential: check the staged form.
+        if (memSecret(line)) continue
+        memStageLesson(db, memLessonName(line), line, line.slice(0, 120))
+      }
+    }
+    return await memAutoRefine(db, `${projectDir}/MEMORY.md`, capLines)
+  } catch {
+    return []
+  }
+}
+
 /**
  * Capture one context-hook firing into the state DB: durable lines of each
  * new assistant message (source "turn") plus one progress note from the
@@ -671,7 +896,6 @@ async function captureMemory(projectDir: string, sessionID: string, agent: unkno
     const n = memNormalize(t)
     return n !== "" && !seen.includes(n)
   })
-  if (!fresh.length) return
   for (const t of fresh) {
     seen.push(memNormalize(t))
     while (seen.length > MEM_SEEN_PER_SESSION) seen.shift()
@@ -679,6 +903,10 @@ async function captureMemory(projectDir: string, sessionID: string, agent: unkno
   const db = await memDb(projectDir)
   if (!db) return
   try {
+    // The history tail advances on every role (a user-only turn still grows
+    // the transcript), so it runs before the fresh-assistant gate below.
+    await captureHistory(db, sessionID, messages)
+    if (!fresh.length) return
     let hasFacts = false
     for (const t of fresh) {
       for (const line of memImportantLines(t)) {
@@ -689,6 +917,9 @@ async function captureMemory(projectDir: string, sessionID: string, agent: unkno
     if (!memIsJunk(head, hasFacts)) {
       memSaveFact(db, `progress [${sessionID.slice(0, 24)}]: ${head}`.slice(0, MEM_MAX_FACT_LEN), "progress", cfg.maxFacts)
     }
+    // Same firing, same guards: one staged lesson excerpt per durable line
+    // (auto-promoted at 2 distinct excerpts).
+    await captureLessons(db, projectDir, fresh, cfg.capLines)
   } finally {
     try {
       db.close()
@@ -698,7 +929,7 @@ async function captureMemory(projectDir: string, sessionID: string, agent: unkno
   }
 }
 
-function condenseText(raw: string): string {
+function condenseText(raw: string, command = ""): string {
   const lines = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").split("\n")
   const kept: string[] = []
   let run: string[] = []
@@ -715,12 +946,82 @@ function condenseText(raw: string): string {
     }
   }
   flush()
-  let out = kept
-  if (out.length > 48) out = [...out.slice(0, 24), `... [${out.length - 44} lines elided] ...`, ...out.slice(-20)]
+  // caveman_lite port (harness/compress.py): filler-strip with code/URL/JSON/
+  // path protection, then blank-run collapse and adjacent-dupe drop. Leading
+  // indentation is kept (tool output, not prose — caveman stripped it).
+  let out = stripFillers(kept.join("\n")).split("\n")
+  // Per-command head/tail budgets (the FILTERS head/tail column); the default
+  // window is the old 24/48/20 shape. Elision keeps the head and tail and
+  // hoists mid-window ERROR_LINEs — errors are sacred even inside the cut.
+  const budget = condenseBudget(command)
+  if (out.length > budget.max) {
+    const head = out.slice(0, budget.head)
+    const tail = budget.tail > 0 ? out.slice(-budget.tail) : []
+    const mid = out.slice(budget.head, out.length - tail.length)
+    const sacred = mid.filter((ln) => ERROR_LINE.test(ln))
+    out = [...head, `... [${mid.length - sacred.length} lines elided] ...`, ...sacred, ...tail]
+  }
   const text = out.join("\n")
   if (text.length >= raw.length) return raw
   const pct = Math.round(100 * (1 - text.length / raw.length))
   return `${text}\n  [harness: condensed ${pct}% (${raw.length} → ${text.length} chars). Head and tail kept; re-run a narrower command for the middle.]`
+}
+
+/** Filler words the prose condenser strips (port of FILLER_RE). */
+const CONDENSE_FILLER = /\b(very|really|quite|rather|basically|essentially|actually|just|simply|in order to|due to the fact that|it is important to note that|as a matter of fact|for all intents and purposes)\b/gi
+const CONDENSE_CODE = /```[\s\S]*?```|`[^`\n]+`/g
+const CONDENSE_URL = /https?:\/\/\S+/g
+const CONDENSE_JSON = /\{[^{}]{20,}\}|\[[^\[\]]{20,}\]/g
+const CONDENSE_PATH = /(?:~?\/[A-Za-z0-9_.\-]+)+\/?/g
+
+/** Per-command head/tail budgets (port of the FILTERS head/tail column). */
+const CONDENSE_BUDGETS: Array<{ cmds: string[]; head: number; tail: number; max: number }> = [
+  { cmds: ["ls", "find", "grep", "rg", "cat", "lsblk", "df", "ps"], head: 30, tail: 20, max: 60 },
+  { cmds: ["pytest", "python", "python3", "uv"], head: 8, tail: 10, max: 40 },
+  { cmds: ["npm", "npx", "node", "bun", "tsc", "eslint"], head: 6, tail: 8, max: 40 },
+  { cmds: ["git"], head: 10, tail: 10, max: 60 },
+  { cmds: ["pip", "poetry"], head: 4, tail: 6, max: 25 },
+]
+const CONDENSE_DEFAULT = { head: 24, tail: 20, max: 48 }
+
+function condenseBudget(command: string): { head: number; tail: number; max: number } {
+  const cmd = String(command ?? "").trim().split(/\s+/)[0]?.toLowerCase() ?? ""
+  for (const b of CONDENSE_BUDGETS) if (cmd && b.cmds.includes(cmd)) return b
+  return CONDENSE_DEFAULT
+}
+
+/** Best-effort command name out of an execute.after event (shape differs by host version). */
+function condenseCommand(event: Rec): string {
+  const cands = [event?.command, event?.tool, event?.toolName, event?.name, event?.input?.command, event?.args?.command]
+  for (const c of cands) if (typeof c === "string" && c.trim()) return c
+  return ""
+}
+
+/** Filler-strip with placeholder protection (port of caveman_lite's vault). */
+function stripFillers(text: string): string {
+  const vault: string[] = []
+  const stash = (m: string): string => {
+    vault.push(m)
+    return `\x00V${vault.length - 1}\x00`
+  }
+  let tmp = text
+    .replace(CONDENSE_CODE, stash)
+    .replace(CONDENSE_URL, stash)
+    .replace(CONDENSE_JSON, stash)
+    .replace(CONDENSE_PATH, stash)
+  tmp = tmp.replace(CONDENSE_FILLER, "")
+  tmp = tmp.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n")
+  const lines: string[] = []
+  let prev: string | null = null
+  for (const ln of tmp.split("\n")) {
+    const line = ln.trimEnd()
+    if (line === prev && line.trim()) continue
+    prev = line
+    lines.push(line)
+  }
+  return lines
+    .join("\n")
+    .replace(/\x00V(\d+)\x00/g, (_m, i) => vault[Number(i)] ?? _m)
 }
 
 /** Shrink oversized tool output in place; errors pass through untouched. */
@@ -734,7 +1035,113 @@ function condenseToolResult(event: Rec): void {
     if (!part || part.type !== "text" || typeof part.text !== "string") continue
     if (part.text.length <= CONDENSE_OVER) continue
     if (ERROR_LINE.test(part.text)) continue
-    part.text = condenseText(part.text)
+    part.text = condenseText(part.text, condenseCommand(event))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 6. Worker rows: the subagent tool is registered through the standard
+//    tool.transform/add path (opencode.tool.subagent, codemode:false) and every
+//    model tool call runs through the one Tool.execute dispatch, which triggers
+//    execute.before ({tool, sessionID, id, input}) before the call and
+//    execute.after ({tool, id, status, ...}) on completion — verified against
+//    the opencode v2.0.18 server bundle (see the item-4 probe notes). So
+//    execute.before on a subagent call INSERTs a queued row into the existing
+//    `workers` table and execute.after marks it done/error. Both names are
+//    matched: `subagent` (live) and `task` (legacy alias). Stale stays computed,
+//    never written — the TUI already does that — and only queued/running rows
+//    ever transition, so a terminal row is never clobbered.
+// ---------------------------------------------------------------------------
+
+/** Tool names that spawn a subagent session (live name + legacy alias). */
+const WORKER_TOOLS = new Set(["subagent", "task"])
+
+function workerName(input: Rec): string {
+  for (const k of ["description", "prompt", "agent", "subagent_type", "category"]) {
+    const v = String(input?.[k] ?? "").replace(/\s+/g, " ").trim()
+    if (v) return v.slice(0, 80)
+  }
+  return "subagent"
+}
+
+function workerId(event: Rec): string {
+  const id = String(event?.id ?? event?.callID ?? "")
+  if (id) return id.slice(0, 80)
+  return `${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+}
+
+async function workerStarted(projectDir: string, event: Rec): Promise<void> {
+  try {
+    if (!WORKER_TOOLS.has(String(event?.tool ?? ""))) return
+    const input = ((event?.input ?? {}) as Rec) ?? {}
+    const db = await memDb(projectDir)
+    if (!db) return
+    try {
+      db.run(
+        "INSERT OR IGNORE INTO workers(id,session,name,category,model,status,cost,updated) VALUES(?,?,?,?,?,?,?,?)",
+        workerId(event),
+        String(event?.sessionID ?? ""),
+        workerName(input),
+        String(input?.subagent_type ?? input?.category ?? ""),
+        String(input?.model ?? ""),
+        "queued",
+        0,
+        Math.floor(Date.now() / 1000),
+      )
+    } finally {
+      try {
+        db.close()
+      } catch {
+        /* already closed */
+      }
+    }
+  } catch {
+    /* never break tool execution */
+  }
+}
+
+async function workerFinished(projectDir: string, event: Rec): Promise<void> {
+  try {
+    if (!WORKER_TOOLS.has(String(event?.tool ?? ""))) return
+    const id = String(event?.id ?? event?.callID ?? "")
+    if (!id) return
+    const db = await memDb(projectDir)
+    if (!db) return
+    try {
+      db.run(
+        "UPDATE workers SET status=?, updated=? WHERE id=? AND status IN ('queued','running')",
+        event?.status === "error" ? "error" : "done",
+        Math.floor(Date.now() / 1000),
+        id,
+      )
+      // Fusion: a finished subagent is a verified outcome (unlike the context
+      // hook, which only ever writes `progress`), so it also drops one memory
+      // note through the existing writer — done→done, error→blocked. Same
+      // guarantees: opt-out honored, secrets refused, dupe-checked (a repeat
+      // fire for the same call writes the identical text, which the writer
+      // drops), capped. Never breaks tool execution.
+      try {
+        const row = db.query("SELECT name, session FROM workers WHERE id=?").get(id) as any
+        const wname = String(row?.name ?? event?.input?.description ?? "").replace(/\s+/g, " ").trim().slice(0, 80)
+        const wsession = String(row?.session ?? event?.sessionID ?? id).slice(0, 24)
+        const status = event?.status === "error" ? "blocked" : "done"
+        const note = `${status} [${wsession}]: worker ${wname || "subagent"} ${status === "done" ? "finished" : "errored"}`
+        if (note && !memSecret(note)) {
+          const cfg = await memoryConfig(projectDir)
+          if (cfg.enabled) memSaveFact(db, note, "progress", cfg.maxFacts)
+        }
+      } catch {
+        /* memory note best-effort; the worker row above is the record */
+      }
+    } finally {
+      try {
+        db.close()
+      } catch {
+        /* already closed */
+      }
+    }
+  } catch {
+    /* never break tool execution */
   }
 }
 
@@ -959,13 +1366,20 @@ const HarnessPlugin = {
       log(`tool registration failed: ${short(e)}`)
     }
 
-    // 3. Condense oversized tool results in place (errors untouched).
+    // 3. Condense oversized tool results in place (errors untouched), and mark
+    //    subagent calls done/error in the workers table (see section 6: the
+    //    same after-event carries both).
     try {
       // guarded: a host without tool hooks just loses condensing, not activation
       if (typeof ctx?.tool?.hook !== "function") throw new Error("ctx.tool.hook unavailable")
-      await ctx.tool.hook("execute.after", (event: Rec) => {
+      await ctx.tool.hook("execute.after", async (event: Rec) => {
         try {
           condenseToolResult(event)
+        } catch {
+          /* never break tool execution */
+        }
+        try {
+          await workerFinished(directory, event)
         } catch {
           /* never break tool execution */
         }
@@ -1023,6 +1437,24 @@ const HarnessPlugin = {
       })
     } catch (e) {
       log(`auto-memory hook failed: ${short(e)}`)
+    }
+
+    // 6. Worker rows on the tool "execute.before" hook (see the section above
+    //    for why this fires for subagent calls: one dispatch, every tool). Own
+    //    guard block so a host that accepts "execute.after" but rejects
+    //    "execute.before" loses only the queued rows, never condensing.
+    try {
+      // guarded: a host without tool hooks just loses worker rows, not activation
+      if (typeof ctx?.tool?.hook !== "function") throw new Error("ctx.tool.hook unavailable")
+      await ctx.tool.hook("execute.before", async (event: Rec) => {
+        try {
+          await workerStarted(directory, event)
+        } catch {
+          /* never break tool execution */
+        }
+      })
+    } catch (e) {
+      log(`worker hook failed: ${short(e)}`)
     }
 
     // Nothing returned on purpose: a returned non-function value is treated as
