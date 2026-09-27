@@ -129,7 +129,7 @@ geometry opencode's MCP rows use). That keeps the numbers aligned at any panel
 width, with no width constant to guess:
 
 ```
-harness ses_EXAMPLE · 15 skills
+harness ses_EXAMPLE · 16 skills
 ▾ Window                    █░░░░░░░ 12%
     128,451 / 1,048,576 in context
     muse-spark-1.3-cont… · agent orchestrator
@@ -146,7 +146,7 @@ harness ses_EXAMPLE · 15 skills
 ▾ Workers                      2 active
     ◐ map-auth · running 3m
     ○ docs-pass · queued 4s
-▸ Skills                      15 installed
+▸ Skills                      16 installed
     ▪ using-agent-skills
     ▪ planning-and-task-breakdown
     … +9 more

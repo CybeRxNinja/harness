@@ -1,6 +1,6 @@
 # Harness — status
 
-`python -m pytest -q` → **155 passed** (`HARNESS_MOCK=1`, as CI runs it).
+`python -m pytest -q` → **170 passed** (`HARNESS_MOCK=1`, as CI runs it).
 The headless CLI path was retired (9 modules + 4 commands deleted; live features run in the
 plugin) — history lives in `git log`; this file is current state only.
 
@@ -10,7 +10,7 @@ Python core + one stock-opencode v2 plugin (`harness/plugin/{harness.ts,tui.tsx}
 relay, no API keys in harness: models come from your opencode config, and every agent inherits your
 default. 2.3k lines across 12 modules, stdlib-only, SQLite for state.
 
-## Current state (2026-09-23)
+## Current state (2026-09-27)
 
 **Todos have a home again, and it is the harness's.** opencode 2.0.14 ships no todo tool and writes
 no `todo` rows, so the sidebar's Todo row could only ever read `0 items`. The plugin now registers
@@ -147,7 +147,7 @@ a worker with an unknown kind (the headless spawn path has since been retired).
 ## Verify
 
 ```bash
-HARNESS_MOCK=1 python -m pytest -q          # 155
+HARNESS_MOCK=1 python -m pytest -q          # 170
 sqlite3 .opencode/harness/sessions.db "select session,status,text from todos order by id desc limit 5"
 python -m harness doctor --verbose          # plugin, memory, workers, permission policy
 python -m harness memory show               # current MEMORY.md

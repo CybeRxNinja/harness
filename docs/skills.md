@@ -22,6 +22,7 @@ review/ponytail-review         over-engineering review, one line per finding
 review/ponytail-audit          whole-repo version of the same
 ship/git-workflow-and-versioning
 security/reverse-router        ships DISABLED (sec pack, scope-gate, lawful-use only)
+security/apk-reverse           static APK analysis (manifest/certs/code/secrets), lawful-use only
 ```
 
 Seeded into opencode's store as `harness-<name>` by the plugin
