@@ -1,7 +1,7 @@
-"""Every CLI subcommand, driven through main() with a throwaway project.
+"""Kept CLI subcommands, driven through main() with a throwaway project.
 
-The CLI is the guaranteed fallback UI (no TUI deps), so a broken subcommand is
-the difference between "usable" and "nothing works".
+Live sessions run inside opencode; the CLI keeps the installer and the
+inspect/repair operators (doctor/config/skills/memory/plugin/setup/tui).
 """
 import json
 
@@ -105,72 +105,19 @@ def test_memory_save_search_and_refine(env, capsys):
     assert cli(env, "memory", "refine", "--session", "s1", "--name", "l1") == 0
     assert "no substantial trajectory" in capsys.readouterr().out
 
-    from harness.store import connect, ensure_session, add_message
+    from harness.store import connect
+    import time as _t
     con = connect(env)
     try:
-        ensure_session(con, "s1")
-        add_message(con, "s1", "assistant",
-                    "I fixed the bug by guarding the empty case and re-ran the suite.")
+        con.execute("INSERT INTO messages(session,role,content,ts) VALUES(?,?,?,?)",
+                    ("s1", "assistant",
+                     "I fixed the bug by guarding the empty case and re-ran the suite.",
+                     int(_t.time())))
+        con.commit()
     finally:
         con.close()
     assert cli(env, "memory", "refine", "--session", "s1", "--name", "l1") == 0
     assert "staged lesson" in capsys.readouterr().out
-
-
-def _git(env, *args):
-    import subprocess
-    return subprocess.run(["git", *args], cwd=env, capture_output=True, text=True, timeout=30)
-
-
-def test_checkpoint_round_trips_through_a_git_diff(env, capsys):
-    _git(env, "init", "-q")
-    _git(env, "config", "user.email", "t@example.com")
-    _git(env, "config", "user.name", "t")
-    (env / "f.txt").write_text("v1")
-    _git(env, "add", "f.txt")
-    _git(env, "commit", "-qm", "init")
-
-    (env / "f.txt").write_text("v2")
-    assert cli(env, "checkpoint", "save") == 0
-    snap = capsys.readouterr().out.strip()
-    assert (env / ".opencode" / "harness" / "shadow").exists()
-
-    # work continues past the checkpoint, then the checkpoint is restored
-    (env / "f.txt").write_text("v3")
-    assert cli(env, "checkpoint", "restore", snap) == 0
-    assert "restored" in capsys.readouterr().out
-    assert (env / "f.txt").read_text() == "v2", "back to the checkpointed state"
-
-
-def test_restore_reports_a_missing_or_empty_snapshot(env, capsys):
-    assert cli(env, "checkpoint", "restore", "20200101-000000") == 1
-    assert "no snapshot" in capsys.readouterr().err
-
-
-def test_checkpoint_warns_when_it_captured_nothing(env, capsys):
-    """No git repo and no touched files: say so instead of implying safety."""
-    (env / "f.txt").write_text("v1")
-    assert cli(env, "checkpoint", "save") == 0
-    out = capsys.readouterr()
-    assert "nothing captured" in out.err
-    from harness.checkpoints import has_content
-    assert not has_content(out.out.strip())
-
-
-def test_plan_start_next_check(env, capsys):
-    assert cli(env, "plan", "start", "--title", "work", "--items", "one;two") == 0
-    capsys.readouterr()
-
-    assert cli(env, "plan", "next") == 0
-    assert "one" in capsys.readouterr().out
-
-    assert cli(env, "plan", "check", "--item", "one") == 0
-    assert "checked" in capsys.readouterr().out
-
-
-def test_plan_next_without_a_plan_exits_nonzero(env, capsys):
-    assert cli(env, "plan", "next") == 1
-    assert "no active work" in capsys.readouterr().out
 
 
 def test_plugin_path_lists_both_entrypoints(env, capsys):
@@ -196,15 +143,8 @@ def test_retired_relay_subcommands_exit_2(env, capsys):
         assert "retired" in capsys.readouterr().err
 
 
-def test_bare_prompt_shorthand_routes_to_chat(env, capsys):
-    """`harness "a prompt"` is documented shorthand for `harness chat "..."`."""
-    assert cli(env, "hello there", "--mode", "ask", "--model", "acme/foo") == 0
-    assert "mock" in capsys.readouterr().out
-
-    from harness.store import connect, history
-    con = connect(env)
-    try:
-        sessions = [r[0] for r in con.execute("SELECT id FROM sessions").fetchall()]
-    finally:
-        con.close()
-    assert sessions, "the shorthand must actually run a turn"
+def test_retired_headless_commands_exit_2(env, capsys):
+    for retired in ("chat", "plan", "checkpoint", "mcp"):
+        assert cli(env, retired) == 2
+        err = capsys.readouterr().err
+        assert "retired" in err or "unknown command" in err, err

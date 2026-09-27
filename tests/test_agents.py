@@ -211,14 +211,9 @@ def test_orchestrator_plans_waves_and_sizes_verification():
     assert "ONE canonical command" in testy
     assert "do not add a second test framework" in testy
 
-    # the same discipline reaches the Python path (chat --mode orchestrator)
-    from harness.loop import SYSTEM
-    lo = SYSTEM["orchestrator"]
-    assert "delta re-check" in lo and "ONE skill" in lo
-    assert "canonical test command" in lo
-    from harness.rlm import SUBAGENT_BRIEFS
-    assert "hunks changed since your last pass" in SUBAGENT_BRIEFS["code-reviewer"]
-    assert "ONE canonical command" in SUBAGENT_BRIEFS["test-engineer"]
+    # the same discipline lives in the shipped orchestrator prompt (live path)
+    assert "delta re-check" in orch and "ONE skill" in orch
+    assert "canonical test command" in orch
 
     # deep integration: opencode-native machinery before building new things —
     # and the lsp line rides into every code-writing spawn prompt, because the

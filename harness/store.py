@@ -1,9 +1,15 @@
-"""SQLite stores: sessions/messages, tasks(boulder)/todos/workers, mailbox, facts."""
+"""SQLite stores: facts, todos, workers/waits (live contract), plus legacy tables.
+
+The live sidebar reads the todos/waits/workers tables and the plugin reads
+facts straight from disk, so those tables are the contract. Session/message
+writers and the history reader were retired with the headless turn loop; the
+tables stay in SCHEMA so existing databases keep opening. `search` stays: kept
+memory.recall() reads the FTS index through it (degrading to empty when the
+retired writer never populated it).
+"""
 from __future__ import annotations
 
-import json
 import sqlite3
-import time
 from pathlib import Path
 
 
@@ -57,30 +63,6 @@ def ensure_column(con: sqlite3.Connection, table: str, column: str, decl: str) -
 def _migrate(con: sqlite3.Connection) -> None:
     """Forward-compatible additions to tables that already exist on disk."""
     ensure_column(con, "mailbox", "delivered", "INTEGER DEFAULT 0")
-
-
-def ensure_session(con: sqlite3.Connection, sid: str, mode: str = "code") -> None:
-    now = int(time.time())
-    con.execute("INSERT OR IGNORE INTO sessions(id,title,mode,created,updated) VALUES(?,?,?, ?,?)",
-                (sid, sid[:40], mode, now, now))
-    con.execute("UPDATE sessions SET updated=? WHERE id=?", (now, sid))
-    con.commit()
-
-
-def add_message(con: sqlite3.Connection, session: str, role: str, content: str) -> None:
-    con.execute("INSERT INTO messages(session,role,content,ts) VALUES(?,?,?,?)",
-                (session, role, content[:20000], int(time.time())))
-    try:
-        con.execute("INSERT INTO messages_fts(content,session) VALUES(?,?)", (content[:8000], session))
-    except Exception:
-        pass
-    con.commit()
-
-
-def history(con: sqlite3.Connection, session: str, limit: int = 40) -> list[dict]:
-    rows = con.execute("SELECT role,content FROM messages WHERE session=? ORDER BY id DESC LIMIT ?",
-                       (session, limit)).fetchall()
-    return [{"role": r, "content": c} for r, c in reversed(rows)]
 
 
 def search(con: sqlite3.Connection, q: str, limit: int = 8) -> list[dict]:

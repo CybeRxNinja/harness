@@ -224,20 +224,11 @@ def test_strict_map_asks_for_unknown_commands_but_still_allows_known_safe_ones()
     assert m["git push"] == "ask" and m["rm *"] == "ask"
 
 
-def test_risk_check_tool_is_dispatchable(tmp_path):
-    from harness.config import load_config
-    from harness.kernel import Kernel
-    from harness.loop import _exec_tool
-    from harness.store import connect
-    con = connect(tmp_path)
-    cfg, _ = load_config(tmp_path)
-    k = Kernel(tmp_path, "s")
-    try:
-        one = json.loads(_exec_tool("risk_check", {"action": "git push origin main"},
-                                    tmp_path, "s", cfg, con, k, [], False, []))
-        assert one["ask"] is True and "remote" in one["reason"]
-        many = json.loads(_exec_tool("risk_check", {"actions": ["read a.py", "rm -rf x"]},
-                                     tmp_path, "s", cfg, con, k, [], False, []))
-        assert many["total"] == 2 and len(many["needs_approval"]) == 1
-    finally:
-        con.close()
+def test_risk_assess_flags_destructive_and_batches(tmp_path):
+    # the headless tool loop is retired; exercise the classifier it dispatched
+    # to directly (same single-action and batch shapes)
+    from harness import risk as RK
+    one = RK.assess("git push origin main", "auto", "", tmp_path)
+    assert one["ask"] is True and "remote" in one["reason"]
+    many = RK.assess_many(["read a.py", "rm -rf x"], tmp_path)
+    assert many["total"] == 2 and len(many["needs_approval"]) == 1

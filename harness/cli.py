@@ -1,33 +1,15 @@
-"""harness CLI (fallback UI — guaranteed runner, zero TUI deps)."""
+"""harness CLI (installer + kept operators: doctor/config/skills/memory/plugin)."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import sys
-import uuid
 from pathlib import Path
 
 
 def _root(args) -> Path:
     return Path(getattr(args, "root", ".")).resolve()
-
-
-def cmd_chat(args) -> int:
-    from .config import load_config
-    from .loop import run_turn
-    from .store import connect, ensure_session
-    root = _root(args)
-    cfg, _ = load_config(root)
-    sid = args.resume or f"s_{uuid.uuid4().hex[:8]}"
-    con = connect(root)
-    ensure_session(con, sid, args.mode)
-    con.close()
-    prompt = args.prompt or sys.stdin.read()
-    out = run_turn(root, sid, prompt, args.mode, args.model, cfg, auto_approve=args.auto)
-    print(out["content"])
-    print(f"\n[session {sid} mode={args.mode} model={out.get('route_model')}]", file=sys.stderr)
-    return 0
 
 
 def cmd_doctor(args) -> int:
@@ -132,46 +114,6 @@ def cmd_memory(args) -> int:
     elif args.memory_action == "prune":
         print(f"pruned {M.prune(con, args.days)} fact(s) older than {args.days}d")
     con.close()
-    return 0
-
-
-def cmd_checkpoint(args) -> int:
-    from . import checkpoints as C
-    root = _root(args)
-    if args.ck_action == "save":
-        snap = C.checkpoint(root)
-        print(snap)
-        if not C.has_content(snap):
-            print("warning: nothing captured (no git diff and no touched files) — "
-                  "this snapshot cannot restore anything", file=sys.stderr)
-    else:
-        try:
-            print(C.restore(root, args.snap))
-        except (FileNotFoundError, RuntimeError) as e:
-            print(f"harness: {e}", file=sys.stderr)
-            return 1
-    return 0
-
-
-def cmd_plan(args) -> int:
-    from . import orchestrator as O
-    root = _root(args)
-    if args.plan_action == "start":
-        items = [x.strip() for x in args.items.split(";") if x.strip()]
-        print(O.start_plan(root, args.title, items))
-    elif args.plan_action == "next":
-        b = O.load_boulder(root)
-        wid = b.get("active_work_id")
-        if not wid:
-            print("no active work")
-            return 1
-        plan = b["works"][wid]["plan"]
-        print(O.next_box(Path(plan).read_text()) or "complete")
-    elif args.plan_action == "check":
-        from pathlib import Path as _P
-        b = O.load_boulder(root)
-        wid = b.get("active_work_id")
-        print("checked" if O.check_box(root, b["works"][wid]["plan"], args.item) else "nothing to check")
     return 0
 
 
@@ -385,11 +327,6 @@ def _find_opencode() -> str | None:
     """Locate a stock `opencode` binary on PATH. No fork, no AppImage."""
     import shutil as _sh
     return _sh.which("opencode")
-
-
-def cmd_mcp(args) -> int:
-    from .mcp_server import serve_stdio
-    return serve_stdio(_root(args))
 
 
 def _plugin_files() -> list[str]:
@@ -657,7 +594,7 @@ def cmd_tui(args) -> int:
     if not binary:
         print("opencode binary not found. Install stock opencode, e.g.:")
         print("  npm create opencode@latest   (or: npx opencode)")
-        print(f"(opencode.json wired at {cfg_path}; harness plugin at {plug}; CLI fallback: harness chat)")
+        print(f"(opencode.json wired at {cfg_path}; harness plugin at {plug})")
         return 1
     print(f"launching {binary} (agents inherit your opencode default model; no relay)")
     # LSP: 2.0.x ships the `lsp` tool ungated; newer builds gate it behind
@@ -668,16 +605,9 @@ def cmd_tui(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="harness", description="All-in-one coding harness (CLI fallback)")
+    p = argparse.ArgumentParser(prog="harness", description="Harness installer and kept operators")
     p.add_argument("--root", default=".", help="project root")
     sub = p.add_subparsers(dest="cmd")
-    c = sub.add_parser("chat", help="run one turn (default command)")
-    c.add_argument("prompt", nargs="?", default="")
-    c.add_argument("--resume", default="")
-    c.add_argument("--mode", default="code", choices=["code", "orchestrator", "plan", "ask", "debug", "review"])
-    c.add_argument("--model", default="")
-    c.add_argument("--auto", action="store_true")
-    c.set_defaults(fn=cmd_chat)
     d = sub.add_parser("doctor")
     d.add_argument("--verbose", action="store_true")
     d.set_defaults(fn=cmd_doctor)
@@ -703,16 +633,6 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--days", type=int, default=30,
                    help="retention window for `memory prune`")
     m.set_defaults(fn=cmd_memory)
-    t = sub.add_parser("checkpoint")
-    t.add_argument("ck_action", choices=["save", "restore"])
-    t.add_argument("snap", nargs="?", default="")
-    t.set_defaults(fn=cmd_checkpoint)
-    pl = sub.add_parser("plan")
-    pl.add_argument("plan_action", choices=["start", "next", "check"])
-    pl.add_argument("--title", default="work")
-    pl.add_argument("--items", default="")
-    pl.add_argument("--item", default="")
-    pl.set_defaults(fn=cmd_plan)
     su = sub.add_parser("setup")
     su.set_defaults(fn=cmd_setup)
     t = sub.add_parser("tui", help="opencode config + plugin, then launch opencode")
@@ -720,8 +640,6 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--setup-only", action="store_true",
                    help="ensure config+plugin, print paths, do not launch")
     t.set_defaults(fn=cmd_tui)
-    mc = sub.add_parser("mcp", help="run harness as an MCP stdio server (skills+memory tools)")
-    mc.set_defaults(fn=cmd_mcp)
     pl = sub.add_parser("plugin", help="opencode plugin (stock opencode, no fork)")
     pl.add_argument("plugin_action", choices=["install", "uninstall", "path"])
     pl.add_argument("--from-release", default="",
@@ -732,7 +650,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    # `harness "prompt"` shorthand -> chat
     if argv is None:
         argv = sys.argv[1:]
     if argv and argv[0] in ("serve", "router"):
@@ -740,8 +657,11 @@ def main(argv=None) -> int:
               f"from your opencode config (`harness doctor` to verify).", file=sys.stderr)
         return 2
     if argv and not argv[0].startswith("-") and argv[0] not in (
-            "chat", "doctor", "config", "skills", "memory", "checkpoint", "plan", "setup", "tui", "mcp", "plugin"):
-        argv = ["chat", argv[0]] + argv[1:]
+            "doctor", "config", "skills", "memory", "setup", "tui", "plugin"):
+        print(f"harness: unknown command {argv[0]!r} (retired headless commands: "
+              f"chat, plan, checkpoint, mcp — live sessions run in opencode)",
+              file=sys.stderr)
+        return 2
     args = build_parser().parse_args(argv)
     if not getattr(args, "cmd", None) and not hasattr(args, "fn"):
         build_parser().print_help()

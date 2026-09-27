@@ -1,13 +1,16 @@
-"""Skills manager: progressive disclosure L0/L1/L2, bundles, trust, skill_manage."""
+"""Skills: progressive disclosure L0/L1/L2 plus seed-skill install.
+
+Live sessions discover procedures through the plugin's native skills_list /
+skill_view tools, which read through scan()/view() here. Skill authoring
+(manage), bundle loading (bundles) and the standalone security scanner
+(scan_security) were retired with the headless path — review now happens in
+live review subagents.
+"""
 from __future__ import annotations
 
-import re
-import time
 from pathlib import Path
 
 from .paths import state_dir
-
-DANGEROUS = re.compile(r"(curl .*\| *sh|private[_-]?key|BEGIN RSA|exfil|\.env\b.*(send|post|upload))", re.I)
 
 
 def skill_roots(project_root: Path, cfg: dict) -> list[tuple[str, Path, int]]:
@@ -83,98 +86,6 @@ def view(project_root: Path, cfg: dict, name: str, subpath: str = "") -> str:
     names = [s["name"] for s in scan(project_root, cfg)]
     sug = [n for n in names if name[:3].lower() in n.lower()][:3]
     raise FileNotFoundError(f"skill {name!r} not found. did-you-mean: {sug}")
-
-
-def _skill_dir_for(project_root: Path, cfg: dict, name: str) -> Path:
-    from .config import user_dir
-    cdir = ((cfg.get("skills", {}) or {}).get("create_dir", "") or "").strip()
-    base = Path(cdir).expanduser() if cdir else user_dir() / "skills"
-    # find existing
-    for s in scan(project_root, cfg):
-        if s["name"] == name:
-            return Path(s["path"]).parent
-    return base / "general" / name
-
-
-def manage(con, project_root: Path, cfg: dict, action: str, name: str, **kw) -> str:
-    approval = (cfg.get("skills", {}) or {}).get("write_approval", True)
-    if action == "create":
-        content = kw.get("content", "")
-        warn = _lint(content)
-        if approval:
-            con.execute("INSERT INTO pending(kind,name,diff,gist,ts) VALUES(?,?,?,?,?)",
-                        ("skill-create", name, content[:8000], f"create {name} {warn}"[:200], int(time.time())))
-            con.commit()
-            return f"staged (approval on). /skills approve. {warn}"
-        d = _skill_dir_for(project_root, cfg, name)
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "SKILL.md").write_text(content)
-        return f"created {d} {warn}"
-    if action == "patch":
-        old, new = kw.get("old_string", ""), kw.get("new_string", "")
-        d = _skill_dir_for(project_root, cfg, name)
-        p = d / "SKILL.md"
-        text = p.read_text(errors="replace")
-        if old not in text:
-            return "REJECTED: old_string not found"
-        diff = f"-{old[:500]}\n+{new[:500]}"
-        if approval:
-            con.execute("INSERT INTO pending(kind,name,diff,gist,ts) VALUES(?,?,?,?,?)",
-                        ("skill-patch", name, diff, f"patch {name}"[:200], int(time.time())))
-            con.commit()
-            return "staged (approval on)"
-        p.write_text(text.replace(old, new, 1))
-        return "patched"
-    if action == "delete":
-        if approval:
-            con.execute("INSERT INTO pending(kind,name,diff,gist,ts) VALUES(?,?,?,?,?)",
-                        ("skill-delete", name, "", f"delete {name}"[:200], int(time.time())))
-            con.commit()
-            return "staged (approval on)"
-        import shutil
-        shutil.rmtree(_skill_dir_for(project_root, cfg, name), ignore_errors=True)
-        return "deleted"
-    if action in ("write_file", "remove_file"):
-        d = _skill_dir_for(project_root, cfg, name)
-        fp = (d / kw.get("file_path", "")).resolve()
-        if d.resolve() not in fp.parents:
-            raise PermissionError("escapes skill dir")
-        if action == "remove_file":
-            fp.unlink(missing_ok=True)
-            return "removed"
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        fp.write_text(kw.get("file_content", ""))
-        return f"wrote {fp.name} {_lint(kw.get('file_content',''))}"
-    raise ValueError(f"unknown action {action}")
-
-
-def _lint(content: str) -> str:
-    notes = []
-    if len(re.findall(r"#\d+|\bPR-\d+\b", content)) > 5:
-        notes.append("warn:incident-log-shape (keep rules, drop story)")
-    if "TODO later" in content or "add tests later" in content:
-        notes.append("warn:rationalization (tests are proof, not later)")
-    return " ".join(notes)
-
-
-def scan_security(text: str) -> str:
-    m = DANGEROUS.search(text or "")
-    return f"DANGEROUS: {m.group(0)[:80]}" if m else "clean"
-
-
-def bundles(project_root: Path) -> dict:
-    from .config import user_dir
-    out: dict = {}
-    for d in (user_dir() / "skill-bundles", state_dir(project_root) / "skill-bundles"):
-        if d.exists():
-            for y in d.glob("*.yaml"):
-                try:
-                    txt = y.read_text(errors="replace")
-                    skills = re.findall(r"-\s*([\w-]+)", txt.split("skills:")[-1].split("instruction:")[0])
-                    out[y.stem] = {"skills": skills[:5], "file": str(y)}
-                except Exception:
-                    continue
-    return out
 
 
 def seed_source() -> Path | None:

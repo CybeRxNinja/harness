@@ -208,23 +208,6 @@ def progress(con, session: str, text: str, status: str = "note") -> int:
     return save_fact(con, f"{tag} [{session[:24]}]: {line}"[:MAX_FACT_LEN], tag)
 
 
-def mark_done(con, session: str, text: str) -> int:
-    return progress(con, session, text, status="done")
-
-
-def recent(con, limit: int = 5, exclude: tuple[str, ...] = ()) -> list[dict]:
-    """Newest facts, for the compaction brief (there is no query to match)."""
-    q = "SELECT text,source FROM facts"
-    if exclude:
-        q += " WHERE source NOT IN (" + ",".join("?" * len(exclude)) + ")"
-    q += " ORDER BY id DESC LIMIT ?"
-    try:
-        rows = con.execute(q, (*exclude, limit)).fetchall()
-    except Exception:
-        return []
-    return [{"text": t, "source": s} for t, s in rows]
-
-
 def recall(con, query: str, limit: int = 3) -> list[dict]:
     """Facts + session snippets relevant to `query`.
 
@@ -426,16 +409,3 @@ def capture_turn(con, session: str, text: str, verified: bool = False,
         promoted = auto_refine(con, memory_file(root), min_evidence=2, cap_lines=cap)
     prune(con, int(mend.get("retention_days", 30)))
     return {"facts": ids, "progress": pid, "verified": verified, "promoted": promoted}
-
-
-def forget(con, pid_or_text: str) -> int:
-    """Drop a staged item by id, or every fact matching a text fragment."""
-    try:
-        pid = int(pid_or_text)
-    except (TypeError, ValueError):
-        cur = con.execute("DELETE FROM facts WHERE text LIKE ?", (f"%{str(pid_or_text)[:60]}%",))
-        con.commit()
-        return int(cur.rowcount or 0)
-    cur = con.execute("DELETE FROM pending WHERE id=?", (pid,))
-    con.commit()
-    return int(cur.rowcount or 0)

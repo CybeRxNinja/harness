@@ -32,6 +32,13 @@ def con(root):
     c.close()
 
 
+def _recent(con, limit=5):
+    """Newest facts, oldest-last — the retired memory.recent() as raw SQL."""
+    return [{"text": t, "source": s} for t, s in
+            con.execute("SELECT text,source FROM facts ORDER BY id DESC LIMIT ?",
+                        (limit,)).fetchall()]
+
+
 # --- recall -----------------------------------------------------------------
 
 def test_recall_matches_any_term_of_a_real_question(con):
@@ -60,10 +67,16 @@ def test_recall_ranks_facts_matching_more_terms_first(con):
 
 
 def test_recall_uses_session_history_too(con):
+    import time as _t
     from harness import memory as M
-    from harness.store import add_message, ensure_session
-    ensure_session(con, "s1")
-    add_message(con, "s1", "assistant", "the checkpoint restore defect was a forward patch")
+    # the headless turn writer is retired; seed the FTS index directly to prove
+    # recall still reads session history when it is there
+    con.execute("INSERT INTO messages(session,role,content,ts) VALUES(?,?,?,?)",
+                ("s1", "assistant", "the checkpoint restore defect was a forward patch",
+                 int(_t.time())))
+    con.execute("INSERT INTO messages_fts(content,session) VALUES(?,?)",
+                ("the checkpoint restore defect was a forward patch", "s1"))
+    con.commit()
     hits = M.recall(con, "checkpoint restore defect")
     assert any("checkpoint" in h["text"] for h in hits), hits
 
@@ -93,7 +106,7 @@ def test_facts_are_capped(con):
     for i in range(12):
         M.save_fact(con, f"durable fact number {i} about the system", "turn", max_facts=10)
     assert M.fact_count(con) == 10
-    assert "number 0" not in " ".join(f["text"] for f in M.recent(con, 20))
+    assert "number 0" not in " ".join(f["text"] for f in _recent(con, 20))
 
 
 def test_important_lines_keeps_decisions_and_skips_noise():
@@ -134,15 +147,15 @@ def test_capture_turn_remembers_facts_and_progress(con, root, cfg):
     text = "Decision: keep the generated permission map.\nTests passed: 116 passed."
     out = M.capture_turn(con, "s1", text, verified=True, cfg=cfg, root=root)
     assert out["facts"] and out["verified"] is True
-    sources = {f["source"] for f in M.recent(con, 5)}
+    sources = {f["source"] for f in _recent(con, 5)}
     assert "turn" in sources and "done" in sources
 
 
 def test_capture_turn_notes_progress_without_evidence(con, root, cfg):
     from harness import memory as M
     M.capture_turn(con, "s1", "Decision: something changed.", verified=False, cfg=cfg, root=root)
-    assert not any(f["source"] == "done" for f in M.recent(con, 5))
-    assert any(f["source"] == "progress" for f in M.recent(con, 5))
+    assert not any(f["source"] == "done" for f in _recent(con, 5))
+    assert any(f["source"] == "progress" for f in _recent(con, 5))
 
 
 def test_capture_turn_honors_memory_disabled(con, root, cfg):
@@ -165,7 +178,7 @@ def test_capture_turn_skips_progress_for_a_mock_echo_with_facts(con, root, cfg):
     out = M.capture_turn(con, "s1", text, verified=False, cfg=cfg, root=root)
     assert out["facts"], "the durable line inside the echo is still remembered"
     assert out["progress"] == 0
-    sources = {f["source"] for f in M.recent(con, 10)}
+    sources = {f["source"] for f in _recent(con, 10)}
     assert "turn" in sources
     assert not ({"progress", "done"} & sources), "no echo headline as a progress note"
 
@@ -176,7 +189,7 @@ def test_capture_turn_keeps_a_breadcrumb_for_a_pure_mock_echo(con, root, cfg):
     out = M.capture_turn(con, "s1", "[mock:test-model] echo: hello", cfg=cfg, root=root)
     assert out["facts"] == []
     assert out["progress"] > 0, "the loop-wiring breadcrumb must still be recorded"
-    assert any(f["source"] == "progress" for f in M.recent(con, 5))
+    assert any(f["source"] == "progress" for f in _recent(con, 5))
 
 
 def test_capture_turn_still_notes_progress_for_an_ordinary_turn(con, root, cfg):
@@ -186,7 +199,7 @@ def test_capture_turn_still_notes_progress_for_an_ordinary_turn(con, root, cfg):
                          "Decision: keep the delivered flag so inbox() does not repeat.",
                          verified=False, cfg=cfg, root=root)
     assert out["facts"] and out["progress"] > 0
-    assert any(f["source"] == "progress" for f in M.recent(con, 5))
+    assert any(f["source"] == "progress" for f in _recent(con, 5))
 
 
 def test_prune_drops_notes_but_keeps_progress_and_lessons(con):
@@ -197,7 +210,7 @@ def test_prune_drops_notes_but_keeps_progress_and_lessons(con):
     con.execute("INSERT INTO facts(text,source,ts) VALUES(?,?,?)", ("an old done", "done", old))
     con.execute("INSERT INTO facts(text,source,ts) VALUES(?,?,?)", ("an old lesson", "lesson", old))
     assert M.prune(con, 30) == 1
-    left = {f["text"] for f in M.recent(con, 10)}
+    left = {f["text"] for f in _recent(con, 10)}
     assert "an old note" not in left and {"an old turn", "an old done", "an old lesson"} <= left
 
 
@@ -261,76 +274,7 @@ def test_approve_refuses_a_secret_and_returns_false_for_a_missing_id(con, root):
     assert M.approve(con, 999999, M.memory_file(root)) is False
 
 
-def test_forget_by_id_and_by_text(con):
-    from harness import memory as M
-    pid = M.stage_lesson(con, "temp", "e", "g")
-    assert M.forget(con, pid) == 1
-    M.save_fact(con, "a fact worth deleting later", "turn")
-    assert M.forget(con, "worth deleting") == 1
-
-
 # --- wiring -----------------------------------------------------------------
-
-def test_the_loop_captures_the_turn_and_ticks_the_ledger_only_with_evidence(root, cfg):
-    from pathlib import Path
-    from harness import orchestrator as O
-    from harness.loop import run_turn
-    wid = O.start_plan(root, "memory work", ["recall works"])
-    out = run_turn(root, "s9", "finish the memory task", mode="code", cfg=cfg)
-    assert out["memory"]["progress"] > 0
-    assert out["ledger"] is None, "a turn with no test run must not close a box"
-    plan = Path(O.load_boulder(root)["works"][wid]["plan"])
-    assert O.next_box(plan.read_text()) == "1. recall works", plan.read_text()
-
-
-def test_a_verified_run_closes_the_box(root, cfg, monkeypatch):
-    """`pytest -q` that comes back clean is the evidence the ledger accepts."""
-    from pathlib import Path
-    from harness import models, orchestrator as O
-    from harness.loop import run_turn
-    wid = O.start_plan(root, "verify work", ["tests pass"])
-    turns = {"n": 0}
-
-    (root / "test_ok.py").write_text("def test_ok():\n    assert True\n")
-
-    def fake_chat(msgs, **kw):
-        turns["n"] += 1
-        if turns["n"] == 1:
-            return {"role": "assistant", "content": "",
-                    "tool_calls": [{"id": "t1", "type": "function",
-                                    "function": {"name": "shell",
-                                                 "arguments": '{"cmd": "python -m pytest -q test_ok.py"}'}}]}
-        return {"role": "assistant", "content": "Decision: tests are green."}
-
-    monkeypatch.setattr(models, "chat", fake_chat)
-    out = run_turn(root, "s10", "run the tests", mode="code", cfg=cfg)
-    assert out["verified"] is True, out
-    assert out["ledger"], "a clean test run must close the next box"
-    assert O.next_box(Path(O.load_boulder(root)["works"][wid]["plan"]).read_text()) is None
-
-
-def test_a_failing_test_run_closes_nothing(root, cfg, monkeypatch):
-    """The rule has to cut both ways: a red run is not evidence of done."""
-    from harness import models, orchestrator as O
-    from harness.loop import run_turn
-    wid = O.start_plan(root, "red work", ["stays open"])
-    turns = {"n": 0}
-
-    def fake_chat(msgs, **kw):
-        turns["n"] += 1
-        if turns["n"] == 1:
-            return {"role": "assistant", "content": "",
-                    "tool_calls": [{"id": "t1", "type": "function",
-                                    "function": {"name": "shell",
-                                                 "arguments": '{"cmd": "python -m pytest -q missing.py"}'}}]}
-        return {"role": "assistant", "content": "Root cause: the test file is missing."}
-
-    monkeypatch.setattr(models, "chat", fake_chat)
-    out = run_turn(root, "s11", "run the tests", mode="code", cfg=cfg)
-    assert out["verified"] is False and out["ledger"] is None
-    from pathlib import Path
-    assert O.next_box(Path(O.load_boulder(root)["works"][wid]["plan"]).read_text()) == "1. stays open"
-
 
 def test_cli_memory_show_and_refine_use_the_project_memory_file(root, monkeypatch):
     from harness.cli import main
