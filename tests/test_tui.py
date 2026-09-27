@@ -206,3 +206,90 @@ def test_tui_no_bold_prop():
     """No `bold` prop: the host never verified one, so emphasis is colour-only."""
     tui = _tui_text()
     assert "bold" not in tui.lower()
+
+
+def test_tui_waits_tick_timer_self_clearing_and_cleanup():
+    """The Waits countdown ticks between host repaints without a DB read.
+
+    The 8s poll is what refreshes the rows, so a `28s left` label sat stale
+    until the next pass. A 1s timer only bumps `rev` — the detail lines
+    recompute left() from the stored deadlines on every render (see
+    liveWaits) — and it runs only while an unexpired wait exists: it starts
+    on load when rows pend, clears itself past the last deadline (with one
+    cheap reconciling load), stands down off-screen like the poll, and is
+    released with the plugin instead of dangling.
+    """
+    tui = _tui_text()
+    assert "const waitAlive = (): boolean =>" in tui, "only unexpired rows keep the tick"
+    assert "tickTimer = setInterval(() => {" in tui and "}, 1000)" in tui, "1s tick, same primitive as the poll"
+    tick = tui[tui.index("tickTimer = setInterval(() => {"):tui.index("const toggleSidebar")]
+    assert "if (!waitAlive()) {" in tick and "stopWaitTick()" in tick, "self-clear past the last deadline"
+    assert "void load()" in tick, "one reconciling pass on drain, not a stale row until POLL_MS"
+    assert "if (lastRender === 0 || Date.now() - lastRender > POLL_MS * 4) return" in tick, (
+        "off-screen stand-down, like the poll"
+    )
+    assert "d.rev = Number(d.rev ?? 0) + 1" in tick, "the tick only bumps rev — no DB read"
+    assert "db.query" not in tick and "readProjectState" not in tick, "no store touch per tick"
+    assert "clearInterval(tickTimer)" in tui, "the timer is really released"
+    assert "ensureWaitTick()" in tui, "each load reconciles the tick with the rows just read"
+    cleanup = tui[tui.index("return () => {"):]
+    assert "clearInterval(timer)" in cleanup, "the poll cleanup still releases the poll"
+    assert "stopWaitTick()" in cleanup, "no dangling Waits timer past plugin release"
+
+
+def test_tui_waits_bar_reuses_window_cells_with_legacy_fallback():
+    """Wait rows draw their elapsed/total share through the Window bar().
+
+    waitPct is 0% at record time, 100% at deadline, and -1 when the row
+    carries no usable total (pre-migration rows, drifted table); waitTail
+    then falls back to the byte-identical old ` left` text instead of a bar.
+    """
+    tui = _tui_text()
+    assert "function bar(pct: number, cells = 8): string" in tui, "the Window usage-bar precedent"
+    assert "function waitPct(row: Rec): number" in tui
+    assert "function waitTail(row: Rec): string" in tui
+    pct = tui[tui.index("function waitPct"):tui.index("function waitTail")]
+    assert "const total = Number(row?.total ?? row?.total_ms ?? 0)" in pct
+    assert "const elapsed = total - Math.max(0, deadline - Date.now())" in pct
+    assert "return -1" in pct, "no usable total is a sentinel, never a 0% bar"
+    assert "return ` ${bar(pct, 8)}`" in tui, "8 cells, reusing bar() — not a second bar implementation"
+    assert 'if (pct < 0) return " left"' in tui, "legacy text form byte-identical"
+
+
+def test_tui_waits_total_ms_read_with_legacy_fallback():
+    """The state-DB read takes total_ms when the column exists, else degrades.
+
+    Fresh/migrated DBs answer the total_ms column; a pre-migration DB throws
+    on the unknown column and the fallback reads label+deadline — those rows
+    keep the current text form via waitTail (above), never a broken row.
+    """
+    tui = _tui_text()
+    assert "SELECT label, deadline, total_ms AS total FROM waits ORDER BY deadline LIMIT ?" in tui
+    assert "SELECT label, deadline FROM waits ORDER BY deadline LIMIT ?" in tui, "pre-total fallback"
+    assert "total: Number((r as Rec)?.total ?? 0) || 0" in tui, "missing totals normalize to 0 (the waitTail gate)"
+    assert "out.waitRows = wrows.map((r) => ({" in tui, "stored rows feed the render-time recompute"
+    assert "out.waits = wrows.map((r) => `◐ ${wcut(r?.label, 15)} · ${left(r?.deadline)}${waitTail(r)}`)" in tui
+
+
+def test_tui_waits_live_recompute_wiring():
+    """Waits detail lines recompute at render time; load-time rows stay home.
+
+    The 1s tick is a bare rev bump, so the lines must re-derive left() from
+    the stored deadlines on every render (liveWaits) — while the load-time
+    rows remain the count source and the drifted-shape fallback, the signature
+    stays tick-free so a manual collapse survives the countdown, and the load
+    wires the stored rows through.
+    """
+    tui = _tui_text()
+    assert "const liveWaits = (): string[] => {" in tui
+    body = tui[tui.index("const liveWaits"):tui.index("const load = async")]
+    assert "if (!rows) return data.waits" in body, "drifted shape still renders something"
+    assert ".filter((r: Rec) => Number(r?.deadline ?? 0) > Date.now() - WAIT_GRACE_MS)" in body
+    assert "`◐ ${wcut(r?.label, 15)} · ${left(r?.deadline)}${waitTail(r)}`" in body, (
+        "same shape as the load-time rows"
+    )
+    assert "data.waitRows = state.waitRows" in tui, "the load wires the stored rows through"
+    assert "return liveWaits()" in tui, "the Waits Row renders the recompute, not the snapshot"
+    assert 'out.waitSig = wrows.map((r) => `${String(r?.label ?? "")}~${Number(r?.deadline ?? 0)}`)' in tui, (
+        "stable identity (label + deadline), never the ticking countdown"
+    )

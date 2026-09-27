@@ -639,6 +639,53 @@ def test_plugin_worker_rows_track_subagent_calls():
     assert "worker hook failed" in text
 
 
+def test_plugin_worker_sweep_retires_stale_rows():
+    """An aborted call never fires execute.after, so its queued/running row —
+    and the TUI's `N active` count over it — would linger forever. Every touch
+    of the workers table (start AND finish) therefore also retires rows still
+    queued/running past budgets.worker_timeout_s to `timeout`: the terminal
+    state the old pool wrote (TERMINAL in harness/rlm.py), never `stale`
+    (that stays `harness doctor`'s computed rule). `updated` is kept so the
+    panel keeps the stuck age, and terminal rows never match.
+    """
+    srv = _srv_text()
+    assert "const WORKER_TIMEOUT_DEFAULT_S = 600" in srv, "default parity with rlm.worker_timeout"
+    assert "function sweepStaleWorkers(db: any, timeoutS: number): void" in srv
+    sweep = srv[srv.index("function sweepStaleWorkers"):srv.index("function workerName")]
+    assert "UPDATE workers SET status='timeout' WHERE status IN ('queued','running') AND updated < ?" in sweep
+    assert "Math.floor(Date.now() / 1000) - gap" in sweep, "epoch seconds, like the row writers"
+    assert "updated=?" not in sweep and "updated = ?" not in sweep, "the flip keeps the stuck age"
+    assert "if (gap <= 0) return" in sweep, "a non-positive timeout retires nothing"
+    assert "table missing or busy" in sweep, "best-effort: a lost table never breaks tool execution"
+    assert "status='stale'" not in srv and 'status="stale"' not in srv, "stale is computed, never written"
+    # config-layered through the same chain as the memory block (nearest
+    # wins): a non-positive value would retire even a just-inserted row.
+    assert "workerTimeoutS: number" in srv and "let workerTimeoutS = WORKER_TIMEOUT_DEFAULT_S" in srv
+    assert '"worker_timeout_s"' in srv and "if (Number.isFinite(n) && n > 0) workerTimeoutS = n" in srv
+    assert "return { enabled, maxFacts, capLines, workerTimeoutS }" in srv
+    # both touches reconcile, and the fresh row lands first so it is never swept.
+    assert srv.count("sweepStaleWorkers(db, (await memoryConfig(projectDir)).workerTimeoutS)") == 2
+    started = srv[srv.index("async function workerStarted"):srv.index("async function workerFinished")]
+    assert started.index("INSERT OR IGNORE INTO workers") < started.index("sweepStaleWorkers")
+    # `timeout` is terminal in the old pool too, so the flip leaves the pool.
+    import re
+    rlm = (REPO_ROOT / "harness" / "rlm.py").read_text()
+    assert re.search(r"^TERMINAL = \(.*\"timeout\".*\)", rlm, re.M), "the old pool's terminal set owns timeout"
+    assert 'get("worker_timeout_s", 600)' in rlm, "same default on the Python side"
+    # TUI half (same HARNESS_TUI_PATH override convention as test_tui.py):
+    # the occupancy count matches only queued/running — so a flipped row
+    # drops out of `N active` — while the retired row keeps its stuck age.
+    import os
+    tui_override = os.environ.get("HARNESS_TUI_PATH")
+    if tui_override:
+        tui = Path(tui_override).read_text()
+    else:
+        from harness.cli import _plugin_files
+        tui = Path(_plugin_files()[1]).read_text()
+    assert "SELECT count(*) AS n FROM workers WHERE status IN ('queued','running')" in tui
+    assert 'WORKER_LIVE.has(status) || status === "timeout"' in tui, "a retired row keeps `· timeout 21m`"
+
+
 def _srv_text():
     """Read the server entrypoint under test.
 
@@ -934,9 +981,13 @@ def test_tui_models_rows_are_computed_on_every_load():
     assert "scanModels" not in tui[gate:tui.index("\n        }\n", gate)]
     assert "warmedFor = sessionID" in tui and "setTimeout(() => void load(), 500)" in tui
     # real step counts, not a hard-coded "1 step", aligned in columns that fit
-    # the 32-cell detail budget: model left, steps right
+    # the 32-cell detail budget: model left, steps right, split by a `·`
+    # separator so a truncated name can never glue to the count (`…2 steps`)
     assert 'e.steps === 1 ? "" : "s"' in tui
-    assert "`${cut(name, 18).padEnd(18)}${e.steps} step" in tui
+    assert "`${cut(name, 18).padEnd(18)} · ${e.steps} step" in tui
+    assert "`${cut(name, 18).padEnd(18)}${e.steps} step" not in tui, (
+        "the separator must survive truncation: no `…<digits> step` glue"
+    )
     # a session that has sent nothing still shows the selected model — as a
     # "fallback" row that is NOT counted as usage ("1 used" before the first
     # message was the old lie)
@@ -1705,3 +1756,60 @@ def test_plugin_skill_roots_project_overlay():
     seeds = srv[srv.index("async function seedSkills"):srv.index("async function readSkill")]
     assert "const seen = new Set<string>()" in seeds
     assert "if (seen.has(name)) continue" in seeds, "first root wins: the overlay shadows package data"
+
+
+def test_plugin_wait_writes_total_ms_with_migration_fallback():
+    """The Waits bar needs the full countdown length, not just the deadline.
+
+    recordWait carries `total_ms` (elapsed/total share is deadline-anchored:
+    0% at record time, 100% at deadline), old DBs gain the column through a
+    best-effort ADD COLUMN migration that never fails, and a raced/failed
+    migration still lands label+deadline — the row then reads back without a
+    total and the TUI keeps its plain text form.
+    """
+    srv = _srv_text()
+    assert "async function recordWait(projectDir: string, id: string, label: string, deadline: number, totalMs = 0)" in srv
+    assert "CREATE TABLE IF NOT EXISTS waits(id TEXT PRIMARY KEY, label TEXT, deadline INTEGER, total_ms INTEGER)" in srv
+    assert "ALTER TABLE waits ADD COLUMN total_ms INTEGER" in srv, "old DBs migrate, never fail"
+    assert "INSERT OR REPLACE INTO waits(id, label, deadline, total_ms) VALUES(?,?,?,?)" in srv
+    assert srv.count("INSERT OR REPLACE INTO waits(id, label, deadline) VALUES(?,?,?)") >= 2, (
+        "zero-total write plus the migration-failure fallback both land label+deadline"
+    )
+    assert "await recordWait(directory, id, label, deadline, secs * 1000)" in srv, (
+        "the wait tool passes the full countdown length, not just the deadline"
+    )
+
+
+def _skill_src():
+    """Seed-skill root under test.
+
+    HARNESS_SKILLS_SRC overrides the dir so this pin can run unmodified
+    against a pristine copy (e.g. `git archive HEAD harness/data/skills`
+    staged in .opencode/harness/tmp/) for failing-first proof; the product
+    tree is never touched. Mirrors _srv_text()/test_tui.py's _tui_text().
+    """
+    import os
+    override = os.environ.get("HARNESS_SKILLS_SRC")
+    if override:
+        return Path(override)
+    return REPO_ROOT / "harness" / "data" / "skills"
+
+
+def test_plugin_apk_reverse_skill_seed():
+    """security/apk-reverse ships as a seed: valid frontmatter naming it,
+    picked up by the `**/SKILL.md` seed glob alongside the other 15."""
+    src = _skill_src()
+    md = src / "security" / "apk-reverse" / "SKILL.md"
+    assert md.is_file(), "seed skill missing from package data"
+    text = md.read_text()
+    assert text.startswith("---\n"), "frontmatter block must lead the file"
+    fm = {}
+    for line in text.split("---", 2)[1].splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            fm[k.strip()] = v.strip()
+    assert fm.get("name") == "apk-reverse", fm
+    assert fm.get("description"), "seeds need the one-line description skills_list shows"
+    found = sorted(src.rglob("SKILL.md"))
+    assert len(found) == 16, [p.parent.name for p in found]
+    assert md in found

@@ -440,14 +440,16 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * The `wait` tool's countdown rows: `waits(id, label, deadline)` in the same
- * project state DB as the todo space, so the TUI reads it in its one
- * read-only open. `deadline` is epoch MILLISECONDS (Date.now() based); the
- * row lives only for the sleep and is deleted on expiry. A killed call never
- * reaches the delete, so every touch of the table also sweeps rows whose
- * deadline already passed (sweepExpiredWaits) — and the TUI hides expired
- * rows outright, so a stuck row can never linger in the panel. Best-effort on
- * purpose: a lost countdown must never fail the wait itself.
+ * The `wait` tool's countdown rows: `waits(id, label, deadline, total_ms)` in
+ * the same project state DB as the todo space, so the TUI reads it in its one
+ * read-only open. `deadline` is epoch MILLISECONDS (Date.now() based);
+ * `total_ms` is the full countdown length, so the TUI can draw an
+ * elapsed/total bar (pre-migration rows have none and read back as plain
+ * text). The row lives only for the sleep and is deleted on expiry. A killed
+ * call never reaches the delete, so every touch of the table also sweeps rows
+ * whose deadline already passed (sweepExpiredWaits) — and the TUI hides
+ * expired rows outright, so a stuck row can never linger in the panel.
+ * Best-effort on purpose: a lost countdown must never fail the wait itself.
  */
 /**
  * Delete countdown rows whose deadline already passed. A killed `wait` never
@@ -463,12 +465,37 @@ function sweepExpiredWaits(db: any): void {
   }
 }
 
-async function recordWait(projectDir: string, id: string, label: string, deadline: number): Promise<void> {
+async function recordWait(projectDir: string, id: string, label: string, deadline: number, totalMs = 0): Promise<void> {
   const db = await todoDb(projectDir, true)
   if (!db) return
   try {
-    db.run("CREATE TABLE IF NOT EXISTS waits(id TEXT PRIMARY KEY, label TEXT, deadline INTEGER)")
-    db.run("INSERT OR REPLACE INTO waits(id, label, deadline) VALUES(?,?,?)", id, label, deadline)
+    db.run("CREATE TABLE IF NOT EXISTS waits(id TEXT PRIMARY KEY, label TEXT, deadline INTEGER, total_ms INTEGER)")
+    // ADD COLUMN IF NOT EXISTS-style migration for pre-total rows: a no-op
+    // when the column is already there (fresh DBs land it via the CREATE
+    // above), never a failure on old DBs.
+    try {
+      db.run("ALTER TABLE waits ADD COLUMN total_ms INTEGER")
+    } catch {
+      /* column already exists */
+    }
+    const total = Number(totalMs) > 0 ? Math.floor(Number(totalMs)) : 0
+    try {
+      if (total > 0) {
+        db.run(
+          "INSERT OR REPLACE INTO waits(id, label, deadline, total_ms) VALUES(?,?,?,?)",
+          id,
+          label,
+          deadline,
+          total,
+        )
+      } else {
+        db.run("INSERT OR REPLACE INTO waits(id, label, deadline) VALUES(?,?,?)", id, label, deadline)
+      }
+    } catch {
+      // The migration raced or failed: label+deadline still land, the row
+      // just reads back without a total (the TUI falls back to text form).
+      db.run("INSERT OR REPLACE INTO waits(id, label, deadline) VALUES(?,?,?)", id, label, deadline)
+    }
     sweepExpiredWaits(db)
   } catch {
     /* sidebar countdown best-effort */
@@ -559,6 +586,8 @@ const MEM_LINES_PER_MSG = 3
 const MEM_SEEN_PER_SESSION = 200
 const MEM_DEFAULT_MAX_FACTS = 2000
 const MEM_DEFAULT_CAP_LINES = 200
+/** Default when budgets.worker_timeout_s is absent (parity with rlm.worker_timeout). */
+const WORKER_TIMEOUT_DEFAULT_S = 600
 const MEM_MIN_EVIDENCE = 2
 const MEM_MAX_EVIDENCE_LEN = 8000
 const MEM_MAX_GIST_LEN = 200
@@ -706,10 +735,11 @@ function memAssistantTexts(messages: any): string[] {
  * uses; only enabled/max_facts are picked out, so a half-written file cannot
  * break anything. Fail-open: unreadable means enabled with defaults.
  */
-async function memoryConfig(projectDir: string): Promise<{ enabled: boolean; maxFacts: number; capLines: number }> {
+async function memoryConfig(projectDir: string): Promise<{ enabled: boolean; maxFacts: number; capLines: number; workerTimeoutS: number }> {
   let enabled = true
   let maxFacts = MEM_DEFAULT_MAX_FACTS
   let capLines = MEM_DEFAULT_CAP_LINES
+  let workerTimeoutS = WORKER_TIMEOUT_DEFAULT_S
   // Project candidates, farthest-first so the nearest wins — user file first
   // as the base, mirroring load_config's defaults < user < ancestor… < nearest.
   const projectFiles: string[] = []
@@ -756,8 +786,18 @@ async function memoryConfig(projectDir: string): Promise<{ enabled: boolean; max
       const n = parseInt(lines, 10)
       if (Number.isFinite(n)) capLines = n
     }
+    // Worker liveness shares this chain (nearest wins): the workers-table
+    // sweep retires queued/running rows older than budgets.worker_timeout_s,
+    // mirroring rlm.worker_timeout in harness/rlm.py.
+    const budgets = code.match(/"budgets"\s*:\s*\{([^}]*)\}/)?.[1] ?? ""
+    const timeout = budgets.match(/"worker_timeout_s"\s*:\s*(-?\d+)/)?.[1]
+    if (timeout !== undefined) {
+      const n = parseInt(timeout, 10)
+      // A non-positive timeout would retire even a just-inserted row.
+      if (Number.isFinite(n) && n > 0) workerTimeoutS = n
+    }
   }
-  return { enabled, maxFacts, capLines }
+  return { enabled, maxFacts, capLines, workerTimeoutS }
 }
 
 /** Read-write open of the project state DB, creating the live tables in the
@@ -1185,13 +1225,41 @@ function condenseToolResult(event: Rec): void {
 //    the opencode v2.0.18 server bundle (see the item-4 probe notes). So
 //    execute.before on a subagent call INSERTs a queued row into the existing
 //    `workers` table and execute.after marks it done/error. Both names are
-//    matched: `subagent` (live) and `task` (legacy alias). Stale stays computed,
-//    never written — the TUI already does that — and only queued/running rows
-//    ever transition, so a terminal row is never clobbered.
+//    matched: `subagent` (live) and `task` (legacy alias). An aborted call
+//    never fires execute.after, so every touch of the table also retires
+//    queued/running rows older than budgets.worker_timeout_s to `timeout`
+//    (sweepStaleWorkers) — the terminal state the old pool wrote. Stale stays
+//    computed, never written — the TUI already does that — and only
+//    queued/running rows ever transition, so a terminal row is never clobbered.
 // ---------------------------------------------------------------------------
 
 /** Tool names that spawn a subagent session (live name + legacy alias). */
 const WORKER_TOOLS = new Set(["subagent", "task"])
+
+/**
+ * Retire worker rows an aborted call left behind. execute.after (which flips
+ * queued→done/error) never fires on abort/server-restart, so without this a
+ * `queued` row — and the TUI's `N active` count over it — lingers forever.
+ * Rows still queued/running past the worker timeout flip to `timeout`, the
+ * terminal state the old pool already wrote (TERMINAL in harness/rlm.py); the
+ * `stale` verdict string is never written — that stays `harness doctor`'s
+ * computed rule (`budgets.worker_timeout_s` × 2). `updated` is kept so the
+ * row keeps its stuck age for the panel; only queued/running rows ever match,
+ * so a terminal row is never clobbered. Best-effort like sweepExpiredWaits:
+ * a missing or busy table costs nothing and never breaks tool execution.
+ */
+function sweepStaleWorkers(db: any, timeoutS: number): void {
+  try {
+    const gap = Math.floor(Number(timeoutS) || WORKER_TIMEOUT_DEFAULT_S)
+    if (gap <= 0) return
+    db.run(
+      "UPDATE workers SET status='timeout' WHERE status IN ('queued','running') AND updated < ?",
+      Math.floor(Date.now() / 1000) - gap,
+    )
+  } catch {
+    /* table missing or busy */
+  }
+}
 
 function workerName(input: Rec): string {
   for (const k of ["description", "prompt", "agent", "subagent_type", "category"]) {
@@ -1225,6 +1293,10 @@ async function workerStarted(projectDir: string, event: Rec): Promise<void> {
         0,
         Math.floor(Date.now() / 1000),
       )
+      // Every touch of the table reconciles (same precedent as the waits
+      // sweep): an aborted call never fires execute.after, so its row would
+      // otherwise claim `queued` — and count as active — forever.
+      sweepStaleWorkers(db, (await memoryConfig(projectDir)).workerTimeoutS)
     } finally {
       try {
         db.close()
@@ -1251,6 +1323,9 @@ async function workerFinished(projectDir: string, event: Rec): Promise<void> {
         Math.floor(Date.now() / 1000),
         id,
       )
+      // A completion is also a touch of the table: reconcile the pool on the
+      // way out, same as workerStarted does on the way in.
+      sweepStaleWorkers(db, (await memoryConfig(projectDir)).workerTimeoutS)
       // Fusion: a finished subagent is a verified outcome (unlike the context
       // hook, which only ever writes `progress`), so it also drops one memory
       // note through the existing writer — done→done, error→blocked. Same
@@ -1488,7 +1563,7 @@ const HarnessPlugin = {
             const hint = String(input?.hint ?? "").replace(/\s+/g, " ").trim().slice(0, 200)
             const deadline = Date.now() + secs * 1000
             const id = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`
-            await recordWait(directory, id, label, deadline)
+            await recordWait(directory, id, label, deadline, secs * 1000)
             try {
               await sleep(secs * 1000)
             } finally {

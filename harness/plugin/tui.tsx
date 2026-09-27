@@ -43,10 +43,14 @@
 //   * The Workers row reads the RLM pool out of the same DB (`workers`), keyed
 //     by PROJECT — `rlm.spawn` leaves `workers.session` empty, so a worker is
 //     not this session's. It shows the persisted status plus the age of the
-//     last update; the authoritative stale verdict stays `harness doctor`'s.
+//     last update; a row the server sweep retired to `timeout` keeps its age,
+//     so the flip reads as history — while the active count covers only
+//     queued/running rows. The authoritative stale verdict stays `harness doctor`'s.
 //   * The Waits row reads the `wait` tool's countdowns out of the same DB
-//     (`waits`: label + deadline), PROJECT-wide like Workers. It auto-expands
-//     while any wait is pending and hides when none is.
+//     (`waits`: label + deadline + total_ms), PROJECT-wide like Workers. It auto-expands
+//     while any wait is pending and hides when none is. The countdown ticks
+//     every second at render time (a 1s `rev` bump over the stored deadlines —
+//     no DB read per tick); rows without a total keep the plain text form.
 //   * `ctx.keymap.layer(...)` throws "Keymap.Provider is missing" unless it is
 //     called from inside a slot's render component, so commands are registered
 //     from the `app` slot (the pattern the CLI-plugin docs use).
@@ -231,6 +235,31 @@ function bar(pct: number, cells = 8): string {
   let filled = Math.round((clamped / 100) * cells)
   if (clamped > 0 && filled < 1) filled = 1
   return `${"█".repeat(filled)}${"░".repeat(cells - filled)}`
+}
+
+/**
+ * Elapsed/total share of a wait row for its progress bar, reusing bar() (the
+ * Window usage-bar precedent): 0% at record time, 100% at deadline. Returns
+ * -1 when the row carries no usable total — pre-migration rows or a drifted
+ * table — so the caller falls back to the current text form.
+ */
+function waitPct(row: Rec): number {
+  const total = Number(row?.total ?? row?.total_ms ?? 0)
+  const deadline = Number(row?.deadline ?? 0)
+  if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(deadline) || deadline <= 0) return -1
+  const elapsed = total - Math.max(0, deadline - Date.now())
+  return Math.max(0, Math.min(100, (elapsed / total) * 100))
+}
+
+/**
+ * Trailing cell of a wait row. Without a total it is the old ` left` (the
+ * fallback is byte-identical); with one the 8-cell bar replaces the word —
+ * 5 cells saved toward the 32-col detail budget — reading `◐ demo · 28s ██░░`.
+ */
+function waitTail(row: Rec): string {
+  const pct = waitPct(row)
+  if (pct < 0) return " left"
+  return ` ${bar(pct, 8)}`
 }
 
 /**
@@ -432,6 +461,7 @@ const HarnessTui = {
       workers: [] as string[],
       workersActive: 0,
       waits: [] as string[],
+      waitRows: [] as Rec[],
       waitSig: "",
     }
     let sqlite: any = null
@@ -486,6 +516,7 @@ const HarnessTui = {
         workers: [] as string[],
         workersActive: 0,
         waits: [] as string[],
+        waitRows: [] as Rec[],
         waitSig: "",
       }
       try {
@@ -519,7 +550,10 @@ const HarnessTui = {
               .all(ROW_LIMIT) as Rec[]
             out.workers = rows.map((r) => {
               const status = String(r?.status ?? "?")
-              const since = WORKER_LIVE.has(status) ? ` ${age(r?.updated)}` : ""
+              // A retired row keeps its age (`! name · timeout 21m`): the flip
+              // is visible as history, not a disappearance — while the active
+              // count above already excludes it.
+              const since = WORKER_LIVE.has(status) || status === "timeout" ? ` ${age(r?.updated)}` : ""
               return `${workerMark(status)} ${wcut(r?.name, 15)} · ${status}${since}`
             })
           } catch {
@@ -531,16 +565,35 @@ const HarnessTui = {
             // record is removed on expiry, so anything still past-due here is
             // a killed wait whose delete never ran — it must never linger in
             // the panel (the sweep in the server half removes it on the next
-            // touch of the table). The display ticks every pass but the
-            // signature below does not, so a manual collapse survives the
-            // countdown.
-            const wrows = (
-              db.query("SELECT label, deadline FROM waits ORDER BY deadline LIMIT ?").all(ROW_LIMIT) as Rec[]
-            ).filter((r) => Number(r?.deadline ?? 0) > Date.now() - WAIT_GRACE_MS)
+            // touch of the table). The display ticks every second at render time
+            // (see liveWaits) but the signature below does not, so a manual
+            // collapse survives the countdown.
+            // total_ms is new (the server half migrates old DBs best-effort):
+            // read it when present, fall back to label+deadline when absent —
+            // rows without totals keep the current text form (see waitTail).
+            let wrows: Rec[]
+            try {
+              wrows = (
+                db.query("SELECT label, deadline, total_ms AS total FROM waits ORDER BY deadline LIMIT ?").all(
+                  ROW_LIMIT,
+                ) as Rec[]
+              ).filter((r) => Number(r?.deadline ?? 0) > Date.now() - WAIT_GRACE_MS)
+            } catch {
+              wrows = (
+                db.query("SELECT label, deadline FROM waits ORDER BY deadline LIMIT ?").all(ROW_LIMIT) as Rec[]
+              ).filter((r) => Number(r?.deadline ?? 0) > Date.now() - WAIT_GRACE_MS)
+            }
+            out.waitRows = wrows.map((r) => ({
+              label: String(r?.label ?? ""),
+              deadline: Number(r?.deadline ?? 0),
+              total: Number((r as Rec)?.total ?? 0) || 0,
+            }))
             out.waitSig = wrows.map((r) => `${String(r?.label ?? "")}~${Number(r?.deadline ?? 0)}`).join("\u0001")
             // Every row opens with the live mark, like the todo/worker marks
-            // above: one icon in a stable column, never bare text.
-            out.waits = wrows.map((r) => `◐ ${wcut(r?.label, 15)} · ${left(r?.deadline)} left`)
+            // above: one icon in a stable column, never bare text. The tail
+            // is the live countdown plus, when the row carries a total, its
+            // elapsed/total bar — without one it is the old text (see waitTail).
+            out.waits = wrows.map((r) => `◐ ${wcut(r?.label, 15)} · ${left(r?.deadline)}${waitTail(r)}`)
           } catch {
             /* no waits table yet */
           }
@@ -700,9 +753,11 @@ const HarnessTui = {
         steps.push({ row: `${cut(prov, 20)}:`, kind: "provider" })
         for (const [name, e] of used) {
           // Aligned columns inside the 32-cell detail budget: model left,
-          // steps right. Per-model cost stays out — the Tokens row owns `$`.
+          // steps right, with a `·` separator so a truncated name can never
+          // glue to the count (`…849 steps`). Per-model cost stays out —
+          // the Tokens row owns `$`.
           steps.push({
-            row: `${cut(name, 18).padEnd(18)}${e.steps} step${e.steps === 1 ? "" : "s"}`,
+            row: `${cut(name, 18).padEnd(18)} · ${e.steps} step${e.steps === 1 ? "" : "s"}`,
             kind: "row",
           })
         }
@@ -715,6 +770,21 @@ const HarnessTui = {
       }
       data.steps = steps
       data.provsUsed = byProv.size
+    }
+
+    /**
+     * Waits detail lines recomputed at RENDER time from the stored deadlines,
+     * so the 1s tick below (a bare `rev` bump) shows a live countdown with no
+     * DB read. Same shape as the load-time rows in readProjectState — those
+     * stay the count source and the no-row fallback (waitRows is always set
+     * alongside them, but a drifted shape must still render something).
+     */
+    const liveWaits = (): string[] => {
+      const rows = Array.isArray(data.waitRows) ? data.waitRows : null
+      if (!rows) return data.waits
+      return rows
+        .filter((r: Rec) => Number(r?.deadline ?? 0) > Date.now() - WAIT_GRACE_MS)
+        .map((r: Rec) => `◐ ${wcut(r?.label, 15)} · ${left(r?.deadline)}${waitTail(r)}`)
     }
 
     const load = async (full = false) => {
@@ -822,6 +892,7 @@ const HarnessTui = {
         data.workers = state.workers
         data.workersActive = state.workersActive
         data.waits = state.waits
+        data.waitRows = state.waitRows
         data.waitSig = state.waitSig
 
         // warm the session store for the next poll (see the note above on why
@@ -916,6 +987,10 @@ const HarnessTui = {
           // freshly loaded stats.
           d.rev = Number(d.rev ?? 0) + 1
         })
+        // Reconcile the 1s Waits tick with the rows just read: it starts when
+        // a wait is pending and stops (with one cheap reconciling pass) when
+        // none is — never a dangling timer past the last deadline.
+        ensureWaitTick()
         loading = false
         if (pendingFull) {
           pendingFull = false
@@ -952,6 +1027,58 @@ const HarnessTui = {
       }, POLL_MS)
     } catch (e) {
       log(`poll unavailable: ${short(e)}`)
+    }
+
+    // The Waits countdown ticks between host repaints: the 8s poll above is
+    // what refreshes the rows, so a `28s left` label sat stale until the next
+    // pass. This 1s timer only bumps `rev` — the Waits detail lines recompute
+    // left() from the stored deadlines on every render (see liveWaits), so a
+    // bump is a fresh countdown with no DB read. It runs only while an
+    // unexpired wait exists and clears itself when none remains; like the
+    // poll it stands down when the panel is off-screen, and it is released
+    // with the plugin (see the cleanup below). setInterval is the same
+    // primitive the poll above already relies on in this host.
+    let tickTimer: any = null
+    const waitAlive = (): boolean =>
+      (Array.isArray(data.waitRows) ? data.waitRows : []).some(
+        (r: Rec) => Number(r?.deadline ?? 0) > Date.now() - WAIT_GRACE_MS,
+      )
+    const stopWaitTick = () => {
+      if (tickTimer !== null) {
+        try {
+          clearInterval(tickTimer)
+        } catch {
+          /* already released */
+        }
+        tickTimer = null
+      }
+    }
+    const ensureWaitTick = () => {
+      if (!waitAlive()) {
+        // Rows just drained: one cheap pass reconciles the count and leaves
+        // `open`, instead of waiting up to POLL_MS with a stale row on screen.
+        if (tickTimer !== null) {
+          stopWaitTick()
+          void load()
+        }
+        return
+      }
+      if (tickTimer !== null) return
+      try {
+        tickTimer = setInterval(() => {
+          if (!waitAlive()) {
+            stopWaitTick()
+            void load()
+            return
+          }
+          if (lastRender === 0 || Date.now() - lastRender > POLL_MS * 4) return
+          patch((d) => {
+            d.rev = Number(d.rev ?? 0) + 1
+          })
+        }, 1000)
+      } catch (e) {
+        log(`wait tick unavailable: ${short(e)}`)
+      }
     }
 
     const toggleSidebar = () => {
@@ -1297,7 +1424,7 @@ const HarnessTui = {
                   }}
                   lines={() => {
                     void view.rev
-                    return data.waits
+                    return liveWaits()
                   }}
                   empty="(no waits pending)"
                   tone={() => th.base}
@@ -1436,6 +1563,7 @@ const HarnessTui = {
       } catch {
         /* nothing to release */
       }
+      stopWaitTick()
     }
   },
 }
