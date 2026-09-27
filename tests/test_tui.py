@@ -136,3 +136,73 @@ def test_tui_empty_store_settles_after_bounded_retries():
     assert "if (full || !scanned) {" in tui
     assert "scanned = false" in tui
     assert "slowTries = 0" in tui
+
+
+def test_tui_waits_rows_carry_live_icon():
+    """Waits rows open with the live mark in a stable icon column.
+
+    Every todo/worker row already opened with its status glyph; Waits rows
+    were bare text (`label · 3m12s left`). The polish gives each row the
+    live `◐` mark like the marks above, so the column stays stable.
+    Value strings are byte-identical — colour/icon only, no behavior change.
+    """
+    tui = _tui_text()
+    # stable icon column, never bare text.
+    assert "out.waits = wrows.map((r) => `◐ " in tui
+    assert "◐ ${wcut(r?.label, 15)}" in tui
+    # value strings unchanged by the polish.
+    assert "1 waiting" in tui
+    assert "(no waits pending)" in tui
+
+
+def test_tui_value_emphasis_wiring():
+    """Value-vs-muted hierarchy: values pop, calm states recede to muted.
+
+    The Row owns the hierarchy (`valueFg`/`tone` props, colour only —
+    strings unchanged); each row wires its pressure/occupancy into it, and
+    empty/calm states stay dimmed instead of shouting in the label colour.
+    """
+    tui = _tui_text()
+    # the props exist and the Row falls back to muted without them.
+    assert "valueFg?: () => string" in tui
+    assert "tone?: (line: string) => string" in tui
+    assert "props.valueFg ? props.valueFg() : th.muted" in tui
+    assert "props.tone ? props.tone(l) : th.muted" in tui
+    # rows wire it: at least one per-row valueFg and tone.
+    assert "valueFg={()" in tui
+    assert "tone={(l)" in tui
+    assert "tone={() => th.base}" in tui
+    # muted calm states: collapsed footer, empty window/tokens, idle pool,
+    # unseeded stores — colour only, same strings as before.
+    assert "openCount() ? th.base : th.muted" in tui
+    assert "return pct() >= 80 ? th.warn : th.base" in tui
+    assert "return data.tokens ? th.base : th.muted" in tui
+    assert "return view.workersActive ? th.base : th.muted" in tui
+    assert "return (view.skills ?? 0) > 0 ? th.base : th.muted" in tui
+    # value strings byte-identical under the new colours.
+    assert "click a row" in tui
+    assert "${openCount()} expanded" in tui
+
+
+def test_tui_user_names_word_boundary_truncation():
+    """User-facing names cut at a word boundary (`wcut`), never mid-word.
+
+    The Memory rows showed `progress [s_5526202c]: [mock:…` — cut at 30
+    cols mid-token. Todo/Workers/Waits names and the 32-col detail rows use
+    the same word-boundary cut; the Memory humanizer already did.
+    """
+    tui = _tui_text()
+    assert "function wcut(value: unknown, max: number)" in tui
+    # Todo text, Worker name, Wait label — the user-facing names.
+    assert "wcut(r?.text, 30)" in tui
+    assert "wcut(r?.name, 15)" in tui
+    assert "wcut(r?.label, 15)" in tui
+    # detail rows (covers Memory display) + the fact humanizer itself.
+    assert "wcut(l, 32)" in tui
+    assert "wcut(m[3], 30)" in tui
+
+
+def test_tui_no_bold_prop():
+    """No `bold` prop: the host never verified one, so emphasis is colour-only."""
+    tui = _tui_text()
+    assert "bold" not in tui.lower()

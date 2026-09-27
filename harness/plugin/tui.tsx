@@ -496,7 +496,7 @@ const HarnessTui = {
             // plan as this one's is not.
             out.todosFallback = !mine.length && rows.length > 0
             out.todosDone = rows.filter((r) => String(r?.status ?? "") === "completed").length
-            out.todos = rows.map((r) => `${todoMark(r?.status)} ${cut(r?.text, 30)}`)
+            out.todos = rows.map((r) => `${todoMark(r?.status)} ${wcut(r?.text, 30)}`)
           } catch {
             /* no todos table yet */
           }
@@ -511,7 +511,7 @@ const HarnessTui = {
             out.workers = rows.map((r) => {
               const status = String(r?.status ?? "?")
               const since = WORKER_LIVE.has(status) ? ` ${age(r?.updated)}` : ""
-              return `${workerMark(status)} ${cut(r?.name, 15)} · ${status}${since}`
+              return `${workerMark(status)} ${wcut(r?.name, 15)} · ${status}${since}`
             })
           } catch {
             /* no workers table yet */
@@ -524,7 +524,9 @@ const HarnessTui = {
               .query("SELECT label, deadline FROM waits ORDER BY deadline LIMIT ?")
               .all(ROW_LIMIT) as Rec[]
             out.waitSig = wrows.map((r) => `${String(r?.label ?? "")}~${Number(r?.deadline ?? 0)}`).join("\u0001")
-            out.waits = wrows.map((r) => `${cut(r?.label, 15)} · ${left(r?.deadline)} left`)
+            // Every row opens with the live mark, like the todo/worker marks
+            // above: one icon in a stable column, never bare text.
+            out.waits = wrows.map((r) => `◐ ${wcut(r?.label, 15)} · ${left(r?.deadline)} left`)
           } catch {
             /* no waits table yet */
           }
@@ -1019,6 +1021,11 @@ const HarnessTui = {
       hide?: () => boolean
       /** Optional value colour — the Window row tints itself by pressure. */
       valueFg?: () => string
+      /**
+       * Optional detail-row colour per line (strings unchanged — colour only):
+       * active items pop in the stronger colour, settled ones recede to muted.
+       */
+      tone?: (line: string) => string
     }) => {
       // A section with nothing in it is noise, not honesty: an empty Workers
       // row or "0 facts" Memory is exactly the clutter the panel must drop.
@@ -1060,8 +1067,10 @@ const HarnessTui = {
                 // 32 columns + the two-space indent is the sidebar's whole content
                 // width (measured off a real 42-column sidebar): one more and
                 // opencode middle-truncates the row it is already showing.
-                <text fg={th.muted} wrapMode="none" truncate>
-                  {`  ${cut(l, 32)}`}
+                // Word-boundary cut, like the fact rows: a mid-word cut hid the
+                // end of the token it landed on.
+                <text fg={props.tone ? props.tone(l) : th.muted} wrapMode="none" truncate>
+                  {`  ${wcut(l, 32)}`}
                 </text>
               ))
             })()}
@@ -1101,7 +1110,8 @@ const HarnessTui = {
             /** Pressure tint: quiet until the window is actually filling up. */
             const windowFg = (): string => {
               void view.rev
-              return pct() >= 80 ? th.warn : th.muted
+              if (!data.tokens) return th.muted
+              return pct() >= 80 ? th.warn : th.base
             }
             const windowLines = (): string[] => {
               void view.rev
@@ -1174,7 +1184,18 @@ const HarnessTui = {
                   lines={windowLines}
                   empty="(no context data yet)"
                 />
-                <Row id="tokens" label="Tokens" value={tokenValue} lines={tokenLines} empty="(no usage yet)" />
+                <Row
+                  id="tokens"
+                  label="Tokens"
+                  value={tokenValue}
+                  valueFg={() => {
+                    void view.rev
+                    return data.tokens ? th.base : th.muted
+                  }}
+                  lines={tokenLines}
+                  empty="(no usage yet)"
+                  tone={(l) => (l.startsWith("+ ") ? th.base : th.muted)}
+                />
                 <Row
                   id="models"
                   label="Models"
@@ -1184,11 +1205,16 @@ const HarnessTui = {
                     const p = view.providers ?? 0
                     return `${view.models} model${view.models === 1 ? "" : "s"} · ${p} provider${p === 1 ? "" : "s"}`
                   }}
+                  valueFg={() => {
+                    void view.rev
+                    return view.models ? th.base : th.muted
+                  }}
                   lines={() => {
                     void view.rev
                     return data.steps.map((s: Rec) => String(s.row))
                   }}
                   empty="(none used in this session)"
+                  tone={(l) => (l.endsWith(":") ? th.base : th.muted)}
                 />
                 <Row
                   id="todo"
@@ -1199,6 +1225,7 @@ const HarnessTui = {
                     if (!n) return "—"
                     return `${view.todosDone ?? 0}/${n} done${view.todosProject ? " · project" : ""}`
                   }}
+                  valueFg={() => th.base}
                   hide={() => {
                     void view.rev
                     return !(view.todos ?? 0)
@@ -1208,6 +1235,7 @@ const HarnessTui = {
                     return data.todos
                   }}
                   empty="(none in this session)"
+                  tone={(l) => (l.startsWith("◐") ? th.accent : l.startsWith("○") ? th.base : th.muted)}
                 />
                 {/* Project-wide, unlike the rows above: `rlm.spawn` records a
                     worker before the pool runs it and leaves `session` empty, so
@@ -1216,6 +1244,10 @@ const HarnessTui = {
                   id="workers"
                   label="Workers"
                   value={() => (view.workersActive ? `${view.workersActive} active` : "idle")}
+                  valueFg={() => {
+                    void view.rev
+                    return view.workersActive ? th.base : th.muted
+                  }}
                   hide={() => {
                     void view.rev
                     return !view.workers
@@ -1225,6 +1257,13 @@ const HarnessTui = {
                     return data.workers
                   }}
                   empty="(no workers in this project)"
+                  tone={(l) =>
+                    l.startsWith("✕") || l.startsWith("!") || l.startsWith("~")
+                      ? th.warn
+                      : l.startsWith("◐") || l.startsWith("○")
+                        ? th.base
+                        : th.muted
+                  }
                 />
                 {/* Project-wide like Workers above: a countdown belongs to the
                     project, not to whichever session started it. Hidden while
@@ -1237,6 +1276,7 @@ const HarnessTui = {
                     const n = view.waits ?? 0
                     return n === 1 ? "1 waiting" : `${n} waiting`
                   }}
+                  valueFg={() => th.base}
                   hide={() => {
                     void view.rev
                     return !(view.waits ?? 0)
@@ -1246,11 +1286,16 @@ const HarnessTui = {
                     return data.waits
                   }}
                   empty="(no waits pending)"
+                  tone={() => th.base}
                 />
                 <Row
                   id="skills"
                   label="Skills"
                   value={() => `${view.skills ?? 0} installed`}
+                  valueFg={() => {
+                    void view.rev
+                    return (view.skills ?? 0) > 0 ? th.base : th.muted
+                  }}
                   lines={() => {
                     void view.rev
                     // Cold stores answer empty on the first pass: while the
@@ -1265,6 +1310,10 @@ const HarnessTui = {
                   id="agents"
                   label="Agents"
                   value={() => `${view.agents ?? 0} available`}
+                  valueFg={() => {
+                    void view.rev
+                    return (view.agents ?? 0) > 0 ? th.base : th.muted
+                  }}
                   lines={() => {
                     void view.rev
                     // Active agent first and marked; internals were filtered
@@ -1276,11 +1325,13 @@ const HarnessTui = {
                       .map((a) => `${a === cur ? "●" : "◦"} ${a}`)
                   }}
                   empty="(none registered)"
+                  tone={(l) => (l.startsWith("●") ? th.base : th.muted)}
                 />
                 <Row
                   id="memory"
                   label="Memory"
                   value={() => `${view.facts ?? 0} fact${(view.facts ?? 0) === 1 ? "" : "s"}`}
+                  valueFg={() => th.base}
                   hide={() => {
                     void view.rev
                     return !(view.facts ?? 0)
@@ -1290,6 +1341,9 @@ const HarnessTui = {
                     return data.facts
                   }}
                   empty="(no durable facts yet)"
+                  tone={(l) =>
+                    l.startsWith("◐") ? th.accent : l.startsWith("✕") || l.startsWith("⚠") ? th.warn : th.muted
+                  }
                 />
               </box>
             )
@@ -1302,7 +1356,8 @@ const HarnessTui = {
       ctx.ui.slot({
         append: "sidebar.footer",
         render: () => (
-          <text fg={th.muted} wrapMode="none" truncate>
+          // Calm when collapsed, stronger once rows are open — colour only.
+          <text fg={openCount() ? th.base : th.muted} wrapMode="none" truncate>
             {`harness · ${openCount() ? `${openCount()} expanded` : "click a row"}`}
           </text>
         ),
