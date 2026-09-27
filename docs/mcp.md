@@ -10,14 +10,8 @@ use. No `mcp.*` config block is needed or added. `wait` takes
 `{label, timeout_s 1..600, hint?}` and returns an expiry nudge telling you to
 check the task's status and act on it.
 
-## 2. Stdio server (for NON-opencode MCP clients)
-`harness mcp` speaks JSON-RPC 2.0 over stdio (newline-delimited; `readline`,
-never `read(n)` — the latter deadlocks live clients holding the pipe open)
-with the same three skill/memory tools. Use it from any MCP-compatible host:
-
-```bash
-python3 -m harness mcp   # add as a stdio server in your MCP client
-```
-
-Verified against the official `@modelcontextprotocol/sdk` client
-(connect → list → call). Bearer token: not needed — local files only.
+## 2. Stdio server (retired)
+`harness mcp` used to speak JSON-RPC 2.0 over stdio with the same three
+skill/memory tools for non-opencode MCP clients (it was verified against the
+official `@modelcontextprotocol/sdk` client). It was retired with the headless
+path: live sessions use the native tools above, which need no extra process.

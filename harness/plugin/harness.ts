@@ -89,11 +89,13 @@ function frontmatter(text: string): Rec {
   return fm
 }
 
-/** Directories that may hold bundled harness skills, best first. */
-async function skillRoots(): Promise<string[]> {
+/** Directories that may hold bundled harness skills, best first: explicit
+ * override, then the project overlay, then package data, then global. */
+async function skillRoots(projectDir?: string): Promise<string[]> {
   const roots: string[] = []
   const home = process.env.HOME ?? ""
   if (process.env.HARNESS_SKILLS_DIR) roots.push(process.env.HARNESS_SKILLS_DIR)
+  if (projectDir) roots.push(`${projectDir}/.opencode/harness/skills`)
   const py = await run([
     "python3", "-c",
     "import harness,os; print(os.path.join(os.path.dirname(harness.__file__),'data','skills'))",
@@ -108,11 +110,11 @@ async function skillRoots(): Promise<string[]> {
  * Seeds live at `<root>/<category>/<skill>/SKILL.md` (see harness/skills.py),
  * so glob two levels down.
  */
-async function seedSkills(): Promise<Rec[]> {
+async function seedSkills(projectDir?: string): Promise<Rec[]> {
   const out: Rec[] = []
   const seen = new Set<string>()
   const { join, basename, dirname } = await import("node:path")
-  for (const root of await skillRoots()) {
+  for (const root of await skillRoots(projectDir)) {
     const rels: string[] = []
     try {
       const glob = new Bun.Glob("**/SKILL.md")
@@ -191,6 +193,14 @@ function stateDb(projectDir: string): string {
 }
 
 /**
+ * Escape a raw term for a LIKE pattern: `%`, `_` and `\` in the query must
+ * match literally, never act as wildcards.
+ */
+function escapeLike(term: string): string {
+  return String(term ?? "").replace(/[\\%_]/g, (c) => `\\${c}`)
+}
+
+/**
  * Durable facts from the session DB, straight off disk.
  *
  * Two modes, and the distinction matters:
@@ -211,8 +221,8 @@ async function facts(
   const { Database } = await import("bun:sqlite").catch(() => ({}) as any)
   if (!Database) return []
   const hits: string[] = []
-  const where = mode === "recent" ? "1=1" : patterns.map(() => "text LIKE ?").join(" OR ")
-  const params = mode === "recent" ? [] : patterns.map((p) => `%${p}%`)
+  const where = mode === "recent" ? "1=1" : patterns.map(() => "text LIKE ? ESCAPE '\\'").join(" OR ")
+  const params = mode === "recent" ? [] : patterns.map((p) => `%${escapeLike(p)}%`)
   try {
     const dbPath = stateDb(projectDir)
     if (!(await Bun.file(dbPath).exists())) return []
@@ -283,6 +293,48 @@ async function readTodos(projectDir: string, sessionID: string): Promise<Rec[]> 
 }
 
 /**
+ * The compaction brief in ONE read-only open: newest facts + this session's
+ * open todos. The hook used to call facts() then readTodos() — two opens of
+ * the same DB per compaction fire for one text. Same queries, same shapes,
+ * same text assembly; each half still guarded alone so a drifted table costs
+ * only its own section.
+ */
+async function compactionBrief(projectDir: string, sessionID: string): Promise<string> {
+  const { Database } = await import("bun:sqlite").catch(() => ({}) as any)
+  if (!Database) return ""
+  try {
+    const dbPath = stateDb(projectDir)
+    if (!(await Bun.file(dbPath).exists())) return ""
+    const db = new Database(dbPath, { readonly: true })
+    try {
+      let brief = ""
+      try {
+        const rows = db.query("SELECT text, source FROM facts ORDER BY id DESC LIMIT ?").all(5) as any[]
+        brief = rows.map((r) => `- [${r.source}] ${String(r.text).slice(0, 200)}`).join("\n")
+      } catch {
+        /* drifted facts table: todos may still ride */
+      }
+      let open: Rec[] = []
+      try {
+        const todos = db.query("SELECT text, status FROM todos WHERE session = ? ORDER BY id").all(sessionID) as Rec[]
+        open = todos.filter((t: Rec) => t.status !== "completed" && t.status !== "cancelled")
+      } catch {
+        /* no todos table yet */
+      }
+      if (!brief && !open.length) return ""
+      const text = [`${BRIEF_MARK} (durable facts — verify before relying):`]
+      if (brief) text.push(brief)
+      if (open.length) text.push(`Open todos (harness todo space):\n${open.map(todoLine).join("\n")}`)
+      return text.join("\n")
+    } finally {
+      db.close()
+    }
+  } catch {
+    return ""
+  }
+}
+
+/**
  * Write-through to opencode's OWN todo store: the `todo` table in opencode's
  * data DB (`session_id, content, status, priority, position, time_*`) — the
  * storage opencode's own todo tool wrote before 2.0.14, and what anything
@@ -310,19 +362,33 @@ async function mirrorOpencodeTodos(sessionID: string, rows: Rec[]): Promise<void
     try {
       db.run("PRAGMA busy_timeout=3000")
       const now = Date.now()
-      db.run("DELETE FROM todo WHERE session_id = ?", sessionID)
-      rows.forEach((t: Rec, i: number) =>
-        db.run(
-          "INSERT INTO todo(session_id, content, status, priority, position, time_created, time_updated) VALUES(?,?,?,?,?,?,?)",
-          sessionID,
-          t.text,
-          t.status,
-          t.priority,
-          i,
-          now,
-          now,
-        ),
-      )
+      // One transaction: a crash between the DELETE and the INSERTs must not
+      // leave opencode's own table emptier than it was — the mirror either
+      // lands whole or rolls back to the previous list.
+      db.run("BEGIN IMMEDIATE")
+      try {
+        db.run("DELETE FROM todo WHERE session_id = ?", sessionID)
+        rows.forEach((t: Rec, i: number) =>
+          db.run(
+            "INSERT INTO todo(session_id, content, status, priority, position, time_created, time_updated) VALUES(?,?,?,?,?,?,?)",
+            sessionID,
+            t.text,
+            t.status,
+            t.priority,
+            i,
+            now,
+            now,
+          ),
+        )
+        db.run("COMMIT")
+      } catch (e) {
+        try {
+          db.run("ROLLBACK")
+        } catch {
+          /* already rolled back */
+        }
+        throw e
+      }
     } finally {
       db.close()
     }
@@ -377,15 +443,33 @@ function sleep(ms: number): Promise<void> {
  * The `wait` tool's countdown rows: `waits(id, label, deadline)` in the same
  * project state DB as the todo space, so the TUI reads it in its one
  * read-only open. `deadline` is epoch MILLISECONDS (Date.now() based); the
- * row lives only for the sleep and is deleted on expiry. Best-effort on
+ * row lives only for the sleep and is deleted on expiry. A killed call never
+ * reaches the delete, so every touch of the table also sweeps rows whose
+ * deadline already passed (sweepExpiredWaits) — and the TUI hides expired
+ * rows outright, so a stuck row can never linger in the panel. Best-effort on
  * purpose: a lost countdown must never fail the wait itself.
  */
+/**
+ * Delete countdown rows whose deadline already passed. A killed `wait` never
+ * reaches its own clearWait (the host drops the call), so without this the row
+ * would linger until the deadline's owner cleaned it — which is nobody. Every
+ * touch of the table sweeps the dead instead. Best-effort like the rest.
+ */
+function sweepExpiredWaits(db: any): void {
+  try {
+    db.run("DELETE FROM waits WHERE deadline < ?", Date.now())
+  } catch {
+    /* table missing or busy */
+  }
+}
+
 async function recordWait(projectDir: string, id: string, label: string, deadline: number): Promise<void> {
   const db = await todoDb(projectDir, true)
   if (!db) return
   try {
     db.run("CREATE TABLE IF NOT EXISTS waits(id TEXT PRIMARY KEY, label TEXT, deadline INTEGER)")
     db.run("INSERT OR REPLACE INTO waits(id, label, deadline) VALUES(?,?,?)", id, label, deadline)
+    sweepExpiredWaits(db)
   } catch {
     /* sidebar countdown best-effort */
   } finally {
@@ -402,6 +486,7 @@ async function clearWait(projectDir: string, id: string): Promise<void> {
   if (!db) return
   try {
     db.run("DELETE FROM waits WHERE id = ?", id)
+    sweepExpiredWaits(db)
   } catch {
     /* already gone */
   } finally {
@@ -499,7 +584,22 @@ const MEM_SECRETS = [
   /\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/,
 ]
 
-/** One-line form for storage and duplicate detection (mirrors normalize()). */
+/** message→text parse cache: one context fire walks the same history objects
+ * twice (assistant texts, then the history tail) — parse each object once.
+ * WeakMap, so entries die with the message objects; no growth concern. */
+const memTextCache = new WeakMap<object, string>()
+
+/** per-text parse cache: one fire derives lines+headline for facts and again
+ * for lessons over the same fresh texts — parse once. Bounded (oldest first);
+ * keys are exact (limit + full text), so hits are never approximate. */
+const memParseCache = new Map<string, any>()
+function memCachePut(k: string, v: any): void {
+  memParseCache.set(k, v)
+  if (memParseCache.size > 200) {
+    const oldest = memParseCache.keys().next().value
+    if (oldest !== undefined) memParseCache.delete(oldest)
+  }
+}
 function memNormalize(text: unknown): string {
   const t = String(text ?? "").replace(/\s+/g, " ").trim()
   return t.replace(/^(?:[-*•]\s+|\d+[.)]\s+)/, "")
@@ -511,6 +611,9 @@ function memSecret(text: string): boolean {
 
 /** The durable lines of one assistant message (mirrors important_lines()). */
 function memImportantLines(text: string, limit = MEM_LINES_PER_MSG): string[] {
+  const ck = `lines:${limit}:${text}`
+  const hit = memParseCache.get(ck)
+  if (Array.isArray(hit)) return hit
   const out: string[] = []
   let fenced = false
   for (const raw of String(text ?? "").split("\n")) {
@@ -528,16 +631,26 @@ function memImportantLines(text: string, limit = MEM_LINES_PER_MSG): string[] {
     if (!(MEM_MARKERS.some((m) => low.startsWith(m) || low.includes(` ${m}`)) || MEM_OUTCOME.test(line))) continue
     if (!out.includes(line)) out.push(line)
   }
-  return out.slice(0, limit)
+  const res = out.slice(0, limit)
+  memCachePut(ck, res)
+  return res
 }
 
 /** One-line summary of a message, for the progress note (mirrors headline()). */
 function memHeadline(text: string, limit = MEM_HEADLINE_LIMIT): string {
+  const ck = `head:${limit}:${text}`
+  const hit = memParseCache.get(ck)
+  if (typeof hit === "string") return hit
+  let res = ""
   for (const raw of String(text ?? "").split("\n")) {
     const line = memNormalize(raw)
-    if (line.length >= 8) return line.slice(0, limit)
+    if (line.length >= 8) {
+      res = line.slice(0, limit)
+      break
+    }
   }
-  return ""
+  memCachePut(ck, res)
+  return res
 }
 
 /** True when a message deserves no progress note (mirrors _is_junk_turn()). */
@@ -551,18 +664,24 @@ function memIsJunk(headlineText: string, hasFacts = false): boolean {
  * or one string). Unknown shapes yield "" rather than a throw. */
 function memMessageText(m: Rec): string {
   try {
+    if (m && typeof m === "object") {
+      const hit = memTextCache.get(m)
+      if (hit !== undefined) return hit
+    }
+    let out = ""
     const parts = Array.isArray(m?.content) ? m.content : Array.isArray(m?.parts) ? m.parts : null
     if (parts) {
-      return parts
+      out = parts
         .map((p: any) => (typeof p === "string" ? p : p?.type === "text" && typeof p?.text === "string" ? p.text : ""))
         .join("\n")
-    }
-    if (typeof m?.content === "string") return m.content
-    if (typeof m?.text === "string") return m.text
+    } else if (typeof m?.content === "string") out = m.content
+    else if (typeof m?.text === "string") out = m.text
+    if (m && typeof m === "object") memTextCache.set(m, out)
+    return out
   } catch {
     /* malformed message */
+    return ""
   }
-  return ""
 }
 
 function memAssistantTexts(messages: any): string[] {
@@ -580,18 +699,36 @@ function memAssistantTexts(messages: any): string[] {
 /**
  * The memory block of the config layer, read cheaply: project
  * <root>/.opencode/harness.jsonc (project_config_file in harness/paths.py)
- * then the user file ($HARNESS_HOME, else ~/.harness). Comment lines are
- * stripped with the same (^|\\s)// rule the Python loader uses; only
- * enabled/max_facts are picked out, so a half-written file cannot break
- * anything. Fail-open: unreadable means enabled with defaults. No walk-up
- * to parent project dirs — the one place this is cheaper than load_config.
+ * walking up to $HOME with nearest winning — the same chain load_config() in
+ * harness/config.py merges, so a nested-dir project agrees with the CLI —
+ * then the user file ($HARNESS_HOME, else ~/.harness) as the base layer.
+ * Comment lines are stripped with the same (^\s)// rule the Python loader
+ * uses; only enabled/max_facts are picked out, so a half-written file cannot
+ * break anything. Fail-open: unreadable means enabled with defaults.
  */
-async function memoryConfig(projectDir: string): Promise<{ enabled: boolean; maxFacts: number }> {
+async function memoryConfig(projectDir: string): Promise<{ enabled: boolean; maxFacts: number; capLines: number }> {
   let enabled = true
   let maxFacts = MEM_DEFAULT_MAX_FACTS
+  let capLines = MEM_DEFAULT_CAP_LINES
+  // Project candidates, farthest-first so the nearest wins — user file first
+  // as the base, mirroring load_config's defaults < user < ancestor… < nearest.
+  const projectFiles: string[] = []
+  try {
+    const { resolve, dirname } = await import("node:path")
+    const home = String(process.env.HOME ?? "")
+    let cur = resolve(projectDir)
+    for (;;) {
+      projectFiles.push(`${cur}/.opencode/harness.jsonc`)
+      const parent = dirname(cur)
+      if ((home && cur === home) || parent === cur || cur === "/") break
+      cur = parent
+    }
+  } catch {
+    projectFiles.push(`${projectDir}/.opencode/harness.jsonc`)
+  }
   const candidates = [
-    `${projectDir}/.opencode/harness.jsonc`,
     `${process.env.HARNESS_HOME || `${process.env.HOME}/.harness`}/harness.jsonc`,
+    ...projectFiles.reverse(),
   ]
   for (const file of candidates) {
     let raw = ""
@@ -1158,7 +1295,7 @@ const HarnessPlugin = {
     try {
       // guarded: a future host that renames/removes this API degrades to a log
       if (typeof ctx?.skill?.transform !== "function") throw new Error("ctx.skill.transform unavailable")
-      const seeds = await seedSkills()
+      const seeds = await seedSkills(directory)
       if (seeds.length) {
         await ctx.skill.transform((editor: Rec) => {
           const current = editor?.list?.()
@@ -1208,7 +1345,7 @@ const HarnessPlugin = {
             } catch {
               items = []
             }
-            if (!items.length) items = await seedSkills()
+            if (!items.length) items = await seedSkills(directory)
             const text = items
               .map((s: Rec) => `- ${s.id ?? s.name}: ${shortenDesc(s.description)}`)
               .join("\n")
@@ -1241,7 +1378,7 @@ const HarnessPlugin = {
             } catch {
               items = []
             }
-            if (!items.length) items = await seedSkills()
+            if (!items.length) items = await seedSkills(directory)
             const skill = items.find((s: Rec) => String(s.id) === want || String(s.name) === want)
             if (!skill) return { content: `skill not found: ${want}` }
             return { content: await readSkill(skill, input?.path ? String(input.path) : undefined) }
@@ -1403,14 +1540,9 @@ const HarnessPlugin = {
           // a retried compaction would otherwise stack duplicate briefs
           const already = event.system.some((s: Rec) => String(s?.text ?? s).includes(BRIEF_MARK))
           if (already) return
-          const brief = (await facts(directory, [], 5, "recent")).join("\n")
-          const todos = await readTodos(directory, String(event?.sessionID ?? ""))
-          const open = todos.filter((t: Rec) => t.status !== "completed" && t.status !== "cancelled")
-          if (!brief && !open.length) return
-          const text = [`${BRIEF_MARK} (durable facts — verify before relying):`]
-          if (brief) text.push(brief)
-          if (open.length) text.push(`Open todos (harness todo space):\n${open.map(todoLine).join("\n")}`)
-          event.system.push({ type: "text", text: text.join("\n") })
+          const text = await compactionBrief(directory, String(event?.sessionID ?? ""))
+          if (!text) return
+          event.system.push({ type: "text", text })
         } catch (e) {
           // never break compaction, but never fail silently either
           log(`compaction brief failed: ${short(e)}`)

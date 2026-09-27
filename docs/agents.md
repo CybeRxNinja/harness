@@ -19,7 +19,7 @@ they all run on your configured opencode default unless you pin per-agent
 subagents (depth 1), and all but `test-engineer` (which writes tests only) are
 edit-denied.
 
-Flow: `plan start --title T --items "a;b"` → `plan next` → parallel `quick`
+Flow: `todowrite` the plan → `todoread` before re-planning → parallel `task`
 bursts (the orchestrator picks the category itself; `rlm.spawn` validates it
 against the `categories` config list) → independent review before `plan check`.
 `boulder.json` + `ledger.jsonl` resume across sessions, and a turn whose
@@ -34,12 +34,12 @@ Reads, greps, status checks, test runs and fetches need no permission — the
 orchestrator just does them. Before anything destructive or irreversible it
 calls `risk_check` once and asks a single question naming what cannot be
 undone, then never re-asks for that action in the session. A wave is assessed
-as a batch (`risk_check` with `actions`), so a plan needs one question about
+as a batch (`risk.assess_many`), so a plan needs one question about
 its irreversible subset rather than one per step. See `docs/security.md` and
 `docs/config.md` (shell permissions are generated from `harness/risk.py`).
 
-Progress records itself: each turn writes a progress fact, and a turn whose
-test/lint run came back clean closes the active box in the plan ledger. See
+Progress records itself: each turn writes a progress fact. (The retired headless
+ledger used to close a plan box on a verified turn; todos are the plan now.) See
 `docs/memory.md`.
 
 ## Fast by construction

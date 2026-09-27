@@ -17,12 +17,12 @@ inherits your default model.
 you ──> stock opencode ──> harness plugin (server.ts + tui.tsx)
                                 ├─ native tools: skills_list / skill_view / memory_recall + todowrite / todoread / wait
                                 ├─ compaction hook → durable memory and open todos survive summarization
-                                ├─ orchestrator + workers (RLM pool), plans, checkpoints
+                                ├─ orchestrator agent + native task workers, todos, waits
                                 └─ sidebar panel: Window · Tokens · Models · Todo · Workers · Skills · Agents · Memory
 ```
 
-Potato-PC safe: stdlib-only Python core, SQLite state, <150 MB idle, workers
-capped by `budgets.max_parallel` (default 2).
+Potato-PC safe: stdlib-only Python core, SQLite state, <150 MB idle, at most
+2 parallel workers per wave (orchestrator discipline).
 
 ## Proof of work
 
@@ -35,9 +35,9 @@ and re-runnable locally (the former live smoke is removed):
 | TUI half is real (panel, chip, commands) | the smoke asserted `features.tui` — set only when a `tui.tsx` entrypoint is present |
 | 15 bundled skills seeded into opencode's skill store | the smoke counted them against a live server |
 | plugin is visible in the Plugins panel | the TUI panel filters on `features.tui`; the directory install ships both entrypoints |
-| memory remembers without being asked | `tests/test_memory_auto.py`: turns auto-capture durable facts + progress; 2-evidence lessons auto-promote to `MEMORY.md`; credentials refused |
+| memory remembers without being asked | `tests/test_memory_auto.py`: durable facts + progress capture; 2-evidence lessons auto-promote to `MEMORY.md`; credentials refused (live sessions capture via the plugin context hook) |
 | dangerous commands ask, safe ones don't | `tests/test_risk.py`: 94 ask-rules generated from `harness/risk.py` (`git push`, `rm -rf`, `DROP TABLE`, deploys) — greps, diffs, fetches, tests never prompt |
-| RLM workers reach a terminal state | `tests/test_rlm.py`: `done\|error\|timeout\|stale`, delivered-once mailbox, `result.md`, pool sized by `budgets.max_parallel` |
+| worker rows reach a terminal state | `tests/test_rlm.py`: `is_terminal` / `worker_timeout` readers behind `harness doctor` (live routing is opencode's native `task` tool) |
 | entrypoints never break a boot | `tests/test_plugin.py` transpiles both files with `Bun.Transpiler`; bad `setup()` returns are pinned by tests |
 | the model's plan lands in the harness todo space | verified on a real server: `opencode run "…call todowrite…"` → rows landed in `<project>/.opencode/harness/sessions.db` under the run's session id, painted by the panel off a real pty capture |
 | 203 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
@@ -98,9 +98,7 @@ opencode                           # launch stock opencode, or: harness tui
 ```
 
 Set `"model"` in `opencode.json` first (e.g. `"anthropic/claude-sonnet-4-5"`);
-`harness doctor` shows what resolved. `harness chat` works with zero model
-access (`HARNESS_MOCK=1` echo backend) and runs for real via `opencode run`
-once a model is configured.
+`harness doctor` shows what resolved (it errors when no model is configured).
 
 No-release shortcut — the plugin files are self-contained:
 
@@ -111,27 +109,26 @@ harness plugin install --from-release latest   # fetch server.ts + tui.tsx from 
 ## What lives where
 
 ```
-<project>/.opencode/harness/   sessions + FTS memory, MEMORY.md, kernel,
-                               workers, runs, checkpoints, plans, backups
+<project>/.opencode/harness/   sessions.db (facts, todos, workers, waits),
+                               MEMORY.md, backups
 ~/.config/opencode/            opencode.json (merged agents + shell policy)
                                + plugins/harness/{server.ts,tui.tsx}
 ~/.harness/                    global skills, user config
 ```
 
-## CLI (installer, doctor, and a headless brain)
+## CLI (installer, doctor, and kept operators)
 
-The Python side is what installs and inspects the plugin — and it doubles as a
-model-free harness (`harness chat` orchestrates over the same store):
+The Python side is what installs and inspects the plugin. The headless
+brain (`harness chat`, `plan`, `checkpoint`, `mcp`) was retired: live
+sessions run inside opencode, where the plugin provides the same features
+natively (task routing, compaction brief, context memory, `wait`):
 
 ```
 harness tui                  # config + plugin, then launch stock opencode
 harness plugin install [--from-release latest]
 harness doctor [--verbose]   # plugin, memory, workers, permission policy
-harness chat "..." --mode orchestrator|code|plan|ask|debug|review
 harness skills list|view|pending|approve|reject
-harness memory search|save|refine|show
-harness checkpoint save|restore
-harness plan start|next|check
+harness memory search|save|refine|show|prune
 harness config get|set|show [--scope user|project]
 ```
 
@@ -139,10 +136,9 @@ harness config get|set|show [--scope user|project]
 
 ```
 harness/plugin/     the plugin: server + TUI entrypoints (harness.ts, tui.tsx) — the product
-harness/            cli, orchestrator, memory, risk, rlm, store, compact, doctor, ...
+harness/            cli, memory, risk, rlm (worker-state readers), store, doctor, ...
 harness/data/skills bundled skills (15, incl. ponytail — MIT, see NOTICE.md)
 docs/               one page per feature (start at docs/quickstart.md, docs/plugin.md)
-scripts/            optional skill-pack installers
 .github/workflows/  ci.yml (tests) · release.yml (plugin-v* → assets)
 ```
 

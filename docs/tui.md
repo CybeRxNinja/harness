@@ -2,7 +2,7 @@
 Harness has **no custom TUI binary**. It runs as a single opencode v2 server
 plugin (`harness/plugin/harness.ts`) inside **stock opencode** — no patched
 TUI, no AppImage, no fork. There is no relay: models come from your opencode
-providers. That observability lives in `harness chat` outputs; project state
+providers. That observability lives in opencode session transcripts; project state
 lives under `.opencode/harness/`.
 
 - `harness tui` ensures opencode config + plugin, then execs `opencode`

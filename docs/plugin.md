@@ -74,12 +74,12 @@ sidebar's Todo row could only ever read `0 items`. Harness gives it one place:
 | the model | `todowrite` (replaces this session's list) and `todoread` |
 | the sidebar panel | reads the same table — this session's list, else the newest in the project |
 | the compaction brief | carries the still-open items into the summary |
-| `harness compact` | already read it (`compact.py` keeps todos across a compaction) |
+| the compaction brief | carries the still-open items into the summary |
 
-The table is the one the Python core keeps —
-`<project>/.opencode/harness/sessions.db` → `todos(id, session, text, status,
-ts)` — keyed by the **opencode** session id, so the model's plan, the panel and
-the Python core read one list instead of three private copies. The server half
+The table lives in `<project>/.opencode/harness/sessions.db` →
+`todos(id, session, text, status, ts)` — keyed by the **opencode** session id, so
+the model's plan, the panel and the compaction brief read one list instead of
+three private copies. The server half
 creates the table on first write, so the plugin works on a project where the
 `harness` CLI has never run.
 
@@ -282,8 +282,8 @@ plugin:
   (auto-approve compatible). No `model` keys: every agent
   runs on your configured default unless you pin one yourself.
 
-Skills need no MCP hop. The stdio server (`harness mcp`) remains for
-non-opencode MCP clients only.
+Skills need no MCP hop. The former stdio server (`harness mcp`, for non-opencode
+MCP clients) was retired with the headless path.
 
 ## Uninstall
 

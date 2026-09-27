@@ -135,6 +135,15 @@ function left(deadline: unknown): string {
 }
 
 /**
+ * Grace past the deadline during which a row still reads as "due": the server
+ * half removes the record on expiry, so this only covers the race between the
+ * last poll and the delete. Rows older than this are hidden outright (see
+ * readProjectState) — a killed wait whose row was never removed can never
+ * linger in the panel past this.
+ */
+const WAIT_GRACE_MS = 5000
+
+/**
  * opencode's skill store namespaces the seeded skills (`harness-spec-driven-
  * development`), but the panel is ~44 columns wide and the namespace is the
  * same for every row — so the row shows the skill itself (`spec-driven-
@@ -517,12 +526,17 @@ const HarnessTui = {
             /* no workers table yet */
           }
           try {
-            // The `wait` tool's countdown rows, soonest deadline first. The
-            // display ticks every pass but the signature below does not, so a
-            // manual collapse survives the countdown.
-            const wrows = db
-              .query("SELECT label, deadline FROM waits ORDER BY deadline LIMIT ?")
-              .all(ROW_LIMIT) as Rec[]
+            // The `wait` tool's countdown rows, soonest deadline first. Rows
+            // past the deadline plus a small grace are hidden outright: the
+            // record is removed on expiry, so anything still past-due here is
+            // a killed wait whose delete never ran — it must never linger in
+            // the panel (the sweep in the server half removes it on the next
+            // touch of the table). The display ticks every pass but the
+            // signature below does not, so a manual collapse survives the
+            // countdown.
+            const wrows = (
+              db.query("SELECT label, deadline FROM waits ORDER BY deadline LIMIT ?").all(ROW_LIMIT) as Rec[]
+            ).filter((r) => Number(r?.deadline ?? 0) > Date.now() - WAIT_GRACE_MS)
             out.waitSig = wrows.map((r) => `${String(r?.label ?? "")}~${Number(r?.deadline ?? 0)}`).join("\u0001")
             // Every row opens with the live mark, like the todo/worker marks
             // above: one icon in a stable column, never bare text.

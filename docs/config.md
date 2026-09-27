@@ -71,12 +71,14 @@ former harness default) is regenerated, and the migration says so on stderr.
 
 Ask the classifier directly instead of guessing:
 
-```bash
-harness chat '[[tool:risk_check {"action": "git push --force"}]]'
+```python
+from harness import risk
+risk.assess("git push --force", "auto", "", root)   # {risk, irreversible, ask, reason, rule}
+risk.assess_many(["read a.py", "rm -rf x"], root)   # plan-wide verdict
 ```
 
 It returns `{risk, irreversible, ask, reason, rule}` for one action, or a
-plan-wide verdict (`assess_many`) naming the irreversible subset. `risk_check`
-is allowed in **every** mode, including `plan`/`ask`/`review`: classifying an
+plan-wide verdict (`assess_many`) naming the irreversible subset. The classifier
+is read-only by design (it never acts): classifying an
 action is read-only, and without it the only thing a read-only agent can do
 about an unfamiliar command is ask the human.

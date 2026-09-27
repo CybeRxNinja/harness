@@ -12,8 +12,8 @@
    entrypoints, so the TUI plugin list shows harness too).
 5. `harness doctor [--verbose]` — Python, disk, DB size, resolved user
    model, plugin layout, memory, workers, and the permission policy.
-6. `harness chat "hi" --mode ask` — works with zero model access (MOCK echo);
-   with your model configured it runs for real via `opencode run`.
+6. `harness skills list` / `harness memory search <query>` — the kept operators
+   read the same store the plugin writes.
 7. `harness tui` — ensures opencode config + plugin, then launches
    stock opencode. Each directory gets its own `.opencode/harness/` state.
 

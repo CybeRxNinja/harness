@@ -1,4 +1,10 @@
-# RLM kernel
+# RLM kernel (headless path retired)
+
+> Live sessions route subagents through opencode's native `task` tool (the
+> orchestrator agent in `harness-opencode.json`); the Python pool/spawn/mailbox
+> below is retired. What remains live: the `workers` table (sidebar +
+> `harness doctor` via `rlm.is_terminal` / `rlm.worker_timeout`).
+
 
 `py` executes in a persistent per-session namespace (pickled vars survive
 compaction/resume; unpicklable values summarized). `bash` runs 10s in

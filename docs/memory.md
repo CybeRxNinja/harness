@@ -6,7 +6,8 @@ and FTS5 transcripts under `<project>/.opencode/harness/`. Per project; global
 
 ## It fills itself
 
-Every turn ends with `memory.capture_turn`, so nothing has to be remembered on
+Every live turn is captured (plugin context hook; the retired headless loop ended
+each turn with `memory.capture_turn`), so nothing has to be remembered on
 purpose:
 
 - **Facts** — the turn's durable lines (decisions, root causes, migrations,

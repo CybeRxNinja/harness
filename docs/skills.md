@@ -27,6 +27,13 @@ security/reverse-router        ships DISABLED (sec pack, scope-gate, lawful-use 
 Seeded into opencode's store as `harness-<name>` by the plugin
 (`ctx.skill.transform`) and into `~/.harness/skills` by `harness setup`.
 
+Resolution order (first root wins on a same-named skill): `HARNESS_SKILLS_DIR`
+(if set) → `<project>/.opencode/harness/skills` → package data
+(`harness/data/skills`) → `~/.harness/skills`. Missing/unreadable roots are
+skipped. Opencode's own paths stay global by host design
+(`~/.config/opencode/opencode.json`, `~/.config/opencode/plugins/harness`) —
+only harness skills overlay per project.
+
 ## ponytail (MIT, attributed — see `harness/data/skills/NOTICE.md`)
 
 The build ladder: (1) does this need to exist, (2) is it already here, (3) stdlib,
@@ -39,12 +46,11 @@ prevents data loss, security, or accessibility.
 ruleset. Use `ponytail-review` on a diff and `ponytail-audit` across the tree to find deletions — both
 report `net: -<N> lines` and apply nothing.
 
-## Managing
+## Managing (retired)
 
-`skill_manage` (create/patch/write_file/delete) stages under approval by
-default (`write_approval:true`): review via `skills pending|approve|reject`.
-Project skills need trust + pass a prompt-injection/exfil scan (quarantined on
-hit). Precedence `project > local > external_dirs`; missing dirs skipped.
-Bundles (`backend-dev: [review, tdd, pr]`) load skill sets as one slash
-command. Full packs: `scripts/install-addy-skills.sh`,
-`scripts/install-reverse-router.sh`.
+Headless skill authoring (`skill_manage` create/patch/write_file/delete, the
+`bundles` loader, the standalone exfil scan and the `scripts/install-*.sh`
+pack installers) was retired with the headless path; review now happens in
+live review subagents. Kept: progressive disclosure (`skills list|view`) and
+the pending queue (`skills pending|approve|reject`).
+Precedence `project > local > external_dirs`; missing dirs skipped.

@@ -1,4 +1,9 @@
-# Compression (lite RTK + Caveman)
+# Compression (Python engines retired)
+
+> Tool-output condensing now lives in the plugin (`ctx.tool.hook("execute.after")`
+> in `harness/plugin/harness.ts`); the stdlib `rtk -> caveman` engines below are
+> retired. The error-preservation rule (errors/failures never dropped) still applies.
+
 
 Deterministic, stdlib-only, no LLM involved. Two engines, always stacked
 `rtk -> caveman`, applied to **tool outputs only** — never to user/assistant

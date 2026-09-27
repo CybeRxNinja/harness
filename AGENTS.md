@@ -27,7 +27,7 @@ function you touch and fix it once where all callers route through.
 
 ## Quality bar
 - Tests are proof: nothing is done without a failing-then-passing test, or an explicit waiver and its reason.
-- ~100 lines per commit, atomic; `harness checkpoint save` before a risky merge.
+- ~100 lines per commit, atomic; commit (or stash) before a risky merge.
 - No secrets in code, logs, or trajectories — env/setup only.
 - Measure before optimizing; OWASP Top-10 on inputs/auth; keyboard + a11y on UI.
 - Never silence a check to get green. A failing gate means stop, report, fix.
@@ -54,7 +54,7 @@ function you touch and fix it once where all callers route through.
 ## Edits
 - Hash-anchored: cite `LINE#ID` from last `read`. Stale hash = re-read, never force.
 - Exact-match only, unique location. One file owner per worker (orchestrator assigns, only orchestrator merges).
-- Checkpoint before merge (`harness checkpoint save`).
+- Checkpoint before merge (commit or stash the work first).
 
 ## Skills
 - L0 index only in context. `skill_view(name)` then `skill_view(name, references/x.md)` on demand.

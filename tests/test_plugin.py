@@ -656,6 +656,25 @@ def _srv_text():
     return Path(_plugin_files()[0]).read_text()
 
 
+def test_plugin_compaction_brief_uses_single_open_helper():
+    """The compaction brief comes from ONE read-only open, not two.
+
+    The hook used to call facts() then readTodos() — two opens of the same
+    DB per compaction fire for one text. compactionBrief() runs the same
+    facts + open-todos queries behind a single connection; each half is
+    still guarded alone so a drifted table costs only its own section.
+    """
+    srv = _srv_text()
+    assert "async function compactionBrief" in srv
+    body = srv[srv.index("async function compactionBrief"):srv.index("async function mirrorOpencodeTodos")]
+    assert body.count("new Database(") == 1, "one open per compaction fire, not one per section"
+    assert "readonly: true" in body, "the brief never writes"
+    assert "SELECT text, source FROM facts ORDER BY id DESC LIMIT ?" in body
+    assert "SELECT text, status FROM todos WHERE session = ? ORDER BY id" in body
+    assert "await compactionBrief(directory" in srv, "the hook routes through the helper"
+    hook = srv[srv.index('await ctx.session.hook("compaction"'):srv.index('await ctx.session.hook("context"')]
+    assert "compactionBrief" in hook
+    assert "await facts(" not in hook and "readTodos(" not in hook, "no second open beside the helper"
 
 
 def test_plugin_worker_finished_writes_memory_note():
@@ -678,6 +697,22 @@ def test_plugin_worker_finished_writes_memory_note():
     assert "memory note best-effort" in body
 
 
+def test_plugin_memo_caches_parse_once():
+    """One context fire walks the same history objects twice and derives
+    lines+headline over the same fresh texts twice — each object/text parses
+    once. Keys are exact (limit + full text), so a hit is bit-identical
+    output, never approximate; the text cache dies with its message objects
+    (WeakMap) and the parse cache is bounded (oldest first)."""
+    srv = _srv_text()
+    assert "const memTextCache = new WeakMap<object, string>()" in srv
+    assert "const memParseCache = new Map<string, any>()" in srv
+    assert "function memCachePut" in srv and "if (memParseCache.size > 200)" in srv
+    assert "const hit = memTextCache.get(m)" in srv and "memTextCache.set(m, out)" in srv
+    assert "const ck = `lines:${limit}:${text}`" in srv
+    assert "const ck = `head:${limit}:${text}`" in srv
+    assert "if (Array.isArray(hit)) return hit" in srv
+    assert 'if (typeof hit === "string") return hit' in srv
+    assert srv.count("memCachePut(ck, res)") == 2, "both pure functions memoize their result"
 
 
 def test_tui_plugin_is_a_sidebar_panel_not_a_layout_change():
