@@ -73,6 +73,18 @@ def _tui_text():
     return Path(_plugin_files()[1]).read_text()
 
 
+def _region(tui, start, end):
+    """Source slice between two anchors, so a pin can be scoped to one block.
+
+    Same idiom as the inline `tui[tui.index(a):tui.index(b)]` slices, but a
+    missing/renamed anchor is a readable failure instead of a ValueError —
+    which is the whole point when the pin exists to notice a refactor.
+    """
+    a, b = tui.find(start), tui.find(end)
+    assert 0 <= a < b, f"anchors missing or out of order: {start!r} -> {end!r}"
+    return tui[a:b]
+
+
 def test_tui_cold_scan_timeout_does_not_latch():
     """A scan whose store syncs time out must NOT latch `scanned`.
 
@@ -309,4 +321,242 @@ def test_tui_waits_live_recompute_wiring():
     assert "return liveWaits()" in tui, "the Waits Row renders the recompute, not the snapshot"
     assert 'out.waitSig = wrows.map((r) => `${String(r?.label ?? "")}~${Number(r?.deadline ?? 0)}`)' in tui, (
         "stable identity (label + deadline), never the ticking countdown"
+    )
+
+
+def test_tui_fast_tick_constants_keep_the_net_cadence():
+    """FAST_MS/NET_EVERY are one interval re-ticked, not a second timer.
+
+    The panel learned about a finished turn from the 8s poll alone, so its
+    Context numbers trailed opencode's own by up to 8s. The refresh is now a
+    500ms change probe with an unconditional pass every NET_EVERY ticks. The
+    net cadence is DERIVED from POLL_MS/FAST_MS, so the old 8s safety net
+    survives the retune exactly; and the poll interval is re-ticked rather
+    than added to, keeping the net timer count at one.
+    """
+    import re
+
+    tui = _tui_text()
+    assert "const POLL_MS = 8000" in tui
+    assert "const FAST_MS = 500" in tui
+    # derived, not a second hardcoded number that can drift from POLL_MS
+    assert "const NET_EVERY = Math.max(1, Math.round(POLL_MS / FAST_MS))" in tui
+    poll = int(re.search(r"const POLL_MS = (\d+)", tui).group(1))
+    fast = int(re.search(r"const FAST_MS = (\d+)", tui).group(1))
+    net = max(1, round(poll / fast))
+    assert net == 16, f"{poll}ms/{fast}ms must be a whole number of fast ticks per net pass"
+    assert net * fast == poll, "the net pass must land ON the old cadence, not near it"
+    # the poll interval is re-ticked, not replaced by an extra one
+    assert "}, FAST_MS)" in tui
+
+
+def test_tui_probe_reads_both_db_and_wal_stamps():
+    """The probe's DB stamp covers the file AND its -wal sidecar.
+
+    SQLite in WAL mode keeps most writes in `sessions.db-wal` until a
+    checkpoint, so stat'ing the base file alone misses exactly the writes the
+    panel cares about (a todo/worker/wait/fact row) and the fast path would
+    then skip the state read for up to a full net pass. The stamp is also
+    mtime+size — either half alone can miss a same-mtime rewrite — and the
+    probe reports it as an explicit `db` change so the pass can skip the
+    single most expensive step when the disk has not moved.
+    """
+    tui = _tui_text()
+    stamp = _region(tui, "const dbStamp = (path: string): string => {", "/** Last project-DB stamp")
+    assert "st = fs?.statSync?.(path)" in stamp
+    assert "`${st.mtimeMs}:${st.size}`" in stamp, "mtime AND size"
+    assert 'return "-"' in stamp, "an unreadable path is a sentinel, never a throw out of probe()"
+    probe = _region(tui, "const probe = (): Rec => {", "const readProjectState")
+    assert "const path = stateDb(dir)" in probe
+    assert 'const stamp = `${dbStamp(path)}/${dbStamp(`${path}-wal`)}`' in probe, (
+        "the -wal sidecar is part of the fingerprint"
+    )
+    assert "db = stamp !== dbSeen" in probe and "dbSeen = stamp" in probe, (
+        "'the disk moved' is reported, not just folded into the signature"
+    )
+
+
+def test_tui_probe_is_a_reverse_index_scan_of_o1_fields():
+    """probe() is O(1) local reads: a reverse index scan, never a message walk.
+
+    A 400-message session walked end to end on every tick is the exact cost
+    the gate exists to avoid, so the last assistant row is found by index from
+    the end and the scan breaks there (opencode's own header rule) — the rest
+    of the session is never touched. The rest of the signature is count +
+    tokens/cost/model/agent/family size: what the Window/Models numbers, the
+    Tokens row and the footer chip read. No store sync, no SQLite open.
+    """
+    tui = _tui_text()
+    probe = _region(tui, "const probe = (): Rec => {", "const readProjectState")
+    # the message array: indexed backwards, stopping at the last assistant row
+    assert "const msgs = asArray(d?.session?.message?.list?.(sessionID))" in probe
+    assert "n = msgs.length" in probe, "the count is a length read, not a tally"
+    assert "for (let i = n - 1; i >= 0; i--) {" in probe, "reverse index scan"
+    assert "const m: Rec = msgs[i]" in probe
+    assert 'if (String(m?.role ?? m?.type) !== "assistant") continue' in probe
+    assert "break" in probe, "the scan stops at the last assistant row"
+    for bad in ("for (const m of msgs", "msgs.map(", "[...msgs]", "msgs.forEach("):
+        assert bad not in probe, f"probe must not iterate the whole store: {bad}"
+    # the session's own numbers, each an O(1) read
+    assert "const s = d?.session?.get?.(sessionID) ?? null" in probe
+    for field in (
+        "totalTokens(s?.tokens)",
+        "Number(s?.cost ?? 0) || 0",
+        "modelId(s?.model)",
+        'String(s?.agent ?? "")',
+        "familyIds(d, sessionID).length",
+    ):
+        assert field in probe, field
+    # a probe that opened the DB or hit the network is not a cheap probe
+    for bad in ("readProjectState", "db.query", "?.sync?.("):
+        assert bad not in probe, f"probe must stay local: {bad}"
+    assert "return { sig: sig.join(\"|\"), db }" in probe
+
+
+def test_tui_fast_path_skips_the_pass_when_the_signature_is_unchanged():
+    """An unchanged fingerprint returns before any pass is started.
+
+    The point of the fast tick is that idle costs the probe and nothing else:
+    no message walk, no store sync, no SQLite open, no repaint. The stored
+    signature starts empty (first tick always acts) and is dropped on a session
+    change, so a new session's first pass is never mistaken for a repeat of
+    the old one's.
+    """
+    tui = _tui_text()
+    assert 'let seenSig = ""' in tui, "no fingerprint to match on the first tick"
+    fast = _region(tui, "if (netTick % NET_EVERY !== 0) {", "void load()\n      }, FAST_MS)")
+    assert "p = probe()" in fast
+    assert "p = null" in fast, "a throwing probe is a no-change tick, never a crash"
+    assert "if (!p?.sig || p.sig === seenSig) return" in fast, (
+        "the early return IS the gate: unchanged => no pass at all"
+    )
+    assert fast.index("if (!p?.sig || p.sig === seenSig) return") < fast.index("load("), (
+        "the return precedes the pass, it is not a post-hoc skip"
+    )
+    # the fast pass is the local-only one: no store sync, DB read only if moved
+    assert "void load(false, { sync: false, db: p.db })" in fast
+    note = _region(tui, "const noteSession = (sid: unknown) => {", "/** Every slot render goes through here")
+    assert 'seenSig = ""' in note, "a new session invalidates the fingerprint"
+
+
+def test_tui_load_reports_whether_a_pass_ran_and_then_commits_the_signature():
+    """`load` returns a verdict, and the fingerprint commits only on it.
+
+    A pass that was queued behind the loading mutex did not run: reporting
+    true there would commit a signature the panel never actually rendered, and
+    a change seen while that pass was in flight would be swallowed until the
+    next net pass. So the guard returns false, the accepting end returns true,
+    and the tick's `.then` is the only place the signature is stored.
+    """
+    tui = _tui_text()
+    sig = "const load = async (full = false, opts: Rec = {}): Promise<boolean> => {"
+    assert sig in tui
+    guard = _region(tui, sig, "loading = true")
+    assert "pendingFull = pendingFull || full" in guard, "a full request is still queued"
+    assert "return false" in guard, "a queued pass is not a pass"
+    body = _region(tui, sig, "const noteSession")
+    import re
+
+    verdicts = re.findall(r"return (?:true|false)", body)
+    assert verdicts == ["return false", "return true"], (
+        f"exactly two verdicts, in order: {verdicts}"
+    )
+    # the fast path's local-only knobs
+    assert "if (opts.db !== false) {" in body, "a still-quiet DB skips the SQLite open"
+    assert "if (opts.sync !== false) {" in body, "store syncs belong to the net pass"
+    assert "void settle(data_?.session?.sync?.(sessionID, { children: true }), SCAN_MS)" in body
+    fast = _region(tui, "if (netTick % NET_EVERY !== 0) {", "void load()\n      }, FAST_MS)")
+    assert ".then((ran) => {" in fast
+    assert "if (ran) seenSig = p!.sig" in fast, "commit only when a pass really ran"
+    assert "seenSig = p!.sig" in fast and fast.count("seenSig =") == 1, (
+        "the tick's callback is the only writer of the fast-path signature"
+    )
+    assert "seenSig = p!.sig" not in _region(tui, sig, "const noteSession"), (
+        "load() itself must never commit the caller's fingerprint"
+    )
+
+
+def test_tui_net_pass_stays_unconditional_on_its_tick():
+    """Every NET_EVERY-th tick is still the old unconditional pass.
+
+    The probe deliberately does not read row bodies, so an edit to an OLDER
+    assistant row (a retried step's cost) slips past it; the net pass is what
+    re-proves a cold location store, refreshes the time-derived rows and
+    reconciles that blind spot. It must stay a bare `load()` — no probe gate,
+    no `{sync:false}` — or the panel stops self-healing.
+    """
+    tui = _tui_text()
+    assert "let netTick = 0" in tui
+    assert "netTick += 1" in tui
+    assert "if (netTick % NET_EVERY !== 0) {" in tui, "the fast branch is the non-net tick"
+    # byte-exact: the net branch is `void load()` and nothing else, then the
+    # interval closes on FAST_MS
+    assert "        void load()\n      }, FAST_MS)" in tui, (
+        "the net pass must be the unconditional load() it always was"
+    )
+    fast = _region(tui, "if (netTick % NET_EVERY !== 0) {", "void load()\n      }, FAST_MS)")
+    assert fast.count("void load(") == 1 and "void load(true)" not in fast, (
+        "the fast branch never claims a full pass"
+    )
+    assert "if (lastRender === 0 || Date.now() - lastRender > POLL_MS * 4) return" in tui, (
+        "the off-screen stand-down still gates the whole tick"
+    )
+
+
+def test_tui_settle_releases_its_box_timer():
+    """settle() clears the race's losing 5s timer.
+
+    A race leaves its loser pending for the whole box, and one pass boxes four
+    store syncs — so without the release the panel carried a handful of 5s
+    timers between passes, each firing into a pass that already finished. The
+    handle is held in a `box` var and dropped in `.finally`, which covers
+    both racers (the promise won, or the time-box did).
+    """
+    tui = _tui_text()
+    body = _region(tui, "function settle(p: any, ms: number): Promise<boolean> {", "function familyIds")
+    assert "let box: any = null" in body, "the box handle is kept so the loser can be released"
+    assert "box = setTimeout(() => resolve(false), ms)" in body
+    assert ").finally(() => {" in body, "a finished race must not leave a timer pending"
+    assert "if (box !== null) clearTimeout(box)" in body
+    assert body.count("clearTimeout") == 1, "one release path, in the finally"
+
+
+def test_tui_dispose_releases_every_timer_it_started():
+    """Dispose releases the poll, the family nudge and the Waits tick.
+
+    The fast retune added a second kind of scheduled work (a pending family
+    nudge firing a pass after release), so the cleanup has to cover it: a
+    one-shot that outlives the plugin calls back into a torn-down ctx.
+    """
+    tui = _tui_text()
+    # the release callback is the last thing setup() returns: the file's single
+    # `return () => {` runs to EOF, so this slice is exactly the cleanup
+    cleanup = tui[tui.index("return () => {"):]
+    assert "if (timer) clearInterval(timer)" in cleanup, "the (re-ticked) poll interval"
+    assert "if (famTimer !== null) {" in cleanup
+    assert "clearTimeout(famTimer)" in cleanup
+    assert "famTimer = null" in cleanup, "released, not just fired at"
+    assert "stopWaitTick()" in tui, "the Waits tick stands down with the plugin"
+    # the nudge is a one-shot that the fast path can leave pending
+    assert "famTimer = setTimeout(() => {" in tui
+    assert "if (famTimer === null) {" in tui, "never stacked, so one clear is enough"
+
+
+def test_tui_fast_path_ride_the_existing_poll_timer():
+    """The refresh added no timer: the probe rides the poll that already ran.
+
+    Two intervals total, before and after: the refresh poll (now re-ticked at
+    FAST_MS) and the Waits countdown tick. A third `setInterval` would mean the
+    fast path bought its own timer instead of reusing the one in place.
+    """
+    tui = _tui_text()
+    assert tui.count("setInterval(") == 2, (
+        f"expected exactly 2 intervals (poll + waits tick), found {tui.count('setInterval(')}"
+    )
+    assert "timer = setInterval(() => {" in tui
+    assert "tickTimer = setInterval(() => {" in tui
+    assert "}, FAST_MS)" in tui and "}, 1000)" in tui
+    # both the probe and the fast pass live inside that one poll callback
+    assert tui.index("p = probe()") < tui.index("}, FAST_MS)") < tui.index(
+        "tickTimer = setInterval(() => {"
     )

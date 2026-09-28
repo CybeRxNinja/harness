@@ -58,6 +58,14 @@
 //     anything, and a sync can be slow (it is the only network-touching step):
 //     every scan is therefore time-boxed, so the panel always settles instead
 //     of sitting on a placeholder forever.
+//   * Refresh is a CHANGE PROBE, not a poll: one 500ms tick fingerprints
+//     everything the panel shows with O(1) local reads (message count + the last
+//     assistant row, this session's tokens/family, the state DB's mtime) and
+//     does literally nothing when the fingerprint is unchanged, so the panel
+//     tracks opencode's own Context rows within a tick and costs ~zero while
+//     idle. Every 16th tick (8s) still runs the unconditional pass, which owns
+//     the slow location stores, the time-derived rows and anything the probe
+//     cannot see. One timer before, one timer after.
 //
 // Every step is guarded: a TUI API drift degrades to a log line, a muted row or
 // a "—" value — never a broken screen and never a stuck placeholder.
@@ -67,6 +75,16 @@ type Rec = Record<string, any>
 const STATE = "harness.sidebar.state"
 const HARNESS_PREFIX = "harness-"
 const POLL_MS = 8000
+/**
+ * Fast-path tick. The panel used to learn about a finished turn from the 8s
+ * poll alone, so its Context numbers trailed opencode's own by up to 8s; the
+ * fast path closes that to one tick (see the change probe below) and the 8s
+ * poll stays as the slow safety net. It is the SAME interval, re-ticked: net
+ * timer count is unchanged (one poll + the Waits tick).
+ */
+const FAST_MS = 500
+/** Fast ticks per unconditional net pass — keeps the old 8s cadence exact. */
+const NET_EVERY = Math.max(1, Math.round(POLL_MS / FAST_MS))
 /** A store sync can block on the network; past this the panel shows what it has. */
 const SCAN_MS = 5000
 const ROW_LIMIT = 6
@@ -314,12 +332,25 @@ function asArray(listed: any): Rec[] {
  * when the time-box won (the slow path keeps running in the background — the
  * caller just stops waiting). A rejection counts as settled: it finished, it
  * just failed. Callers that only need the wait to end ignore the value.
+ *
+ * The box timer is released the moment the promise settles. A race leaves its
+ * loser pending for the whole window, and one pass boxes four store syncs, so
+ * without this the panel kept a handful of 5s timers alive between passes.
  */
 function settle(p: any, ms: number): Promise<boolean> {
+  let box: any = null
   return Promise.race([
     Promise.resolve(p).then(() => true).catch(() => true),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms)),
-  ])
+    new Promise<boolean>((resolve) => {
+      box = setTimeout(() => resolve(false), ms)
+    }),
+  ]).finally(() => {
+    try {
+      if (box !== null) clearTimeout(box)
+    } catch {
+      /* already fired */
+    }
+  })
 }
 
 /**
@@ -475,6 +506,10 @@ const HarnessTui = {
      *  finished, and one extra pass is nudged (see load). One nudge pending. */
     let famSeen = 0
     let famTimer: any = null
+    /** Last change-probe signature the fast path acted on (see probe). */
+    let seenSig = ""
+    /** Fast ticks since the last unconditional net pass. */
+    let netTick = 0
     // Timestamp of the last slot render. This entrypoint is loaded in the
     // long-lived server process as well, where no slot ever renders — an
     // instance that polls forever with nobody watching is pure background
@@ -487,6 +522,80 @@ const HarnessTui = {
       } catch {
         return null
       }
+    }
+
+    /** mtime+size of a state-DB file, "-" when it cannot be stat'ed. */
+    const dbStamp = (path: string): string => {
+      try {
+        const st = fs?.statSync?.(path)
+        return st ? `${st.mtimeMs}:${st.size}` : "-"
+      } catch {
+        return "-"
+      }
+    }
+    /** Last project-DB stamp the probe saw, so it can report "the disk moved". */
+    let dbSeen = ""
+
+    /**
+     * Change probe: a short signature of everything the panel shows, built from
+     * O(1) LOCAL reads — no store sync, no SQLite open, no message walk, no
+     * repaint. The fast tick compares it with the last one and does nothing at
+     * all when they match, which is what makes an idle panel free instead of
+     * "one full load every tick".
+     *
+     * What it fingerprints, and why that is enough:
+     *   * message count + the LAST assistant row's id/output (scanned from the
+     *     end, opencode's own header rule) — the Window/Models numbers move
+     *     there, and a streaming step edits that same row in place;
+     *   * this session's tokens/cost/model/agent + family size — the Tokens
+     *     row, the footer chip and a subagent's arrival;
+     *   * the state DB's mtime+size, file AND -wal (WAL writes land there), so
+     *     a todo/worker/wait/fact write shows up without opening the DB.
+     *
+     * Deliberately NOT a full substitute for a load: it reads no row bodies, so
+     * an edit to an OLDER assistant row (a retried step's cost) can slip past
+     * it. That is what the 8s safety net below is for — this path only has to
+     * be right about the common case, and the net reconciles the rest.
+     */
+    const probe = (): Rec => {
+      const d = ctx.data
+      const sig: string[] = [sessionID]
+      let n = 0
+      let last = ""
+      try {
+        const msgs = asArray(d?.session?.message?.list?.(sessionID))
+        n = msgs.length
+        // Index reads, never a spread/for-of: iterating here is the very walk
+        // the gate exists to avoid.
+        for (let i = n - 1; i >= 0; i--) {
+          const m: Rec = msgs[i]
+          if (String(m?.role ?? m?.type) !== "assistant") continue
+          last = `${String(m?.id ?? "")}:${Number(m?.tokens?.output ?? 0) > 0 ? totalTokens(m.tokens) : 0}:${m?.summary ? 1 : 0}`
+          break
+        }
+      } catch {
+        /* store cold or drifted: the net still loads, the panel still settles */
+      }
+      sig.push(`${n}~${last}`)
+      try {
+        const s = d?.session?.get?.(sessionID) ?? null
+        sig.push(`${totalTokens(s?.tokens)}:${Number(s?.cost ?? 0) || 0}:${modelId(s?.model)}:${String(s?.agent ?? "")}:${familyIds(d, sessionID).length}`)
+      } catch {
+        /* info row not loaded yet */
+      }
+      let db = false
+      if (fs) {
+        const dir = location()?.directory ?? process.cwd?.() ?? "."
+        const path = stateDb(dir)
+        const stamp = `${dbStamp(path)}/${dbStamp(`${path}-wal`)}`
+        db = stamp !== dbSeen
+        dbSeen = stamp
+        sig.push(stamp)
+      } else {
+        // No fs yet (first pass): stay quiet rather than guess a change.
+        sig.push("")
+      }
+      return { sig: sig.join("|"), db }
     }
 
     /**
@@ -787,14 +896,25 @@ const HarnessTui = {
         .map((r: Rec) => `◐ ${wcut(r?.label, 15)} · ${left(r?.deadline)}${waitTail(r)}`)
     }
 
-    const load = async (full = false) => {
+    /**
+     * One pass over every source. `full` re-runs the slow location stores; the
+     * fast path (see the probe) passes `{sync:false, db}` instead, because the
+     * message store is already live from opencode's own event stream and the
+     * state DB was just stat'ed — re-syncing and re-opening it there would
+     * multiply the two heaviest steps by the tick rate for nothing.
+     *
+     * Resolves true when a pass actually ran. The fast path uses that to hold
+     * its fingerprint back until the pass is accepted, so a change seen while
+     * another pass was in flight is retried on the next tick, never swallowed.
+     */
+    const load = async (full = false, opts: Rec = {}): Promise<boolean> => {
       // A `full` request must never be dropped on the floor: the session id
       // arrives with the first slot render, i.e. while the setup-time load is
       // usually still in flight, and losing that one left the panel showing a
       // session-less, all-zero snapshot forever. Queue it instead.
       if (loading) {
         pendingFull = pendingFull || full
-        return
+        return false
       }
       loading = true
       // "scanning…" is driven by a REACTIVE flag, never by the plain `loading`
@@ -886,18 +1006,22 @@ const HarnessTui = {
         // One read-only open of the project state DB for the todo space, the
         // worker pool and the fact store (all local, and they work before the
         // first message because they are keyed by directory/session, not by the
-        // message store).
-        const state = await readProjectState(directory, sessionID)
-        data.todos = state.todos
-        data.todosDone = state.todosDone
-        data.todosFromProject = state.todosFallback
-        data.facts = state.facts
-        data.factsCount = state.factsCount
-        data.workers = state.workers
-        data.workersActive = state.workersActive
-        data.waits = state.waits
-        data.waitRows = state.waitRows
-        data.waitSig = state.waitSig
+        // message store). Skipped by the fast path when the DB has not moved:
+        // the rows just read are still the truth, and the open is the single
+        // most expensive step in a pass.
+        if (opts.db !== false) {
+          const state = await readProjectState(directory, sessionID)
+          data.todos = state.todos
+          data.todosDone = state.todosDone
+          data.todosFromProject = state.todosFallback
+          data.facts = state.facts
+          data.factsCount = state.factsCount
+          data.workers = state.workers
+          data.workersActive = state.workersActive
+          data.waits = state.waits
+          data.waitRows = state.waitRows
+          data.waitSig = state.waitSig
+        }
 
         // warm the session store for the next poll (see the note above on why
         // this cannot happen before the reads)
@@ -906,11 +1030,15 @@ const HarnessTui = {
           // round trip — a `task` child is a separate Session.Info with its own
           // tokens, and until discovery lands, the Tokens row, the chip's $/tok
           // and opencode's own `session.cost` all miss what the workers spent.
-          void settle(data_?.session?.sync?.(sessionID, { children: true }), SCAN_MS)
-          void settle(data_?.session?.message?.sync?.(sessionID), SCAN_MS)
-          // subagent messages feed the Models rows too (see scanModels)
-          for (const id of familyIds(data_, sessionID).slice(1)) {
-            void settle(data_?.session?.message?.sync?.(id), SCAN_MS)
+          // Network round trips: the fast path leaves them to the net poll,
+          // because the message store is already live off the event stream.
+          if (opts.sync !== false) {
+            void settle(data_?.session?.sync?.(sessionID, { children: true }), SCAN_MS)
+            void settle(data_?.session?.message?.sync?.(sessionID), SCAN_MS)
+            // subagent messages feed the Models rows too (see scanModels)
+            for (const id of familyIds(data_, sessionID).slice(1)) {
+              void settle(data_?.session?.message?.sync?.(id), SCAN_MS)
+            }
           }
           // The message store fills asynchronously, so this session's model rows
           // land on the NEXT pass. Nudge one so they appear with the session
@@ -1000,6 +1128,7 @@ const HarnessTui = {
           pendingFull = false
           void load(true)
         }
+        return true
       }
     }
 
@@ -1011,6 +1140,10 @@ const HarnessTui = {
       // again: the slow half must re-prove itself, not inherit the latch.
       scanned = false
       slowTries = 0
+      // The new session's numbers differ from the fingerprint by construction,
+      // so the fast path must not treat its first pass as a repeat of the old
+      // session's.
+      seenSig = ""
       void load(true) // a new session invalidates every slow source
     }
 
@@ -1023,19 +1156,44 @@ const HarnessTui = {
     void load(true) // first load runs once a session id arrives from the slot
     let timer: any = null
     try {
-      // Token/cost counters move during a turn; the cheap pass keeps them
-      // honest without re-syncing the location stores every few seconds.
+      // ONE interval, two jobs. The fast path runs the change probe first and
+      // does nothing at all when nothing moved, so a turn's end shows up within
+      // a tick instead of up to POLL_MS later; every NET_EVERY-th tick is the
+      // unconditional pass, unchanged: it re-proves a cold location store,
+      // refreshes the time-derived rows (worker ages), reconciles anything the
+      // probe cannot see and re-syncs the message store. Same stand-down as
+      // before, same single timer, released in the cleanup below.
       timer = setInterval(() => {
         if (lastRender === 0 || Date.now() - lastRender > POLL_MS * 4) return
+        netTick += 1
+        if (netTick % NET_EVERY !== 0) {
+          let p: Rec | null = null
+          try {
+            p = probe()
+          } catch {
+            p = null
+          }
+          // No signature (probe drifted) or no change: no walk, no DB, no
+          // repaint — the idle cost is the probe itself and nothing else.
+          if (!p?.sig || p.sig === seenSig) return
+          // Hold the new signature back until the pass is actually accepted:
+          // a change seen mid-pass is retried next tick, never swallowed.
+          void load(false, { sync: false, db: p.db })
+            .then((ran) => {
+              if (ran) seenSig = p!.sig
+            })
+            .catch((e) => log(`fast pass failed: ${short(e)}`))
+          return
+        }
         void load()
-      }, POLL_MS)
+      }, FAST_MS)
     } catch (e) {
       log(`poll unavailable: ${short(e)}`)
     }
 
-    // The Waits countdown ticks between host repaints: the 8s poll above is
-    // what refreshes the rows, so a `28s left` label sat stale until the next
-    // pass. This 1s timer only bumps `rev` — the Waits detail lines recompute
+    // The Waits countdown ticks between host repaints: the poll above is what
+    // refreshes the rows, so a `28s left` label sat stale until the next pass.
+    // This 1s timer only bumps `rev` — the Waits detail lines recompute
     // left() from the stored deadlines on every render (see liveWaits), so a
     // bump is a fresh countdown with no DB read. It runs only while an
     // unexpired wait exists and clears itself when none remains; like the
@@ -1566,6 +1724,17 @@ const HarnessTui = {
         if (timer) clearInterval(timer)
       } catch {
         /* nothing to release */
+      }
+      try {
+        // The one-shot nudges (message-store warm, family growth) are timers
+        // too: a pending one after release would fire a pass into a plugin
+        // opencode has already torn down.
+        if (famTimer !== null) {
+          clearTimeout(famTimer)
+          famTimer = null
+        }
+      } catch {
+        /* already fired */
       }
       stopWaitTick()
     }
