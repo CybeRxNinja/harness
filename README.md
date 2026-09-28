@@ -42,9 +42,10 @@ and re-runnable locally (the former live smoke is removed):
 | the model's plan lands in the harness todo space | verified on a real server: `opencode run "…call todowrite…"` → rows landed in `<project>/.opencode/harness/sessions.db` under the run's session id, painted by the panel off a real pty capture |
 | 170 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
 
-Latest release: **[`plugin-v0.11`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.11)**
-— previously verified end-to-end by installing *from the release* (`harness plugin
-install --from-release latest` → byte-identical assets → live smoke passed).
+Latest release: **[`plugin-v0.12`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.12)**
+— `--from-release` assets are byte-identical to the checkout, a path last verified
+end-to-end on `plugin-v0.11` (`harness plugin install --from-release latest` → live
+smoke passed).
 
 ## What the plugin does
 
