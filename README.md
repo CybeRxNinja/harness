@@ -40,9 +40,9 @@ and re-runnable locally (the former live smoke is removed):
 | worker rows reach a terminal state | `tests/test_rlm.py`: `is_terminal` / `worker_timeout` readers behind `harness doctor` (live routing is opencode's native `task` tool) |
 | entrypoints never break a boot | `tests/test_plugin.py` transpiles both files with `Bun.Transpiler`; bad `setup()` returns are pinned by tests |
 | the model's plan lands in the harness todo space | verified on a real server: `opencode run "…call todowrite…"` → rows landed in `<project>/.opencode/harness/sessions.db` under the run's session id, painted by the panel off a real pty capture |
-| 176 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
+| 185 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
 
-Latest release: **[`plugin-v0.12`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.12)**
+Latest release: **[`plugin-v0.14`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.14)**
 — `--from-release` assets are byte-identical to the checkout, a path last verified
 end-to-end on `plugin-v0.11` (`harness plugin install --from-release latest` → live
 smoke passed).
