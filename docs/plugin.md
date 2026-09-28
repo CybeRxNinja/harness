@@ -258,16 +258,40 @@ Implementation notes worth keeping (all probed against opencode 2.0.11):
   in-memory read, so it runs on every pass, and one nudge per session
   (`setTimeout(load, 500)`) picks the rows up with the session instead of up to
   `POLL_MS` later.
-- **The 8s poll stands down when nothing is on screen.** opencode loads this
+- **The refresh is a change probe on a 500ms tick, not a poll.** The panel used
+  to learn that a turn had ended from the 8s poll alone, so its Context numbers
+  trailed opencode's own by up to 8s. One `setInterval` at `FAST_MS` (500ms) now
+  runs `probe()` first, which fingerprints everything the panel shows with O(1)
+  local reads — message count plus the LAST assistant row's id/output (scanned
+  from the end, opencode's own header rule), this session's
+  tokens/cost/model/agent and family size, and the state DB's mtime+size for
+  the file AND its `-wal` sidecar (WAL writes land there) — and returns
+  immediately when the signature is unchanged: no message walk, no store sync,
+  no SQLite open, no repaint. The probe costs a few microseconds (~0.005ms
+  measured warm, and flat in message count because it is a reverse index scan),
+  so an idle panel is free and a real change lands within one tick. A pass it
+  starts skips the store syncs and opens the DB only when the stamp moved. The
+  signature is committed only once that pass is accepted, so a change seen
+  while a pass was in flight is retried next tick rather than swallowed, and a
+  session change drops it (`seenSig = ""`).
+- **Every 16th tick is the unconditional pass** (`NET_EVERY = POLL_MS /
+  FAST_MS`, so the old 8s cadence is exact). That is the safety net, not the
+  fast path's twin: it re-proves a cold location store, re-syncs the message
+  store, recomputes the time-derived rows (worker ages) and reconciles what the
+  probe cannot see — the probe reads no row bodies, so an edit to an OLDER
+  assistant row (a retried step's cost) surfaces only here. One timer before,
+  one timer after: the fast tick is the interval that already existed,
+  re-ticked, and the separate 1s Waits countdown tick is unchanged.
+- **The refresh stands down when nothing is on screen.** opencode loads this
   entrypoint in the long-lived server process too, where no slot ever renders;
-  polling there meant a session message walk + four store syncs + two SQLite
+  ticking there meant a session message walk + four store syncs + two SQLite
   reads every 8s with nobody watching. Every slot render stamps `lastRender`,
-  and the poll skips once nothing has rendered for ~32s (it resumes the moment
-  the panel is drawn again). What a scan reads: session tokens/cost/agent/model,
-  the session's assistant messages (Models rows), the lazily-synced location
-  stores (skill/agent/model/provider), the harness todo space and the harness
-  facts DB — measured at ~4ms warm, which is why the placeholder is the thing
-  worth watching, not the cost.
+  and the interval skips once nothing has rendered for ~32s (it resumes the
+  moment the panel is drawn again). What a scan reads: session
+  tokens/cost/agent/model, the session's assistant messages (Models rows), the
+  lazily-synced location stores (skill/agent/model/provider), the harness todo
+  space and the harness facts DB — measured at ~4ms warm, which is why the
+  placeholder is the thing worth watching, not the cost.
 
 ## What the plugin does NOT do (those come from opencode.json)
 
