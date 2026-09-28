@@ -1826,7 +1826,7 @@ def _skill_src():
 
 def test_plugin_apk_reverse_skill_seed():
     """security/apk-reverse ships as a seed: valid frontmatter naming it,
-    picked up by the `**/SKILL.md` seed glob alongside the other 15."""
+    picked up by the `**/SKILL.md` seed glob alongside the other 16."""
     src = _skill_src()
     md = src / "security" / "apk-reverse" / "SKILL.md"
     assert md.is_file(), "seed skill missing from package data"
@@ -1840,5 +1840,5 @@ def test_plugin_apk_reverse_skill_seed():
     assert fm.get("name") == "apk-reverse", fm
     assert fm.get("description"), "seeds need the one-line description skills_list shows"
     found = sorted(src.rglob("SKILL.md"))
-    assert len(found) == 16, [p.parent.name for p in found]
+    assert len(found) == 17, [p.parent.name for p in found]
     assert md in found

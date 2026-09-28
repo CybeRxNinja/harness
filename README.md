@@ -33,7 +33,7 @@ and re-runnable locally (the former live smoke is removed):
 | --- | --- |
 | plugin loads and activates on stock opencode | formerly proven by a live smoke booting `opencode serve` and asserting `status == "active"` → `SMOKE OK` |
 | TUI half is real (panel, chip, commands) | the smoke asserted `features.tui` — set only when a `tui.tsx` entrypoint is present |
-| 16 bundled skills seeded into opencode's skill store | the smoke counted them against a live server |
+| 17 bundled skills seeded into opencode's skill store | the smoke counted them against a live server |
 | plugin is visible in the Plugins panel | the TUI panel filters on `features.tui`; the directory install ships both entrypoints |
 | memory remembers without being asked | `tests/test_memory_auto.py`: durable facts + progress capture; 2-evidence lessons auto-promote to `MEMORY.md`; credentials refused (live sessions capture via the plugin context hook) |
 | dangerous commands ask, safe ones don't | `tests/test_risk.py`: 94 ask-rules generated from `harness/risk.py` (`git push`, `rm -rf`, `DROP TABLE`, deploys) — greps, diffs, fetches, tests never prompt |
@@ -51,7 +51,7 @@ install --from-release latest` → byte-identical assets → live smoke passed).
 Installed into `~/.config/opencode/plugins/harness/` and auto-loaded by
 opencode v2:
 
-- **Skills** — 16 bundled skills seeded into opencode's skill store
+- **Skills** — 17 bundled skills seeded into opencode's skill store
   (`ctx.skill.transform`): build ladder (incl. **ponytail**, MIT), review,
   audit, spec-driven development, security, and more.
 - **Native tools** — `skills_list`, `skill_view`, `memory_recall`,
@@ -138,7 +138,7 @@ harness config get|set|show [--scope user|project]
 ```
 harness/plugin/     the plugin: server + TUI entrypoints (harness.ts, tui.tsx) — the product
 harness/            cli, memory, risk, rlm (worker-state readers), store, doctor, ...
-harness/data/skills bundled skills (16, incl. ponytail — MIT, see NOTICE.md)
+harness/data/skills bundled skills (17, incl. ponytail — MIT, see NOTICE.md)
 docs/               one page per feature (start at docs/quickstart.md, docs/plugin.md)
 .github/workflows/  ci.yml (tests) · release.yml (plugin-v* → assets)
 ```
