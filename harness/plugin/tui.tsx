@@ -87,6 +87,16 @@ const FAST_MS = 500
 const NET_EVERY = Math.max(1, Math.round(POLL_MS / FAST_MS))
 /** A store sync can block on the network; past this the panel shows what it has. */
 const SCAN_MS = 5000
+/**
+ * How long the slow half keeps re-proving the location stores before it accepts
+ * whatever they answered. Server-side skill seeding lands seconds after start
+ * (opencode seeds on boot), so the window is wall-clock, not a try count — see
+ * `slowUntil` in setup(). Past it the latch settles, which is what keeps a
+ * genuinely empty setup from re-syncing forever.
+ */
+const SLOW_WINDOW_MS = 30_000
+/** Floor between two slow RETRIES, so the window above is not spent per tick. */
+const SLOW_RETRY_MS = 2000
 const ROW_LIMIT = 6
 /** Detail rows per section when expanded (the sidebar viewport is short). */
 const DETAIL_LIMIT = 5
@@ -731,13 +741,29 @@ const HarnessTui = {
 
     let scanned = false
     /**
-     * Slow-scan attempts so far. A cold location store answers empty on the
-     * first pass and fills on the next, so one empty pass must not latch
-     * `scanned` (see load) — but a setup with genuinely no skills must still
-     * settle, so the re-attempts stop after SLOW_MAX_TRIES passes.
+     * When the slow half stops being re-attempted. A cold location store
+     * answers empty on the first pass and fills when the server finishes
+     * seeding it, so one empty pass must not latch `scanned` (see load) — but a
+     * setup with genuinely no skills must still settle, so the re-attempts stop
+     * at a wall-clock deadline.
+     *
+     * The budget is TIME, not a try count, and that is the whole fix: the
+     * refresh is re-ticked at FAST_MS (500ms) with the 8s net pass still
+     * unconditional, so a count of 5 was 1.7s of retrying where it used to be
+     * ~40s. The latch therefore settled on the store while the seeding was
+     * still in flight, and the panel froze at "0 skills" for the rest of the
+     * session (live: "Skills 0 installed / (none seeded at this location)" with
+     * skills on disk). 0 = no attempt yet: the window opens on the first one.
      */
-    let slowTries = 0
-    const SLOW_MAX_TRIES = 5
+    let slowUntil = 0
+    /**
+     * Earliest time the next RETRY may run. A full pass (session change, first
+     * load, `/harness-refresh`) ignores it — that is the caller's escape hatch.
+     * Without a floor the window above would sync the location stores on every
+     * 500ms tick that saw a change: 30s of budget at the tick rate instead of
+     * the old 5 syncs per 40s.
+     */
+    let slowNext = 0
     /**
      * Verdict of the last slow pass: did all four store syncs beat the
      * time-box? Written by scanSlow itself (see below) — the outer settle()
@@ -752,10 +778,11 @@ const HarnessTui = {
      * (agents/skills/providers/models) and the context-window limit. A `sync()`
      * can block on the network and none of it changes between messages, so it
      * runs when the session changes, on the first load and on
-     * `/harness-refresh` — not on the cheap 8s poll. The message walk that fills
-     * the Models rows is deliberately NOT in here (see scanModels): it is a
-     * local read that has to run every pass, because the message store only
-     * fills once its own sync lands.
+     * `/harness-refresh` — plus, while the latch is down, on the retry floor
+     * (see slowNext). The message walk that fills the Models rows is
+     * deliberately NOT in here (see scanModels): it is a local read that has to
+     * run every pass, because the message store only fills once its own sync
+     * lands.
      *
      * Every sync is individually time-boxed: one unreachable provider registry
      * must not strand the whole panel on its placeholder.
@@ -978,26 +1005,29 @@ const HarnessTui = {
         }
 
         // Slow sources only when they can have changed: session change, first
-        // load, or an explicit refresh (see scanSlow). Unlatched polls
-        // re-enter too, so a cold first pass gets a second chance.
-        if (full || !scanned) {
+        // load, or an explicit refresh (see scanSlow). An unlatched panel
+        // re-enters on a floor, so a cold first pass keeps getting chances —
+        // a `full` pass never waits for the floor.
+        if (full || (!scanned && Date.now() >= slowNext)) {
+          slowNext = Date.now() + SLOW_RETRY_MS
           // The outer time-box is a hang-guard only — its answer is ignored
           // on purpose (see slowOk): it reports true for any settlement,
           // including a pass that timed out exactly on the edge.
           await settle(scanSlow(loc, data_), SCAN_MS)
-          // A cold store answers empty on the first pass and fills on the
-          // next: latching on that first pass froze the panel at "0 skills"
-          // forever, because the 8s poll never re-ran the slow half. Latch
-          // only on a pass whose syncs landed AND showed something — or
-          // after SLOW_MAX_TRIES passes, so a setup with genuinely no
-          // skills still settles instead of syncing forever. ALL slow
-          // outputs must read non-empty before the early latch: pass 1 can
-          // see agents (local builtins, instant) while the server-side skill
+          // A cold store answers empty on the first pass and fills when the
+          // server finishes seeding it, so latching on that first pass froze
+          // the panel at "0 skills" forever. Latch only on a pass whose syncs
+          // landed AND showed something; the window (slowUntil) is the exit
+          // for a setup with genuinely no skills, so it settles instead of
+          // syncing forever — and it is what stops the re-attempts, not a try
+          // count, which the 500ms tick turned into 1.7s of retrying. ALL slow
+          // outputs must read non-empty before the early latch: pass 1 can see
+          // agents (local builtins, instant) while the server-side skill
           // seeding has not landed yet, and latching on that one warm store
           // froze Skills at 0 until a manual refresh re-ran the slow half.
-          slowTries += 1
+          if (slowUntil === 0) slowUntil = Date.now() + SLOW_WINDOW_MS
           const populated = data.skills.length > 0 && data.agents.length > 0
-          if (slowOk && (populated || slowTries >= SLOW_MAX_TRIES)) scanned = true
+          if ((slowOk && populated) || Date.now() >= slowUntil) scanned = true
         }
         // Cheap, and only correct AFTER the message store has filled — so it
         // runs on every pass, not on the slow half.
@@ -1139,7 +1169,8 @@ const HarnessTui = {
       // A new session can mean a new project directory with cold stores
       // again: the slow half must re-prove itself, not inherit the latch.
       scanned = false
-      slowTries = 0
+      slowUntil = 0
+      slowNext = 0
       // The new session's numbers differ from the fingerprint by construction,
       // so the fast path must not treat its first pass as a repeat of the old
       // session's.
@@ -1456,25 +1487,33 @@ const HarnessTui = {
               <box flexDirection="column">
                 {/* Header: brand + at-a-glance, in opencode's own one-line
                     label/value grammar. It never says "no session" — the id is
-                    either known or simply not shown. */}
-                <box flexDirection="row" gap={1} minWidth={0}>
+                    either known or simply not shown. The separator is a
+                    CHARACTER, not the box's `gap`: opencode did not space these
+                    texts, and the header rendered `harnessses_f2900e24` (live,
+                    2.0.18). So the brand carries the space and the tail the `·`,
+                    as literals — the line then reads the same on a host that
+                    honours `gap` and one that drops it. */}
+                <box flexDirection="row" minWidth={0}>
                   <text fg={view.note ? th.warn : th.base} flexShrink={0}>
-                    harness
+                    {"harness "}
                   </text>
                   <text fg={th.muted} flexGrow={1} wrapMode="none" truncate>
-                    {view.note
-                      ? cut(view.note, 40)
-                      : [
-                          view.sessionID || "",
-                          (view.skills ?? 0) > 0 ? `${view.skills} skills` : "",
-                          (view.facts ?? 0) > 0 ? `${view.facts} facts` : "",
-                        ]
-                          .filter((s) => s.length)
-                          .join(" · ")}
+                    {(() => {
+                      const tail = view.note
+                        ? cut(view.note, 40)
+                        : [
+                            view.sessionID || "",
+                            (view.skills ?? 0) > 0 ? `${view.skills} skills` : "",
+                            (view.facts ?? 0) > 0 ? `${view.facts} facts` : "",
+                          ]
+                            .filter((s) => s.length)
+                            .join(" · ")
+                      return tail ? `· ${tail}` : ""
+                    })()}
                   </text>
                   {view.scanning ? (
                     <text fg={th.muted} flexShrink={0}>
-                      ⋯
+                      {" ⋯"}
                     </text>
                   ) : null}
                 </box>

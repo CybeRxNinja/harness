@@ -90,10 +90,11 @@ def test_tui_cold_scan_timeout_does_not_latch():
 
     The cold location store answers empty on the first pass and fills on the
     next; latching on that first empty pass froze the panel at "0 skills"
-    forever because the 8s poll (`if (full || !scanned)`) never re-ran the
-    slow half. The latch therefore requires the per-sync verdict (`slowOk`,
-    from the settles INSIDE scanSlow — the outer race maps any settlement to
-    true) AND content, and unlatched polls keep re-entering the slow half.
+    forever because the 8s poll (`if (full || (!scanned && Date.now() >=
+    slowNext))`) never re-ran the slow half. The latch therefore requires the
+    per-sync verdict (`slowOk`, from the settles INSIDE scanSlow — the outer
+    race maps any settlement to true) AND content, and unlatched polls keep
+    re-entering the slow half.
     """
     tui = _tui_text()
     # settle carries a verdict: True when the sync beat the time-box (a
@@ -104,13 +105,13 @@ def test_tui_cold_scan_timeout_does_not_latch():
     # reset fresh every pass so a pass that never finishes leaves it false.
     assert "slowOk = synced.every(Boolean)" in tui
     assert "slowOk = false" in tui
-    # the latch: syncs landed AND showed something (or bounded tries, covered
-    # by test_tui_empty_store_settles_after_bounded_retries) — never an
-    # unconditional `scanned = true` on the line after the await.
-    assert "if (slowOk && (populated || slowTries >= SLOW_MAX_TRIES)) scanned = true" in tui
+    # the latch: syncs landed AND showed something (or the retry window ran
+    # out, covered by test_tui_empty_store_settles_after_bounded_retries) —
+    # never an unconditional `scanned = true` on the line after the await.
+    assert "if ((slowOk && populated) || Date.now() >= slowUntil) scanned = true" in tui
     # unlatched polls re-enter the slow half, so the cold first pass gets a
     # second chance on a later poll instead of freezing at zero.
-    assert "if (full || !scanned) {" in tui
+    assert "if (full || (!scanned && Date.now() >= slowNext)) {" in tui
 
 
 def test_tui_skills_show_syncing_while_unlatched():
@@ -131,23 +132,30 @@ def test_tui_skills_show_syncing_while_unlatched():
 
 
 def test_tui_empty_store_settles_after_bounded_retries():
-    """A genuinely empty store still settles: retries stop after N tries.
+    """A genuinely empty store still settles: the retries are time-bounded.
 
     Without a bound, a setup with no skills would re-sync the location stores
-    on every poll forever. After SLOW_MAX_TRIES passes the latch accepts the
-    empty result, the cheap 8s poll skips the slow half again, and a session
-    change resets the latch so a new project's cold stores must re-prove.
+    on every poll forever. The budget is a wall-clock WINDOW (SLOW_WINDOW_MS,
+    opened on the first slow pass) rather than a try count, plus a floor
+    between two retries (SLOW_RETRY_MS) so the window is not spent at the
+    500ms tick rate; after the window passes the latch accepts the empty
+    result, the cheap poll skips the slow half again, and a session change
+    resets the latch so a new project's cold stores must re-prove.
     """
     tui = _tui_text()
-    assert "const SLOW_MAX_TRIES = 5" in tui
-    assert "slowTries += 1" in tui
+    assert "const SLOW_WINDOW_MS = 30_000" in tui
+    assert "const SLOW_RETRY_MS = 2000" in tui
     assert "const populated = data.skills.length > 0 && data.agents.length > 0" in tui
-    assert "slowTries >= SLOW_MAX_TRIES" in tui
+    # the window opens on the first slow pass and is never re-armed, so a
+    # genuinely empty setup settles instead of syncing forever
+    assert "if (slowUntil === 0) slowUntil = Date.now() + SLOW_WINDOW_MS" in tui
+    assert "Date.now() >= slowUntil" in tui
     # the slow half stays skipped once latched (cheap poll), and a new session
-    # drops the latch instead of inheriting it.
-    assert "if (full || !scanned) {" in tui
+    # drops the latch and both clocks instead of inheriting them.
+    assert "if (full || (!scanned && Date.now() >= slowNext)) {" in tui
     assert "scanned = false" in tui
-    assert "slowTries = 0" in tui
+    assert "slowUntil = 0" in tui
+    assert "slowNext = 0" in tui
 
 
 def test_tui_partial_population_does_not_latch():
@@ -157,14 +165,104 @@ def test_tui_partial_population_does_not_latch():
     skill seeding has not landed yet — with an `||` predicate that pass
     latched `scanned` and froze Skills at 0 until a manual refresh. The
     early latch requires ALL slow outputs non-empty; a half-populated pass
-    leaves the latch down so the 8s poll re-runs the slow half, and the
-    bound above still settles a genuinely empty store.
+    leaves the latch down so the poll re-runs the slow half, and the window
+    above still settles a genuinely empty store.
     """
     tui = _tui_text()
     assert "const populated = data.skills.length > 0 && data.agents.length > 0" in tui
     assert "data.skills.length > 0 || data.agents.length > 0" not in tui
-    assert "if (slowOk && (populated || slowTries >= SLOW_MAX_TRIES)) scanned = true" in tui
-    assert "if (full || !scanned) {" in tui
+    assert "if ((slowOk && populated) || Date.now() >= slowUntil) scanned = true" in tui
+    assert "if (full || (!scanned && Date.now() >= slowNext)) {" in tui
+
+
+def test_tui_slow_retry_budget_is_a_time_window_not_a_try_count():
+    """The slow-scan budget is wall-clock, because the tick is 500ms.
+
+    A count of 5 retries was 1.7s of retrying at the 500ms refresh cadence,
+    so the latch settled on a still-cold location store and the panel froze at
+    "0 skills" for the rest of the session. The budget is now a 30s window
+    plus a 2s floor between retries, and no count constant survives.
+    """
+    tui = _tui_text()
+    assert "const SLOW_WINDOW_MS = 30_000" in tui
+    assert "const SLOW_RETRY_MS = 2000" in tui
+    # both clocks are the wall clock, and only the retry floor is re-armed
+    assert "slowNext = Date.now() + SLOW_RETRY_MS" in tui
+    assert "if (slowUntil === 0) slowUntil = Date.now() + SLOW_WINDOW_MS" in tui
+    # the count-based budget is gone for good — a re-added try cap would
+    # reintroduce the freeze it replaced
+    assert "SLOW_MAX_TRIES" not in tui
+    assert "slowTries" not in tui
+
+
+def test_tui_early_latch_needs_syncs_landed_and_both_lists_populated():
+    """Inside the window, the latch needs BOTH verdicts — never either.
+
+    The window is the only alternative way to latch, so a pass that failed its
+    store syncs (`slowOk` false) or that read a half-populated store cannot
+    latch early; and `populated` stays a conjunction, because agents (local
+    builtins) land long before server-seeded skills.
+    """
+    tui = _tui_text()
+    assert "const populated = data.skills.length > 0 && data.agents.length > 0" in tui
+    assert "if ((slowOk && populated) || Date.now() >= slowUntil) scanned = true" in tui
+    assert "data.skills.length > 0 || data.agents.length > 0" not in tui
+    # the latch is scoped to the slow gate, so the message walk that runs on
+    # EVERY load can never be what latches it
+    gate = _region(tui, "if (full || (!scanned && Date.now() >= slowNext)) {",
+                   "        scanModels(data_)")
+    assert "scanned = true" in gate, "only the slow pass may latch the panel"
+
+
+def test_tui_full_pass_bypasses_the_slow_retry_floor():
+    """`full` is the caller's escape hatch and short-circuits the floor.
+
+    A session change, the first load and `/harness-refresh` all pass `full`;
+    the retry floor paces background retries only, so a manual refresh landing
+    inside the 2s floor must still re-run the slow half. Hence `full` is the
+    first disjunct and the clock is conjuncted with `!scanned`.
+    """
+    import re
+    tui = _tui_text()
+    m = re.search(r"if \(full \|\| ([^{]+)\) \{", tui)
+    assert m, "the slow gate must still short-circuit on `full`"
+    assert m.group(1).strip() == "(!scanned && Date.now() >= slowNext)", m.group(1)
+    # the floor is never an independent branch of the gate
+    assert "if (full || Date.now() >= slowNext)" not in tui
+
+
+def test_tui_session_change_resets_both_slow_budget_fields():
+    """A new session must re-prove: latch AND both clocks reset together.
+
+    A session change can mean a new project directory with cold stores again.
+    Resetting only `scanned` would inherit the old session's window — possibly
+    already expired, which latches the very first cold pass.
+    """
+    tui = _tui_text()
+    body = _region(tui, "const noteSession = (sid: unknown) =>", "/** Every slot render")
+    assert "      scanned = false\n      slowUntil = 0\n      slowNext = 0\n" in body
+    # the fast path must not treat the new session's first pass as a repeat
+    assert 'seenSig = ""' in body
+
+
+def test_tui_header_separator_is_a_literal_middot_not_the_box_gap():
+    """The header spaces itself with CHARACTERS: opencode drops box `gap`.
+
+    Live on 2.0.18 the row rendered `harnessses_f29…` — the host did not space
+    the header's texts, so the brand carries its own trailing space and the
+    tail emits the `·` as a literal, which reads the same on a host that
+    honours `gap` and one that drops it. A bare text node would be trimmed
+    back to `harness<tail>`, so all three are explicit expression containers.
+    """
+    tui = _tui_text()
+    header = _region(tui, 'flexDirection="row" minWidth={0}>', 'id="window"')
+    assert "gap=" not in header, "the box gap is not what spaces the header"
+    assert '{"harness "}' in header, "the brand carries the space"
+    assert 'return tail ? `· ${tail}` : ""' in header, "the tail carries the `·`"
+    assert '{" ⋯"}' in header, "the in-flight glyph carries its own space"
+    assert "\n                    harness\n" not in header, (
+        "a bare brand text node renders unspaced"
+    )
 
 
 def test_tui_waits_rows_carry_live_icon():

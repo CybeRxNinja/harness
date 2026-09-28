@@ -732,6 +732,22 @@ def _srv_text():
     return Path(_plugin_files()[0]).read_text()
 
 
+def _tui_text():
+    """Read the TUI entrypoint under test.
+
+    HARNESS_TUI_PATH overrides the path so the cold-scan pins can run
+    unmodified against a pristine copy (e.g. `git show HEAD:` output staged
+    in .opencode/harness/tmp/) for failing-first proof; the product tree is
+    never touched. Mirrors _srv_text() and test_tui.py's _tui_text().
+    """
+    import os
+    from harness.cli import _plugin_files
+    override = os.environ.get("HARNESS_TUI_PATH")
+    if override:
+        return Path(override).read_text()
+    return Path(_plugin_files()[1]).read_text()
+
+
 def test_plugin_compaction_brief_uses_single_open_helper():
     """The compaction brief comes from ONE read-only open, not two.
 
@@ -894,8 +910,7 @@ def test_tui_panel_counts_and_repaints():
        placeholder is now driven by a reactive `scanning` flag that is cleared
        in the same update that bumps `rev`.
     """
-    from harness.cli import _plugin_files
-    tui = Path(_plugin_files()[1]).read_text()
+    tui = _tui_text()
     assert "s.startsWith(HARNESS_PREFIX)" in tui, "count harness skills only"
     assert "d.rev = Number(d.rev ?? 0) + 1" in tui, "loads must notify the store"
     assert "view.rev === 0 || loading" not in tui, (
@@ -904,10 +919,12 @@ def test_tui_panel_counts_and_repaints():
     assert "{view.scanning ?" in tui
     assert "d.scanning = true" in tui and "d.scanning = false" in tui, "cleared per load"
     # the slow sources (location-store syncs, the message walk, the context
-    # limit) must not re-run on the 8s poll: a blocking provider.sync() every
-    # few seconds is what kept the placeholder on screen
+    # limit) must not re-run on the cheap poll: a blocking provider.sync()
+    # every few seconds is what kept the placeholder on screen. An unlatched
+    # panel still re-enters, but on the 2s retry floor, not on every tick.
     assert "const scanSlow = async (loc: any, data_: Rec)" in tui
-    assert "if (full || !scanned) {" in tui and "await settle(scanSlow(loc, data_), SCAN_MS)" in tui
+    assert "if (full || (!scanned && Date.now() >= slowNext)) {" in tui
+    assert "await settle(scanSlow(loc, data_), SCAN_MS)" in tui
     assert "void load(true)" in tui and "await load(true)" in tui
     # the poll stands down when nothing has been drawn: the same entrypoint is
     # loaded in the long-lived server process, where no slot ever renders
@@ -999,14 +1016,14 @@ def test_tui_models_rows_are_computed_on_every_load():
     stay on the slow half; and one nudge per session picks the rows up with the
     session instead of up to POLL_MS later.
     """
-    from harness.cli import _plugin_files
-    tui = Path(_plugin_files()[1]).read_text()
+    tui = _tui_text()
 
     assert "const scanModels = (data_: Rec): void => {" in tui
     assert "scanSlow = async (loc: any, data_: Rec)" in tui
     assert "        scanModels(data_)\n" in tui, "the walk must run on every load"
-    # ...and outside the slow gate, not behind its `scanned` flag
-    gate = tui.index("if (full || !scanned) {")
+    # ...and outside the slow gate, not behind its `scanned` flag (the gate now
+    # carries the retry floor, so the walk must not sit behind that either)
+    gate = tui.index("if (full || (!scanned && Date.now() >= slowNext)) {")
     assert "scanModels" not in tui[gate:tui.index("\n        }\n", gate)]
     assert "warmedFor = sessionID" in tui and "setTimeout(() => void load(), 500)" in tui
     # real step counts, not a hard-coded "1 step", aligned in columns that fit
