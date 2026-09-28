@@ -200,6 +200,61 @@ function escapeLike(term: string): string {
   return String(term ?? "").replace(/[\\%_]/g, (c) => `\\${c}`)
 }
 
+/** How many fact rows to pull as CANDIDATES before relevance/needle order
+ *  picks the few that ride along. A row is ~200 chars, so this is bounded and
+ *  tiny next to the cap memSaveFact enforces on the table itself. */
+const FACT_CANDIDATES = 50
+/** One rendered fact line — the shape both the brief and recall have always
+ *  printed, unchanged: a bullet, the source, the (truncated) text. */
+const factLine = (r: Rec) => `- [${r.source}] ${String(r.text).slice(0, 200)}`
+
+/**
+ * The needle classes a fact earns its context slot with (claude-mem's needle
+ * types): a decision, a bugfix/root cause, a blocker, a security alert. Their
+ * README rule is "only these are appended to context" — the rest is progress
+ * chatter, valuable in MEMORY.md, noise in a prompt. `sensitive` is absent by
+ * construction: memSaveFact refuses secrets, so no stored fact can carry one.
+ * Deliberately narrower than MEM_MARKERS (which also carries "verified"/"next
+ * step"/"todo:" — exactly the status-report chatter this demotes).
+ */
+const MEM_NEEDLE =
+  /\b(decision|decided|root cause|bug|blocker|blocked|blocking|fix|fixes|fixed|regression|security|vulnerab\w*|exploit\w*|leak\w*|secret|credential|breach)\b/i
+
+const isNeedle = (r: Rec): boolean => MEM_NEEDLE.test(String(r?.text ?? ""))
+
+/**
+ * THE fact selection, shared by the compaction brief and memory_recall so the
+ * two can never disagree about which facts matter. Two orderings, both applied
+ * in SQL-free JS on the newest-first rows the query returns:
+ *   needles first — a decision/root cause/blocker/security fact outranks a
+ *     generic "verified the suite" note of any age (C2);
+ *   relevance first (search only) — distinct query terms present in the row,
+ *     recency merely the tiebreak (C3).
+ * Recency WITHIN each group is untouched, so a query with nothing to rank by
+ * still reads newest-first exactly as before.
+ */
+function rankFacts(rows: any[], patterns: string[] = []): any[] {
+  const needles = rows.filter(isNeedle)
+  const rest = rows.filter((r) => !isNeedle(r))
+  if (patterns.length) {
+    // Term-overlap: how many DISTINCT query terms the row actually contains.
+    // `facts` has no FTS rank of its own, so this is the cheap candidate pass
+    // claude-mem's SearchManager does — a LIKE hit only says the row is a
+    // candidate; the score says which one the query meant.
+    const score = (r: Rec) => {
+      const low = String(r?.text ?? "").toLowerCase()
+      return patterns.reduce((n: number, p: string) => n + (low.includes(p.toLowerCase()) ? 1 : 0), 0)
+    }
+    // score DESC, recency as the tiebreak. The rows arrive `ORDER BY id DESC`
+    // and Array#sort is stable (ES2019), so equal scores keep id DESC without
+    // the query having to hand us the id column.
+    const byRelevance = (a: Rec, b: Rec) => score(b) - score(a)
+    needles.sort(byRelevance)
+    rest.sort(byRelevance)
+  }
+  return [...needles, ...rest]
+}
+
 /**
  * Durable facts from the session DB, straight off disk.
  *
@@ -207,7 +262,7 @@ function escapeLike(term: string): string {
  *   search — only rows matching one of `patterns`. An empty pattern list means
  *     the query had no searchable terms, and we return NOTHING: answering an
  *     unrelated query with the newest handful of facts reads as recall but is
- *     just noise the model would cite.
+ *     just noise the model would cite. Ranking is by relevance (rankFacts).
  *   recent — the newest rows, regardless of text. Used for the compaction
  *     brief, where there is no query to match (a session id appears in no fact).
  */
@@ -228,10 +283,13 @@ async function facts(
     if (!(await Bun.file(dbPath).exists())) return []
     const db = new Database(dbPath, { readonly: true })
     try {
+      // search ranks a WIDE candidate pool (rankFacts does the choosing);
+      // recent has no ranking, so the limit is the answer.
+      const take = mode === "search" ? FACT_CANDIDATES : limit
       const rows = db
         .query(`SELECT text, source FROM facts WHERE ${where} ORDER BY id DESC LIMIT ?`)
-        .all(...params, limit) as any[]
-      for (const r of rows) hits.push(`- [${r.source}] ${String(r.text).slice(0, 200)}`)
+        .all(...params, take) as any[]
+      for (const r of rankFacts(rows, mode === "search" ? patterns : []).slice(0, limit)) hits.push(factLine(r))
     } finally {
       db.close()
     }
@@ -293,11 +351,62 @@ async function readTodos(projectDir: string, sessionID: string): Promise<Rec[]> 
 }
 
 /**
+ * The compaction brief fits a MEASURED char budget, not a row count
+ * (claude-mem's ContextBudget: measure the RENDERED text, because that is what
+ * the hook actually prints). Two numbers:
+ *   BRIEF_TARGET_CHARS — what a healthy brief aims for;
+ *   BRIEF_HARD_CAP     — the ceiling that is never crossed. Past it the host
+ *     hook's stdout gets turned into a stub, so more text is worth nothing: the
+ *     whole point of the brief is that it survives the compaction.
+ * Items are WHOLE lines. A fact cut mid-sentence reads as a claim the model
+ * cannot check, so size pressure is paid for with give-ups, cheapest loss
+ * first, in this fixed order:
+ *   1. the oldest facts (a compaction summary still carries the recent ones),
+ *   2. the open-todos block down to `open todos: N` (the plan's SIZE survives;
+ *      its prose is the first thing the model can re-read from the todo tool),
+ *   3. never anything mid-line.
+ */
+const BRIEF_TARGET_CHARS = 4000
+const BRIEF_HARD_CAP = 10000
+const TODO_BLOCK_MARK = "Open todos (harness todo space):"
+
+/** Joined length of whole items, newlines included. */
+const measured = (items: string[]): number => items.reduce((n, s) => n + s.length + 1, 0) - 1
+
+/**
+ * Assemble `head` + ranked fact lines + this session's open todo lines under
+ * the budget above. Pure — it takes already-rendered items and returns text,
+ * so the budget is testable without a DB. Kept outside compactionBrief() so
+ * that helper keeps its single-open shape.
+ */
+function fitBrief(head: string, factItems: string[], todos: string[]): string {
+  const items: string[] = [head]
+  // Facts arrive ranked (needles first, then newest), so the give-ups come off
+  // the TAIL: walk forward, stop at the first item that does not fit. A suffix
+  // drop, never a swap.
+  for (const f of factItems) {
+    if (measured([...items, f]) > BRIEF_TARGET_CHARS) break
+    items.push(f)
+  }
+  if (todos.length) {
+    const block = `${TODO_BLOCK_MARK}\n${todos.join("\n")}`
+    // The todos ride whole when they fit, else as a count line (still whole).
+    if (measured([...items, block]) <= BRIEF_TARGET_CHARS) items.push(block)
+    else items.push(`open todos: ${todos.length}`)
+  }
+  // Backstop: a todo list long enough to blow the cap on its own still yields.
+  while (items.length > 1 && measured(items) > BRIEF_HARD_CAP) items.pop()
+  return items.join("\n")
+}
+
+/**
  * The compaction brief in ONE read-only open: newest facts + this session's
  * open todos. The hook used to call facts() then readTodos() — two opens of
  * the same DB per compaction fire for one text. Same queries, same shapes,
  * same text assembly; each half still guarded alone so a drifted table costs
- * only its own section.
+ * only its own section. The brief is assembled by fitBrief (measured budget)
+ * out of the same ranking memory_recall uses, so the two agree on which facts
+ * matter.
  */
 async function compactionBrief(projectDir: string, sessionID: string): Promise<string> {
   const { Database } = await import("bun:sqlite").catch(() => ({}) as any)
@@ -307,25 +416,24 @@ async function compactionBrief(projectDir: string, sessionID: string): Promise<s
     if (!(await Bun.file(dbPath).exists())) return ""
     const db = new Database(dbPath, { readonly: true })
     try {
-      let brief = ""
+      const factItems: string[] = []
       try {
-        const rows = db.query("SELECT text, source FROM facts ORDER BY id DESC LIMIT ?").all(5) as any[]
-        brief = rows.map((r) => `- [${r.source}] ${String(r.text).slice(0, 200)}`).join("\n")
+        // A wide pool on purpose: fitBrief drops from its tail under budget, so
+        // the brief can reach a needle fact older than the newest few.
+        const rows = db.query("SELECT text, source FROM facts ORDER BY id DESC LIMIT ?").all(FACT_CANDIDATES) as any[]
+        for (const r of rankFacts(rows)) factItems.push(factLine(r))
       } catch {
         /* drifted facts table: todos may still ride */
       }
-      let open: Rec[] = []
+      const open: Rec[] = []
       try {
         const todos = db.query("SELECT text, status FROM todos WHERE session = ? ORDER BY id").all(sessionID) as Rec[]
-        open = todos.filter((t: Rec) => t.status !== "completed" && t.status !== "cancelled")
+        open.push(...todos.filter((t: Rec) => t.status !== "completed" && t.status !== "cancelled"))
       } catch {
         /* no todos table yet */
       }
-      if (!brief && !open.length) return ""
-      const text = [`${BRIEF_MARK} (durable facts — verify before relying):`]
-      if (brief) text.push(brief)
-      if (open.length) text.push(`Open todos (harness todo space):\n${open.map(todoLine).join("\n")}`)
-      return text.join("\n")
+      if (!factItems.length && !open.length) return ""
+      return fitBrief(`${BRIEF_MARK} (durable facts — verify before relying):`, factItems, open.map(todoLine))
     } finally {
       db.close()
     }
@@ -822,6 +930,14 @@ async function memDb(projectDir: string): Promise<any> {
     )
     db.run("CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content, session UNINDEXED, tokenize='porter')")
     db.run("CREATE TABLE IF NOT EXISTS context_mark(session TEXT PRIMARY KEY, seen INTEGER)")
+// Additive migration for pre-epoch marks, same shape as waits.total_ms: a no-op
+// once the column exists (fresh DBs get it below), never a failure on old DBs.
+// captureHistory reads it in its own try and falls back to the count-only key.
+try {
+  db.run("ALTER TABLE context_mark ADD COLUMN last_hash TEXT")
+} catch {
+  /* column already exists */
+}
     db.run("CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, name TEXT, diff TEXT, gist TEXT, ts INTEGER)")
     db.run(
       "CREATE TABLE IF NOT EXISTS workers(id TEXT PRIMARY KEY, session TEXT, name TEXT, category TEXT, model TEXT, status TEXT, cost REAL, updated INTEGER)",
@@ -866,12 +982,33 @@ const memSeen = new Map<string, string[]>()
 // never run through it, so the index sat empty. The context hook already sees
 // the full {sessionID, messages} history, so it appends only the unseen tail:
 // a persistent per-session high-water-mark (context_mark, survives restarts —
-// the in-memory cursor alone would re-append everything after a restart).
+// the in-memory cursor alone would re-append everything after a restart). The
+// mark also stores a hash of the last captured message: a count says how far
+// we got, not whether the row under that count is still the same row, so an
+// edited tail is re-captured instead of being skipped forever.
 // Cost is bounded by the same 20k/8k truncation parity.
 // ---------------------------------------------------------------------------
 
 function histRole(m: Rec): string {
   return String(m?.role ?? m?.info?.role ?? "unknown").slice(0, 32)
+}
+
+/**
+ * Short stable hash of one message's text — the EPOCH half of the dedupe key.
+ * An in-memory Set of captured ids cannot survive a restart, so the key that
+ * decides "have I seen this?" has to live in the DB, and it has to carry the
+ * epoch: the count alone says how far we got, not WHETHER the row under that
+ * count is still the same row. FNV-1a/32 — collision-safe enough to answer
+ * "was this message edited?", and it is a dedupe hint, never a store key.
+ */
+function histHash(text: unknown): string {
+  const s = String(text ?? "")
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16)
 }
 
 async function captureHistory(db: any, sessionID: string, messages: any): Promise<void> {
@@ -887,6 +1024,21 @@ async function captureHistory(db: any, sessionID: string, messages: any): Promis
     // A rewritten history (e.g. a compaction summary replacing the transcript)
     // sits below the old mark: re-baseline from zero so the summary is captured.
     if (start > messages.length) start = 0
+    // Epoch check on the last message the mark already covers. The count says
+    // how far we got, not WHETHER the row under that count is still the same
+    // row: when the host rewrites the tail in place, an edited message would
+    // otherwise be skipped forever (the early return below is hit long before
+    // the tail grows again). A hash mismatch re-captures from the prior mark;
+    // a match leaves the unseen tail alone, so nothing is written twice.
+    if (start > 0) {
+      try {
+        const mark = db.query("SELECT last_hash FROM context_mark WHERE session = ?").get(sessionID) as any
+        const last = histHash(memMessageText(messages[start - 1] as Rec))
+        if (mark && String(mark.last_hash ?? "") !== last) start = Math.max(0, start - 1)
+      } catch {
+        /* no last_hash column (pre-migration DB): the count-only key still works */
+      }
+    }
     if (start >= messages.length) return
     const now = Math.floor(Date.now() / 1000)
     for (let i = start; i < messages.length; i++) {
@@ -913,6 +1065,15 @@ async function captureHistory(db: any, sessionID: string, messages: any): Promis
       db.run("INSERT OR REPLACE INTO context_mark(session,seen) VALUES(?,?)", sessionID, messages.length)
     } catch {
       /* high-water-mark best-effort; the next firing retries the tail */
+    }
+    try {
+      db.run(
+        "UPDATE context_mark SET last_hash = ? WHERE session = ?",
+        histHash(memMessageText(messages[messages.length - 1] as Rec)),
+        sessionID,
+      )
+    } catch {
+      /* pre-migration DB without the column: the count-only key still works */
     }
   } catch {
     /* never break generation */

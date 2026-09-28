@@ -1824,6 +1824,19 @@ def _skill_src():
     return REPO_ROOT / "harness" / "data" / "skills"
 
 
+def _frontmatter(path):
+    """The seed skill's frontmatter as a dict, or {} when there is no block."""
+    text = Path(path).read_text()
+    if not text.startswith("---\n"):
+        return {}
+    fm = {}
+    for line in text.split("---", 2)[1].splitlines():
+        if ":" in line:
+            k, _, v = line.partition(":")
+            fm[k.strip()] = v.strip()
+    return fm
+
+
 def test_plugin_apk_reverse_skill_seed():
     """security/apk-reverse ships as a seed: valid frontmatter naming it,
     picked up by the `**/SKILL.md` seed glob alongside the other 16."""
@@ -1832,13 +1845,361 @@ def test_plugin_apk_reverse_skill_seed():
     assert md.is_file(), "seed skill missing from package data"
     text = md.read_text()
     assert text.startswith("---\n"), "frontmatter block must lead the file"
-    fm = {}
-    for line in text.split("---", 2)[1].splitlines():
-        if ":" in line:
-            k, _, v = line.partition(":")
-            fm[k.strip()] = v.strip()
+    fm = _frontmatter(md)
     assert fm.get("name") == "apk-reverse", fm
     assert fm.get("description"), "seeds need the one-line description skills_list shows"
     found = sorted(src.rglob("SKILL.md"))
     assert len(found) == 17, [p.parent.name for p in found]
     assert md in found
+
+
+def test_plugin_find_skills_ships_as_a_seed():
+    """meta/find-skills must be reachable the same way as every other seed.
+
+    seedSkills globs `**/SKILL.md` two levels under each root, so a seed is only
+    "shipped" if it sits at <category>/<name>/SKILL.md AND declares a frontmatter
+    name matching its directory (seedKeys falls back to the dir name, and a
+    mismatch makes skills_list show one id while a model asks for another).
+    """
+    src = _skill_src()
+    md = src / "meta" / "find-skills" / "SKILL.md"
+    assert md.is_file(), "find-skills missing from package data"
+    assert md.read_text().startswith("---\n"), "frontmatter block must lead the file"
+    fm = _frontmatter(md)
+    assert fm.get("name") == "find-skills", fm
+    assert fm.get("name") == md.parent.name, "frontmatter name must match the seed dir"
+    assert fm.get("description"), "seeds need the one-line description skills_list shows"
+    # and it is in the glob seedSkills actually scans, next to the other 16
+    assert md in sorted(src.rglob("SKILL.md"))
+
+
+def _srv_path():
+    """Absolute path of the server entrypoint under test (HARNESS_SRV_PATH aware).
+
+    The bun stubs below import the plugin by PATH, so failing-first proof against
+    a pristine copy (`git show HEAD:` staged in .opencode/harness/tmp/) has to go
+    through the same override _srv_text() reads. The product tree is never touched.
+    """
+    override = os.environ.get("HARNESS_SRV_PATH")
+    if override:
+        return override
+    from harness.cli import _plugin_files
+    return _plugin_files()[0]
+
+
+def test_plugin_brief_budget_is_measured_whole_items():
+    """The brief is budgeted in CHARS of rendered text, and pays for pressure
+    with WHOLE items dropped in a fixed order — never a cut line.
+
+    Past BRIEF_HARD_CAP the host hook's stdout is turned into a stub, so the
+    whole point of the brief is that it survives the compaction. A fact cut
+    mid-sentence reads as a claim the model cannot check, so the give-up order
+    is: the oldest facts, then the open-todos block down to a bare `open todos:
+    N` count (the plan's SIZE survives; its prose is re-readable from the todo
+    tool), and never anything mid-line.
+    """
+    srv = _srv_text()
+    assert "const BRIEF_TARGET_CHARS = 4000" in srv
+    assert "const BRIEF_HARD_CAP = 10000" in srv
+    assert "const FACT_CANDIDATES = 50" in srv
+    assert 'const TODO_BLOCK_MARK = "Open todos (harness todo space):"' in srv
+    body = srv[srv.index("function fitBrief"):srv.index("async function compactionBrief")]
+    # 1. facts: walk forward, stop at the first item that does not fit (a suffix
+    #    drop, never a swap) — the ranked head keeps the needles
+    assert "for (const f of factItems) {" in body and "items.push(f)" in body
+    facts_cut = body.index("if (measured([...items, f]) > BRIEF_TARGET_CHARS) break")
+    # 2. the todo block rides whole, else degrades to a whole count line
+    block_whole = body.index("if (measured([...items, block]) <= BRIEF_TARGET_CHARS) items.push(block)")
+    block_count = body.index("else items.push(`open todos: ${todos.length}`)")
+    # 3. never mid-line, and the cap is a backstop that pops WHOLE items
+    assert "slice(" not in body and "substring(" not in body, "no item may be cut"
+    cap = body.index("while (items.length > 1 && measured(items) > BRIEF_HARD_CAP) items.pop()")
+    assert facts_cut < block_whole < block_count < cap, "give up facts, then todos, never a line"
+    # ONE selection, shared: the brief and memory_recall can never disagree
+    assert srv.count("fitBrief(") == 2, "definition + the one call site"
+    assert srv.count("rankFacts(rows") == 3, "definition + memory_recall + the brief"
+    assert srv.count("factLine(r)") == 2, "one rendered line, used by both surfaces"
+    # a wide pool to rank FROM: search has a query to choose with, the brief does
+    assert 'const take = mode === "search" ? FACT_CANDIDATES : limit' in srv
+    assert ".all(FACT_CANDIDATES)" in srv, "the brief pulls the same wide pool"
+    assert 'if (mode === "search" && !patterns.length) return []' in srv, (
+        "a query with no searchable term still recalls nothing"
+    )
+
+
+RANKING = r"""
+const file = process.argv[2]
+const root = process.argv[3]
+import { mkdirSync, mkdtempSync } from "node:fs"
+import { join } from "node:path"
+import { Database } from "bun:sqlite"
+
+const plug: any = (await import(file)).default
+const fail = (m: string): never => { throw new Error("ranking stub: " + m) }
+
+function makeCtx(dir: string) {
+  const skills: any[] = []
+  const tools: any[] = []
+  const hooks: any = {}
+  const ctx: any = {
+    location: { directory: dir },
+    options: {},
+    skill: {
+      list: async () => skills,
+      transform: async (cb: any) => { await cb({ list: () => skills, add: (s: any) => skills.push(s) }) },
+    },
+    tool: {
+      transform: async (cb: any) => { await cb({ add: (t: any) => tools.push(t) }) },
+      hook: async (n: string, fn: any) => { hooks[`tool:${n}`] = fn },
+    },
+    session: { hook: async (n: string, fn: any) => { hooks[`session:${n}`] = fn } },
+  }
+  return { ctx, skills, tools, hooks }
+}
+
+function seed(dir: string, facts: string[], todos: string[]) {
+  mkdirSync(join(dir, ".opencode", "harness"), { recursive: true })
+  const db = new Database(join(dir, ".opencode", "harness", "sessions.db"))
+  db.run("CREATE TABLE facts(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, source TEXT, ts INTEGER)")
+  facts.forEach((t, i) => db.run("INSERT INTO facts(text,source,ts) VALUES(?,'turn',?)", t, i + 1))
+  db.run("CREATE TABLE todos(id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT, text TEXT, status TEXT, ts INTEGER)")
+  todos.forEach((t, i) => db.run("INSERT INTO todos(session,text,status,ts) VALUES('ses_probe',?,'pending',?)", t, i + 1))
+  db.close()
+}
+
+const recall = async (s: any, query: string) => {
+  const tool: any = s.tools.find((t: any) => t.name === "memory_recall")
+  if (!tool) fail("memory_recall was not registered")
+  return String((await tool.execute({ query }, { sessionID: "ses_probe" }))?.content ?? "")
+}
+const brief = async (s: any) => {
+  const comp = s.hooks["session:compaction"]
+  if (!comp) fail("session:compaction was not registered")
+  const ev: any = { sessionID: "ses_probe", system: [] }
+  await comp(ev)
+  return String(ev.system[0]?.text ?? "")
+}
+const lines = (t: string) => t.split("\n")
+// the rendered line, mirrored here so the probe can name whole items
+const rendered = (t: string) => `- [turn] ${t.slice(0, 200)}`
+// 226 chars: over the 200-char slice, so a mid-line cut would be visible
+const longFact = (n: number) => `fact${n} ` + "body ".repeat(44)
+const longTodo = (n: number) => `todo step ${n} ` + "detail ".repeat(24)
+
+const out: any = {}
+
+// ---- ONE fact selection, two surfaces ---------------------------------------
+// id1 is a decision-grade needle and the OLDEST row; id2 is the newest row and
+// pure progress chatter. A needle has to outrank it on BOTH surfaces.
+const NEEDLE = "root cause of the sidebar repaint hang: the store sync timed out"
+const CHATTER = "the sidebar footer shows the session title"
+const RELEVANT = "the payload budget is enforced by the writer"   // 2 query terms, older
+const VAGUE = "a per-session cap on stored lines"                  // 1 query term, newer
+const dirA = mkdtempSync(join(root, "rank-a-"))
+seed(dirA, [NEEDLE, CHATTER, RELEVANT, VAGUE], [])
+const A = makeCtx(dirA)
+await plug.setup(A.ctx)
+out.recallNeedle = lines(await recall(A, "sidebar repaint timeout"))[0] ?? ""
+out.briefNeedle = lines(await brief(A))[1] ?? ""
+out.recallRelevance = lines(await recall(A, "payload writer cap"))[0] ?? ""
+out.recallBlank = await recall(A, "??")
+
+// ---- the brief pays for pressure with WHOLE items ----------------------------
+const twenty = Array.from({ length: 20 }, (_, i) => longFact(i + 1))
+const dirB = mkdtempSync(join(root, "rank-b-"))
+seed(dirB, twenty, Array.from({ length: 25 }, (_, i) => longTodo(i + 1)))
+const B = makeCtx(dirB)
+await plug.setup(B.ctx)
+const briefB = await brief(B)
+out.rankedB = twenty.map(rendered).reverse()   // newest first, no needle among them
+out.briefBHead = lines(briefB)[0] ?? ""
+out.briefBFacts = lines(briefB).slice(1, -1)
+out.briefBTail = lines(briefB)[lines(briefB).length - 1] ?? ""
+out.briefBLen = briefB.length
+
+// ---- and the todo block still rides WHOLE when the facts leave room ----------
+const dirC = mkdtempSync(join(root, "rank-c-"))
+seed(dirC, Array.from({ length: 8 }, (_, i) => longFact(i + 1)),
+  ["wire the mirror", "write the docs", "ship it"])
+const C = makeCtx(dirC)
+await plug.setup(C.ctx)
+out.briefC = await brief(C)
+
+console.log(JSON.stringify(out))
+"""
+
+
+@pytest.mark.skipif(BUN is None, reason="bun is not installed")
+def test_plugin_fact_ranking_is_needle_first_and_relevance_first(tmp_path):
+    """The brief and memory_recall must never disagree about which facts matter.
+
+    Both render off ONE ranking (rankFacts) over a wide candidate pool:
+      needles first — a decision/root cause/blocker/security fact outranks a
+        generic "verified the suite" note of ANY age;
+      relevance first (search only) — distinct query terms present in the row,
+        recency merely the tiebreak, so an older 2-term fact beats a newer
+        1-term one and an unranked query still reads newest-first.
+    And the brief is budgeted in measured chars, giving up WHOLE items: the
+    newest facts, then the todos degrade to a bare `open todos: N` count.
+    """
+    script = tmp_path / "ranking.ts"
+    script.write_text(RANKING)
+    (tmp_path / "probe").mkdir()
+    # HOME points at tmp: neither the developer's real fact DB nor ~/.harness
+    # config can reach in and change what the plugin recalls.
+    env = {**os.environ, "HOME": str(tmp_path)}
+    r = subprocess.run([BUN, "run", str(script), _srv_path(), str(tmp_path / "probe")],
+                       capture_output=True, text=True, timeout=180, cwd=str(REPO_ROOT), env=env)
+    assert r.returncode == 0, r.stderr[-2000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+
+    NEEDLE = "- [turn] root cause of the sidebar repaint hang: the store sync timed out"
+    RELEVANT = "- [turn] the payload budget is enforced by the writer"
+    VAGUE = "- [turn] a per-session cap on stored lines"
+
+    # a needle outranks the newer generic row on BOTH surfaces
+    assert out["recallNeedle"] == NEEDLE, out["recallNeedle"]
+    assert out["briefNeedle"] == NEEDLE, out["briefNeedle"]
+    # relevance beats recency: the older 2-term row, not the newer 1-term one
+    assert out["recallRelevance"] == RELEVANT, out["recallRelevance"]
+    assert VAGUE not in out["recallRelevance"], "recency is only the tiebreak"
+    # a query with no searchable term still recalls nothing
+    assert "session title" not in out["recallBlank"], out["recallBlank"]
+    assert "payload" not in out["recallBlank"], out["recallBlank"]
+
+    # budget: the whole tail is dropped, the brief fits, and the todos degrade
+    # to a count line — the plan's SIZE survives, its prose does not
+    assert "Harness memory brief" in out["briefBHead"], out["briefBHead"]
+    assert len(out["rankedB"]) == 20, out["rankedB"]
+    assert 0 < len(out["briefBFacts"]) < 20, f"no pressure, nothing was given up: {len(out['briefBFacts'])}"
+    assert out["briefBLen"] <= 4000, out["briefBLen"]
+    assert out["briefBFacts"] == out["rankedB"][:len(out["briefBFacts"])], (
+        "give-ups come off the tail as whole lines, never a swap or a cut"
+    )
+    assert out["briefBFacts"][0] == out["rankedB"][0], "the newest fact survives"
+    assert out["briefBTail"] == "open todos: 25", out["briefBTail"]
+    assert "Open todos (harness todo space):" not in out["briefBTail"]
+
+    # ... and the todos still ride whole when the facts leave room for them
+    assert "Open todos (harness todo space):" in out["briefC"]
+    for todo in ("wire the mirror", "write the docs", "ship it"):
+        assert todo in out["briefC"], todo
+
+
+EPOCH = r"""
+const file = process.argv[2]
+const root = process.argv[3]
+import { mkdtempSync } from "node:fs"
+import { join } from "node:path"
+import { Database } from "bun:sqlite"
+
+const plug: any = (await import(file)).default
+const fail = (m: string): never => { throw new Error("epoch stub: " + m) }
+
+const dir = mkdtempSync(join(root, "epoch-"))
+const skills: any[] = []
+const hooks: any = {}
+const ctx: any = {
+  location: { directory: dir },
+  options: {},
+  skill: {
+    list: async () => skills,
+    transform: async (cb: any) => { await cb({ list: () => skills, add: (s: any) => skills.push(s) }) },
+  },
+  tool: {
+    transform: async (cb: any) => { await cb({ add: () => {} }) },
+    hook: async (n: string, fn: any) => { hooks[`tool:${n}`] = fn },
+  },
+  session: { hook: async (n: string, fn: any) => { hooks[`session:${n}`] = fn } },
+}
+await plug.setup(ctx)
+const fire = hooks["session:context"]
+if (typeof fire !== "function") fail("session:context hook was not registered")
+
+const dbPath = join(dir, ".opencode", "harness", "sessions.db")
+const rows = () => {
+  const db = new Database(dbPath, { readonly: true })
+  try { return db.query("SELECT role, content FROM messages ORDER BY id").all() as any[] }
+  finally { db.close() }
+}
+const mark = () => {
+  const db = new Database(dbPath, { readonly: true })
+  try { return (db.query("SELECT seen, last_hash FROM context_mark").get() ?? null) as any }
+  finally { db.close() }
+}
+// the SAME FNV-1a/32 the epoch half of the dedupe key must use
+const fnv = (t: string) => {
+  let h = 0x811c9dc5
+  for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0 }
+  return h.toString(16)
+}
+const msg = (role: string, content: string) => ({ role, content })
+const sid = "ses_epoch_probe"
+const fire1 = (tail: string) =>
+  fire({ sessionID: sid, agent: "build", messages: [msg("user", "u1"), msg("assistant", tail)] })
+
+const out: any = {}
+await fire1("a1")
+out.first = rows()
+out.mark1 = mark()
+// the tail is untouched: the epoch matches, so nothing is written twice
+await fire1("a1")
+out.again = rows()
+// the host rewrites the LAST message in place — same length, different text.
+// The count-only key cannot see this, and `start >= messages.length` returns
+// long before the tail grows again, so the hash has to be the thing that
+// re-baselines the mark.
+await fire1("a1 EDITED")
+out.edited = rows()
+out.mark2 = mark()
+out.fnvEdited = fnv("a1 EDITED")
+out.fnvOriginal = fnv("a1")
+
+console.log(JSON.stringify(out))
+"""
+
+
+@pytest.mark.skipif(BUN is None, reason="bun is not installed")
+def test_plugin_history_dedupe_is_epoch_aware(tmp_path):
+    """The high-water-mark needs an EPOCH, not just a count.
+
+    `context_mark.seen` says how far we got; it cannot say whether the row under
+    that count is still the same row. When the host rewrites the tail in place
+    (a tool result patched, a compaction summary spliced over the transcript),
+    an edited message is skipped forever — `start >= messages.length` returns
+    long before the tail grows again. So the key carries FNV-1a/32 of the last
+    captured text in an ADDITIVE `last_hash` column, and a mismatch re-captures
+    from the prior mark. A matching epoch leaves the unseen tail alone.
+    """
+    srv = _srv_text()
+    assert "function histHash(text: unknown): string" in srv
+    assert "0x811c9dc5" in srv and "Math.imul(h, 0x01000193) >>> 0" in srv, "FNV-1a/32, not a JS hash"
+    assert "ALTER TABLE context_mark ADD COLUMN last_hash TEXT" in srv, "additive migration, never fatal"
+    assert "UPDATE context_mark SET last_hash = ? WHERE session = ?" in srv
+    cap = srv[srv.index("async function captureHistory"):]
+    epoch = cap.index("const last = histHash(memMessageText(messages[start - 1] as Rec))")
+    mismatch = cap.index('if (mark && String(mark.last_hash ?? "") !== last) start = Math.max(0, start - 1)')
+    early = cap.index("if (start >= messages.length) return")
+    assert epoch < mismatch < early, "the epoch check must PRECEDE the count-only early return"
+
+    script = tmp_path / "epoch.ts"
+    script.write_text(EPOCH)
+    env = {**os.environ, "HOME": str(tmp_path)}
+    (tmp_path / "probe").mkdir()
+    r = subprocess.run([BUN, "run", str(script), _srv_path(), str(tmp_path / "probe")],
+                       capture_output=True, text=True, timeout=180, cwd=str(REPO_ROOT), env=env)
+    assert r.returncode == 0, r.stderr[-2000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+
+    first = [{"role": "user", "content": "u1"}, {"role": "assistant", "content": "a1"}]
+    # the first firing captures the tail and stores the epoch of its last message
+    assert out["first"] == first, out["first"]
+    assert out["mark1"]["seen"] == 2, out["mark1"]
+    assert out["mark1"]["last_hash"] == out["fnvOriginal"], out["mark1"]
+    assert out["mark1"]["last_hash"] != out["fnvEdited"]
+    # an untouched tail: the epoch matches, so nothing is written twice
+    assert out["again"] == first, out["again"]
+    # an edited tail: re-captured from the prior mark, and the mark moves with it
+    assert out["edited"] == first + [{"role": "assistant", "content": "a1 EDITED"}], out["edited"]
+    assert out["mark2"]["seen"] == 2, out["mark2"]
+    assert out["mark2"]["last_hash"] == out["fnvEdited"], out["mark2"]
