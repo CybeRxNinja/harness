@@ -107,6 +107,10 @@ No-release shortcut — the plugin files are self-contained:
 harness plugin install --from-release latest   # fetch server.ts + tui.tsx from GitHub releases
 ```
 
+## Install (for agents)
+
+An agent asked to install the plugin should follow [`docs/install-for-agents.md`](docs/install-for-agents.md): preconditions, ordered install, the exact `harness doctor` lines that mean healthy, and a failure branch per symptom.
+
 ## What lives where
 
 ```
