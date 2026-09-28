@@ -129,13 +129,30 @@ def test_tui_empty_store_settles_after_bounded_retries():
     tui = _tui_text()
     assert "const SLOW_MAX_TRIES = 5" in tui
     assert "slowTries += 1" in tui
-    assert "const populated = data.skills.length > 0 || data.agents.length > 0" in tui
+    assert "const populated = data.skills.length > 0 && data.agents.length > 0" in tui
     assert "slowTries >= SLOW_MAX_TRIES" in tui
     # the slow half stays skipped once latched (cheap poll), and a new session
     # drops the latch instead of inheriting it.
     assert "if (full || !scanned) {" in tui
     assert "scanned = false" in tui
     assert "slowTries = 0" in tui
+
+
+def test_tui_partial_population_does_not_latch():
+    """One warm store must not latch: agents arrive before skills.
+
+    Pass 1 can see agents (local builtins, instant) while the server-side
+    skill seeding has not landed yet — with an `||` predicate that pass
+    latched `scanned` and froze Skills at 0 until a manual refresh. The
+    early latch requires ALL slow outputs non-empty; a half-populated pass
+    leaves the latch down so the 8s poll re-runs the slow half, and the
+    bound above still settles a genuinely empty store.
+    """
+    tui = _tui_text()
+    assert "const populated = data.skills.length > 0 && data.agents.length > 0" in tui
+    assert "data.skills.length > 0 || data.agents.length > 0" not in tui
+    assert "if (slowOk && (populated || slowTries >= SLOW_MAX_TRIES)) scanned = true" in tui
+    assert "if (full || !scanned) {" in tui
 
 
 def test_tui_waits_rows_carry_live_icon():

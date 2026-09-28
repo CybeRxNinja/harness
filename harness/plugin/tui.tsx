@@ -870,9 +870,13 @@ const HarnessTui = {
           // forever, because the 8s poll never re-ran the slow half. Latch
           // only on a pass whose syncs landed AND showed something — or
           // after SLOW_MAX_TRIES passes, so a setup with genuinely no
-          // skills still settles instead of syncing forever.
+          // skills still settles instead of syncing forever. ALL slow
+          // outputs must read non-empty before the early latch: pass 1 can
+          // see agents (local builtins, instant) while the server-side skill
+          // seeding has not landed yet, and latching on that one warm store
+          // froze Skills at 0 until a manual refresh re-ran the slow half.
           slowTries += 1
-          const populated = data.skills.length > 0 || data.agents.length > 0
+          const populated = data.skills.length > 0 && data.agents.length > 0
           if (slowOk && (populated || slowTries >= SLOW_MAX_TRIES)) scanned = true
         }
         // Cheap, and only correct AFTER the message store has filled — so it
