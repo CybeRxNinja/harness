@@ -1856,7 +1856,7 @@ def _frontmatter(path):
 
 def test_plugin_apk_reverse_skill_seed():
     """security/apk-reverse ships as a seed: valid frontmatter naming it,
-    picked up by the `**/SKILL.md` seed glob alongside the other 16."""
+    picked up by the `**/SKILL.md` seed glob alongside the other 18."""
     src = _skill_src()
     md = src / "security" / "apk-reverse" / "SKILL.md"
     assert md.is_file(), "seed skill missing from package data"
@@ -1866,8 +1866,63 @@ def test_plugin_apk_reverse_skill_seed():
     assert fm.get("name") == "apk-reverse", fm
     assert fm.get("description"), "seeds need the one-line description skills_list shows"
     found = sorted(src.rglob("SKILL.md"))
-    assert len(found) == 17, [p.parent.name for p in found]
+    assert len(found) == 19, [p.parent.name for p in found]
     assert md in found
+
+
+def test_plugin_ui_craft_skills_ship_with_flat_frontmatter_and_references():
+    """build/ui-ux-craft and build/frontend-craft-floor are the two UI seeds.
+
+    Three ways they could ship broken while still passing a count check: a
+    folded `description: >-` (a line-based frontmatter parser reads the literal
+    ">-", so the L0 index shows a one-character description), a description long
+    enough to be cut by the 120-char cap in scan() and lose its trigger words,
+    and a SKILL.md that documents a references/ file it does not ship. All three
+    are pinned here.
+    """
+    src = _skill_src()
+    for name, ref in (("ui-ux-craft", "references/quick-reference.md"),
+                      ("frontend-craft-floor", "references/craft-floor.md")):
+        md = src / "build" / name / "SKILL.md"
+        assert md.is_file(), f"build/{name} missing from package data"
+        assert md.parent.name == name, "seed sits at build/<name>/SKILL.md"
+        raw = next(l for l in md.read_text().splitlines() if l.startswith("description:"))
+        assert ">" not in raw and "|" not in raw, f"{name}: not one flat line: {raw}"
+        fm = _frontmatter(md)
+        assert fm.get("name") == name, f"{name}: frontmatter name must match the seed dir ({fm})"
+        desc = fm.get("description", "")
+        assert 0 < len(desc) <= 120, f"{name}: {len(desc)} chars, the L0 cap is 120"
+        assert ">" not in desc, f"{name}: description reads as a block header, not text"
+        assert fm.get("license"), f"{name}: adaptation needs its license recorded"
+        assert fm.get("source", "").startswith("https://"), f"{name}: adaptation needs its source"
+        # the reference has to exist, and the skill has to name it
+        r = md.parent / ref
+        assert r.is_file(), f"{name} documents {ref} but does not ship it"
+        assert len(r.read_text()) > 500, f"{name}: {ref} is a stub"
+        assert ref in md.read_text(), f"{name} ships {ref} but never points at it"
+
+
+def test_plugin_ui_craft_skills_are_routed_in_the_l0_indexes():
+    """The L0 index is the only place a model learns a skill exists, so a seed
+    nobody routes to is dead weight. Each UI skill is routed in exactly one place
+    per index — one line, naming it with its build/ path and restating the bare
+    name in the tie-break, so a second copy could only ever drift — and both
+    indexes spell out the tie-break: a changed UI surface is the craft floor,
+    "does this look right" is ui-ux-craft, and the floor pulls it.
+    """
+    src = _skill_src()
+    for rel in ("meta/using-agent-skills/SKILL.md", "meta/find-skills/SKILL.md"):
+        assert (src / rel).is_file(), f"{rel} missing from package data"
+        text = (src / rel).read_text()
+        lines = text.splitlines()
+        for name in ("frontend-craft-floor", "ui-ux-craft"):
+            hits = [i for i, l in enumerate(lines) if name in l]
+            assert len(hits) == 1, f"{name} routed on {len(hits)} lines in {rel}, expected once"
+            rule = lines[hits[0]]
+            assert f"build/{name}" in rule, f"{rel}: the rule must name the seed's path"
+            assert f"`{name}`" in rule, f"{rel}: the rule must name the skill id"
+        assert "does this look right" in text, f"{rel}: no discriminating question"
+        assert "pull" in text, f"{rel}: no precedence rule between the two skills"
 
 
 def test_plugin_find_skills_ships_as_a_seed():
@@ -1886,7 +1941,7 @@ def test_plugin_find_skills_ships_as_a_seed():
     assert fm.get("name") == "find-skills", fm
     assert fm.get("name") == md.parent.name, "frontmatter name must match the seed dir"
     assert fm.get("description"), "seeds need the one-line description skills_list shows"
-    # and it is in the glob seedSkills actually scans, next to the other 16
+    # and it is in the glob seedSkills actually scans, next to the other 18
     assert md in sorted(src.rglob("SKILL.md"))
 
 

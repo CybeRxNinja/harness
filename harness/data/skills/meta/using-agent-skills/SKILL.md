@@ -7,7 +7,7 @@ description: Route work to the right skill workflow. Use when starting any task.
 Starting a session or unsure which skill applies.
 ## Procedure
 1. Classify: define/spec, plan/breakdown, build/slice, verify/test, review/gate, ship.
-2. Load ONE skill (L1), then its references (L2) only as needed.
+2. Load ONE skill (L1), then its references (L2) only as needed. Anything a person will look at routes to `build/frontend-craft-floor` (modes, refuse list, pre-ship checks); a design/UX/a11y question — palette, type, layout, "does this look right" — routes to `build/ui-ux-craft` (rules by priority: a11y, color, type, layout, motion, forms, charts). Both apply to a new or changed UI surface: then the change itself is `frontend-craft-floor`, and it is the one that pulls `ui-ux-craft` for the design calls.
 3. Follow its Verification; evidence required.
 4. Multi-step work: put the next actions in `todowrite` (exactly one `in_progress`) and update it as they land — the sidebar Todo row and the compaction brief read that list, not your prose.
 ## Pitfalls

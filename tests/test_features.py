@@ -153,6 +153,21 @@ def test_seed_install_copies_whole_skill_dir_missing_only(root, tmp_path, monkey
         "a missing file must be re-seeded — that is what missing-only means")
 
 
+def test_seeded_skill_references_are_reachable_via_view(root, cfg):
+    """The real seeds: a skill that documents references/quick-reference.md is
+    useless if the file did not come with it, and `view` with a subpath is how
+    a model actually reads it. Proves the whole-dir install end to end."""
+    from harness import skills as S
+    from pathlib import Path as _P
+    S.ensure_seed_skills()
+    for name, ref in (("ui-ux-craft", "references/quick-reference.md"),
+                      ("frontend-craft-floor", "references/craft-floor.md")):
+        body = S.view(_P("."), cfg, name)
+        assert ref in body, f"{name} documents {ref} but never names it"
+        text = S.view(_P("."), cfg, name, subpath=ref)
+        assert len(text) > 500, f"{name}: {ref} did not install ({len(text)} chars)"
+
+
 def test_frontmatter_folds_block_scalars_and_caps_descriptions(root, cfg, tmp_path):
     """A `description: >-` header used to read as the literal ">-" and every
     continuation line as a stray key, so a folded skill showed a one-character

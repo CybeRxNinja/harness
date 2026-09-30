@@ -1,6 +1,6 @@
 ---
 name: find-skills
-description: Match the task against already-loaded harness skills, then load only the one it needs. Use when starting work and the right playbook is unclear, or when nothing loaded matches.
+description: Match the task against loaded harness skills, then load only the one it needs. Use when the right playbook is unclear.
 license: MIT
 source: https://github.com/vercel-labs/skills
 adapted-from: vercel-labs/skills (skills/find-skills/SKILL.md)
@@ -11,11 +11,13 @@ Starting a task whose playbook is unclear, or when the user wants capability bey
 ## Procedure
 1. `skills_list` first — the L0 index; its description lines are the match surface.
 2. Pick the one skill whose description covers the task and `skill_view` it. One. Add a second only when the task genuinely spans two domains (bug fix + release, spec + migration) — and then say why.
-3. Follow it, and name in the reply which skill was loaded and what it covers.
-4. Nothing matches → do the work directly. No match is a normal outcome, not a blocker.
-5. External discovery is the last resort, and only when the user asks to extend capabilities: search the ecosystem (`npx skills search <query>`, or browse the source repo) and PROPOSE what turned up. Installing is a user-run action — the agent never installs.
+3. UI routes are not a second guess: a new or changed UI surface is `build/frontend-craft-floor` (modes, refuse list, pre-ship checks); a design/UX/a11y question — palette, type, layout, "does this look right" — is `build/ui-ux-craft` (rules by priority: a11y, color, type, layout, motion, forms, charts). Both apply to new UI work, so take `frontend-craft-floor` and let it pull `ui-ux-craft` for the design calls.
+4. Follow it, and name in the reply which skill was loaded and what it covers.
+5. Nothing matches → do the work directly. No match is a normal outcome, not a blocker.
+6. External discovery is the last resort, and only when the user asks to extend capabilities: search the ecosystem (`npx skills search <query>`, or browse the source repo) and PROPOSE what turned up. Installing is a user-run action — the agent never installs.
 ## Pitfalls
 - Loading every skill, or a second one "to be safe": context bloat, and overlapping playbooks blur each other.
+- Reading a new UI surface as a design problem, or "does this look right" as a pre-ship check — pick the routing skill that owns the question, not the nearest-sounding one.
 - Running `npx skills add` (or any install) on your own initiative. Never, without the user.
 - Loading a skill whose name merely sounds close to the task.
 - Treating "no match" as a reason to go shopping externally.
