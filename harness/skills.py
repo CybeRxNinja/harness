@@ -143,32 +143,65 @@ def seed_source() -> Path | None:
     return None
 
 
-def ensure_seed_skills() -> list[str]:
-    """Copy missing seed skills to the global dir, whole directory tree.
+class SeedResult(list):
+    """Installed skill names, plus the subset this run actually wrote.
+
+    A plain `list` subclass so existing callers keep working (`in`, `==[...]`,
+    `len`, indexing) while callers that REPORT get the truth: `new` is the
+    short list of skills this run created or overwrote, so a re-run that wrote
+    nothing can say "0 new" instead of counting the whole store.
+    """
+
+    def __init__(self, names: list[str], new: list[str]) -> None:
+        super().__init__(names)
+        self.new = new
+
+
+def _install(src: Path, target: Path, update: bool) -> bool:
+    """Write packaged content to `target`; True if it wrote anything.
+
+    Missing-only by default, so a user edit is never clobbered. `update` is the
+    explicit opt-in that also overwrites a stale file — the only way a seed
+    installed by an older release ever reaches the store. Identical content is
+    skipped either way, so a re-run reports 0 changed instead of rewriting the
+    world and calling it news.
+    """
+    body = src.read_text(errors="replace")
+    if not update and target.exists():
+        return False
+    if target.exists() and target.read_text(errors="replace") == body:
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body)
+    return True
+
+
+def ensure_seed_skills(update: bool = False) -> SeedResult:
+    """Install seed skills to the global dir, whole directory tree.
 
     SKILL.md is the entry point, not the whole skill: references/*.md and any
-    other sibling file ship with it. Every file is copied missing-only, so user
-    edits are never overwritten. Returns the installed skill names.
+    other sibling file ship with it. Default is missing-only, so user edits
+    survive but a seed installed by an older release never refreshes; pass
+    `update=True` to overwrite it with the packaged content (the CLI exposes
+    this as `harness setup --update-skills`). Returns every installed skill
+    name, with `.new` naming the ones this run actually wrote.
     """
     from .config import user_dir
     src = seed_source()
     if src is None:
-        return []
+        return SeedResult([], [])
     dest = user_dir() / "skills"
-    installed = []
+    installed: list[str] = []
+    written: list[str] = []
     for md in src.rglob("SKILL.md"):
         name = _frontmatter(md).get("name", md.parent.name)
         sdir = dest / md.parent.parent.name / md.parent.name
+        touched = _install(md, sdir / "SKILL.md", update)
         for f in md.parent.rglob("*"):
             if not f.is_file() or f.name == "SKILL.md":
                 continue
-            target = sdir / f.relative_to(md.parent)
-            if not target.exists():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(f.read_text(errors="replace"))
-        target = sdir / "SKILL.md"
-        if not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(md.read_text(errors="replace"))
+            touched |= _install(f, sdir / f.relative_to(md.parent), update)
         installed.append(name)
-    return installed
+        if touched:
+            written.append(name)
+    return SeedResult(installed, written)

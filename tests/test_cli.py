@@ -137,6 +137,55 @@ def test_setup_and_tui_setup_only(env, capsys):
     assert (env / "cfg" / "opencode" / "plugins" / "harness" / "server.ts").exists()
 
 
+def test_setup_reports_zero_new_when_nothing_is_missing(env, capsys):
+    """The count is what the run WROTE, not how many seeds exist.
+
+    Printing len(installed) made every `harness setup` after the first claim
+    "19 new" over a store that already had all 19.
+    """
+    assert cli(env, "setup") == 0
+    first = capsys.readouterr().out
+    assert "19 new" in first, first
+
+    assert cli(env, "setup") == 0
+    second = capsys.readouterr().out
+    assert "0 new" in second, second
+    assert "19 already present" in second, second
+
+
+def test_setup_update_skills_is_opt_in_and_names_what_it_changed(env, capsys):
+    """`--update-skills` is the only way a stale installed seed ever refreshes.
+
+    The default must stay missing-only (user edits are never clobbered) and the
+    opt-in must not be a silent overwrite.
+    """
+    from harness.cli import build_parser
+    assert build_parser().parse_args(["setup"]).update_skills is False
+    assert build_parser().parse_args(["setup", "--update-skills"]).update_skills is True
+
+    assert cli(env, "setup") == 0
+    capsys.readouterr()
+    skill = env / "home" / "skills" / "build" / "ponytail" / "SKILL.md"
+    assert skill.is_file()
+    skill.write_text("---\nname: ponytail\ndescription: >-\n  stale folded.\n---\n# old\n")
+
+    # default run: the stale file is left alone, and reported as 0 new
+    assert cli(env, "setup") == 0
+    assert "0 new" in capsys.readouterr().out
+    assert "folded" in skill.read_text(), "default run clobbered the installed skill"
+
+    # opt-in: refreshed, and the run says which skill it rewrote
+    assert cli(env, "setup", "--update-skills") == 0
+    out = capsys.readouterr().out
+    assert "ponytail" in out and "1 new" in out, out
+    assert "Routable" not in skill.read_text()
+    assert "description: Lazy senior dev" in skill.read_text(), skill.read_text()[:200]
+
+    # and it is idempotent — a second update reports nothing changed
+    assert cli(env, "setup", "--update-skills") == 0
+    assert "0 new" in capsys.readouterr().out
+
+
 def test_retired_relay_subcommands_exit_2(env, capsys):
     for retired in ("serve", "router"):
         assert cli(env, retired) == 2

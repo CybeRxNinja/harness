@@ -153,6 +153,84 @@ def test_seed_install_copies_whole_skill_dir_missing_only(root, tmp_path, monkey
         "a missing file must be re-seeded — that is what missing-only means")
 
 
+def test_seed_result_reports_only_what_the_run_wrote(root, tmp_path, monkeypatch):
+    """A re-run that wrote nothing must be able to say "0 new".
+
+    ensure_seed_skills() returns every installed name (a deleted sibling has to
+    be re-seedable, so the list cannot shrink), which made `harness setup` print
+    "19 new" on a store where 17 were already there. `.new` carries the honest
+    count; the list behaviour every caller depends on is unchanged.
+    """
+    from harness import skills as S
+    from pathlib import Path
+    seed = tmp_path / "seed"
+    for i in range(3):
+        d = seed / "build" / f"demo{i}"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: demo{i}\ndescription: Seed {i}.\n---\n# demo{i}\n")
+    monkeypatch.setattr(S, "seed_source", lambda: seed)
+
+    # rglob order is filesystem order, so compare as sets
+    first = S.ensure_seed_skills()
+    assert set(first) == {"demo0", "demo1", "demo2"}, "still every installed name"
+    assert set(first.new) == {"demo0", "demo1", "demo2"}, first.new
+
+    # nothing missing -> the run wrote nothing, and says so
+    again = S.ensure_seed_skills()
+    assert set(again) == {"demo0", "demo1", "demo2"}
+    assert again.new == [], f"re-run reported {again.new} as new"
+
+    # one sibling deleted -> it comes back, and only it counts as new
+    (Path(os.environ["HARNESS_HOME"]) / "skills" / "build" / "demo1" / "SKILL.md").unlink()
+    third = S.ensure_seed_skills()
+    assert third.new == ["demo1"], third.new
+    assert set(third) == {"demo0", "demo1", "demo2"}
+
+
+def test_update_skills_overwrites_stale_seeds_only_when_asked(root, tmp_path, monkeypatch):
+    """Missing-only can never reach a seed an older release installed.
+
+    The ponytail family shipped a folded `description: >-` that read as the
+    literal ">-" and made the skill unroutable; fixing it in the package did
+    nothing for the installed copy. `update=True` is the opt-in that overwrites
+    it, leaves user-only files alone, and is idempotent (a second update
+    reports nothing changed rather than rewriting the world).
+    """
+    from harness import skills as S
+    from pathlib import Path
+    seed = tmp_path / "seed"
+    demo = seed / "build" / "demo"
+    demo.mkdir(parents=True)
+    (demo / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Routable one-liner.\n---\n# demo\n")
+    (demo / "notes.md").write_text("PACKAGED\n")
+    monkeypatch.setattr(S, "seed_source", lambda: seed)
+    dest = Path(os.environ["HARNESS_HOME"]) / "skills" / "build" / "demo"
+
+    S.ensure_seed_skills()
+    (dest / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: >-\n  folded and unroutable.\n---\n# old\n")
+    (dest / "notes.md").write_text("PACKAGED v2\n")
+    (dest / "my-notes.md").write_text("USER ONLY\n")
+
+    # default: the stale copy is left exactly as it is
+    stale = S.ensure_seed_skills()
+    assert stale.new == []
+    assert "folded and unroutable" in (dest / "SKILL.md").read_text()
+
+    # opt-in: packaged content lands, the change is named, user-only files stay
+    upd = S.ensure_seed_skills(update=True)
+    assert upd.new == ["demo"], upd.new
+    assert (dest / "SKILL.md").read_text().count("description: Routable one-liner.") == 1
+    assert (dest / "notes.md").read_text() == "PACKAGED\n", "stale reference not refreshed"
+    assert (dest / "my-notes.md").read_text() == "USER ONLY\n", "update deleted a user file"
+
+    # idempotent: a second update changed nothing
+    assert S.ensure_seed_skills(update=True).new == []
+    assert S.ensure_seed_skills().new == []
+
+
 def test_seeded_skill_references_are_reachable_via_view(root, cfg):
     """The real seeds: a skill that documents references/quick-reference.md is
     useless if the file did not come with it, and `view` with a subpath is how

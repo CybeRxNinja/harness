@@ -120,8 +120,14 @@ def cmd_memory(args) -> int:
 def cmd_setup(args) -> int:
     from .skills import ensure_seed_skills
     from . import models as backend
-    seeded = ensure_seed_skills()
-    print(f"Seed skills installed: {len(seeded)} new" + (f" ({', '.join(seeded[:5])})" if seeded else ""))
+    seeded = ensure_seed_skills(update=bool(getattr(args, "update_skills", False)))
+    new = seeded.new  # skills this run actually wrote — the honest count
+    if new:
+        tail = f", +{len(new) - 5} more" if len(new) > 5 else ""
+        print(f"Seed skills installed: {len(new)} new "
+              f"({', '.join(new[:5])}{tail}, {len(seeded)} total)")
+    else:
+        print(f"Seed skills installed: 0 new ({len(seeded)} already present)")
     if _find_opencode():
         try:
             print(f"opencode default model: {backend.resolve_model('', {})}")
@@ -633,7 +639,12 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--days", type=int, default=30,
                    help="retention window for `memory prune`")
     m.set_defaults(fn=cmd_memory)
-    su = sub.add_parser("setup")
+    su = sub.add_parser("setup", help="install seed skills, check the model backend")
+    su.add_argument("--update-skills", action="store_true",
+                    help="overwrite installed seed skills with the packaged "
+                         "content (default: missing-only, so your edits are "
+                         "never clobbered; existing files stay as they are, so "
+                         "a seed from an older release never refreshes)")
     su.set_defaults(fn=cmd_setup)
     t = sub.add_parser("tui", help="opencode config + plugin, then launch opencode")
     t.add_argument("--dry-run", action="store_true")
