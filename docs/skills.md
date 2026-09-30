@@ -12,9 +12,11 @@ meta/self-maintenance         maintain/improve harness when asked, or automatic 
 meta/find-skills              match the task against the loaded set, load only the one it needs; external search is a user-approved fallback
 define/spec-driven-development
 plan/planning-and-task-breakdown
+build/frontend-craft-floor     the craft floor: 4 modes, refuse list, pre-ship checks
 build/incremental-implementation
 build/ponytail                 the laziness ladder (see below)
 build/test-driven-development
+build/ui-ux-craft              design-time UI/UX rules by priority: a11y, color, type, layout, forms, charts
 verify/debugging-and-error-recovery
 review/code-review-and-quality
 review/code-simplification
@@ -28,6 +30,13 @@ security/apk-reverse           static APK analysis (manifest/certs/code/secrets)
 
 Seeded into opencode's store as `harness-<name>` by the plugin
 (`ctx.skill.transform`) and into `~/.harness/skills` by `harness setup`.
+
+Two skills carry a `references/` sub-file — `build/ui-ux-craft`
+(`references/quick-reference.md`) and `build/frontend-craft-floor`
+(`references/craft-floor.md`). Both load L2 only when an L1 row actually bites
+(palette/type numbers, the floor checklist); never preemptively, and never as a
+second skill at match time — the router picks one of the two (see
+`meta/using-agent-skills`).
 
 Resolution order (first root wins on a same-named skill): `HARNESS_SKILLS_DIR`
 (if set) → `<project>/.opencode/harness/skills` → package data

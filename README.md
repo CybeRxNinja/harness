@@ -1,6 +1,6 @@
 [![ci](https://github.com/CybeRxNinja/harness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CybeRxNinja/harness/actions/workflows/ci.yml)
 [![release](https://github.com/CybeRxNinja/harness/actions/workflows/release.yml/badge.svg)](https://github.com/CybeRxNinja/harness/releases)
-[![tests](https://img.shields.io/badge/tests-176%20passing-brightgreen)](.github/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-195%20passing-brightgreen)](.github/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![release](https://img.shields.io/github/v/tag/CybeRxNinja/harness?filter=plugin-v*&label=plugin)](https://github.com/CybeRxNinja/harness/releases/latest)
 
@@ -33,14 +33,14 @@ and re-runnable locally (the former live smoke is removed):
 | --- | --- |
 | plugin loads and activates on stock opencode | formerly proven by a live smoke booting `opencode serve` and asserting `status == "active"` → `SMOKE OK` |
 | TUI half is real (panel, chip, commands) | the smoke asserted `features.tui` — set only when a `tui.tsx` entrypoint is present |
-| 17 bundled skills seeded into opencode's skill store | the smoke counted them against a live server |
+| 19 bundled skills seeded into opencode's skill store | the smoke counted them against a live server |
 | plugin is visible in the Plugins panel | the TUI panel filters on `features.tui`; the directory install ships both entrypoints |
 | memory remembers without being asked | `tests/test_memory_auto.py`: durable facts + progress capture; 2-evidence lessons auto-promote to `MEMORY.md`; credentials refused (live sessions capture via the plugin context hook) |
 | dangerous commands ask, safe ones don't | `tests/test_risk.py`: 94 ask-rules generated from `harness/risk.py` (`git push`, `rm -rf`, `DROP TABLE`, deploys) — greps, diffs, fetches, tests never prompt |
 | worker rows reach a terminal state | `tests/test_rlm.py`: `is_terminal` / `worker_timeout` readers behind `harness doctor` (live routing is opencode's native `task` tool) |
 | entrypoints never break a boot | `tests/test_plugin.py` transpiles both files with `Bun.Transpiler`; bad `setup()` returns are pinned by tests |
 | the model's plan lands in the harness todo space | verified on a real server: `opencode run "…call todowrite…"` → rows landed in `<project>/.opencode/harness/sessions.db` under the run's session id, painted by the panel off a real pty capture |
-| 185 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
+| 190 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
 
 Latest release: **[`plugin-v0.15`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.15)**
 — `--from-release` assets are byte-identical to the checkout, a path last verified
@@ -52,7 +52,7 @@ smoke passed).
 Installed into `~/.config/opencode/plugins/harness/` and auto-loaded by
 opencode v2:
 
-- **Skills** — 17 bundled skills seeded into opencode's skill store
+- **Skills** — 19 bundled skills seeded into opencode's skill store
   (`ctx.skill.transform`): build ladder (incl. **ponytail**, MIT), review,
   audit, spec-driven development, security, and more.
 - **Native tools** — `skills_list`, `skill_view`, `memory_recall`,
@@ -143,7 +143,7 @@ harness config get|set|show [--scope user|project]
 ```
 harness/plugin/     the plugin: server + TUI entrypoints (harness.ts, tui.tsx) — the product
 harness/            cli, memory, risk, rlm (worker-state readers), store, doctor, ...
-harness/data/skills bundled skills (17, incl. ponytail — MIT, see NOTICE.md)
+harness/data/skills bundled skills (19, incl. ponytail — MIT, see NOTICE.md)
 docs/               one page per feature (start at docs/quickstart.md, docs/plugin.md)
 .github/workflows/  ci.yml (tests) · release.yml (plugin-v* → assets)
 ```

@@ -42,4 +42,5 @@ End with the only metric that matters: `net: -<N> lines possible.` Nothing to cu
 ## Verification
 Every finding names a location, a replacement, and a line count. The report ends with a net line
 figure; a report with findings but no net figure is unfinished. The diff must still pass its tests
-after every proposed cut.
+after every proposed cut. No unverified `looks fine`: name what was actually checked, and name every
+check you did not run as skipped.
