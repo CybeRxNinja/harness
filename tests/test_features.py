@@ -72,7 +72,25 @@ def test_ponytail_skills_ship_with_the_ladder_intact(root, cfg):
     for name, tag in (("ponytail-review", "delete:"), ("ponytail-audit", "stale:")):
         text = S.view(Path("."), cfg, name)
         assert "net: -" in text and tag in text, name
-        assert "apply nothing" in text or "applies no fixes" in text or "do not apply" in text
+    # report-only, in each skill's own current wording: the cut is a later pass
+    review = S.view(Path("."), cfg, "ponytail-review")
+    assert "List, do not apply" in review and "separate pass" in review, review[-400:]
+    audit = S.view(Path("."), cfg, "ponytail-audit")
+    assert "Apply the cuts in a second pass" in audit, audit[-400:]
+    assert "never delete and fix in the same step" in audit, audit[-400:]
+
+    # the L0 index is one line per skill: descriptions ship flat (a folded
+    # `description: >-` reads as the literal ">-" to any line-based parser) and
+    # fit the 120-char cap scan() applies, tail intact.
+    shown = {s["name"]: s["description"] for s in S.scan(Path("."), cfg)}
+    for name in ("ponytail", "ponytail-review", "ponytail-audit"):
+        md = next(Path("harness/data/skills").rglob(f"{name}/SKILL.md"))
+        raw = next(l for l in md.read_text().splitlines()
+                   if l.startswith("description:"))
+        assert ">" not in raw and "|" not in raw, f"{name}: not one flat line: {raw}"
+        desc = S._frontmatter(md)["description"]
+        assert 0 < len(desc) <= 120, f"{name}: {len(desc)} chars, cap is 120"
+        assert shown[name] == desc, f"{name}: skills_list would show a different description"
 
     notice = Path("harness/data/skills/NOTICE.md")
     assert notice.exists() and "MIT License" in notice.read_text()
@@ -89,6 +107,81 @@ def test_skills_progressive(root, cfg):
     assert "reverse-router" in [s["name"] for s in S.scan(_P("."), cfg2)]
     body = S.view(_P("."), cfg, "using-agent-skills")
     assert "When to Use" in body
+
+
+def test_seed_install_copies_whole_skill_dir_missing_only(root, tmp_path, monkeypatch):
+    """SKILL.md is the entry point, not the whole skill.
+
+    Copying only SKILL.md shipped a skill whose `references/` was a dangling
+    path: the model is told to `skill_view` a file that was never installed.
+    Every file in the skill dir must land — nested dirs and non-.md siblings
+    included — and every one of them missing-only, so a re-run never clobbers
+    what the user edited (and does restore what they deleted).
+    """
+    from harness import skills as S
+    from pathlib import Path
+    seed = tmp_path / "seed"
+    demo = seed / "build" / "demo"
+    (demo / "references" / "nested").mkdir(parents=True)
+    (demo / "assets").mkdir()
+    (demo / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A demo seed.\n---\n# demo\n"
+        "See references/notes.md.\n")
+    (demo / "references" / "notes.md").write_text("NOTES BODY\n")
+    (demo / "references" / "nested" / "deep.md").write_text("DEEP BODY\n")
+    (demo / "assets" / "logo.svg").write_text("<svg/>\n")
+    monkeypatch.setattr(S, "seed_source", lambda: seed)
+
+    assert S.ensure_seed_skills() == ["demo"]
+    dest = Path(os.environ["HARNESS_HOME"]) / "skills" / "build" / "demo"
+    for rel, body in (("SKILL.md", "# demo"),
+                      ("references/notes.md", "NOTES BODY"),
+                      ("references/nested/deep.md", "DEEP BODY"),
+                      ("assets/logo.svg", "<svg/>")):
+        f = dest / rel
+        assert f.is_file(), f"seed did not install {rel}"
+        assert body in f.read_text(), rel
+
+    # missing-only: edits survive, a deleted file comes back
+    (dest / "SKILL.md").write_text("USER EDIT\n")
+    (dest / "references" / "notes.md").write_text("USER EDIT\n")
+    (dest / "references" / "nested" / "deep.md").unlink()
+    assert S.ensure_seed_skills() == ["demo"]
+    assert (dest / "SKILL.md").read_text() == "USER EDIT\n", "re-run overwrote a user edit"
+    assert (dest / "references" / "notes.md").read_text() == "USER EDIT\n", "same for references/"
+    assert (dest / "references" / "nested" / "deep.md").read_text() == "DEEP BODY\n", (
+        "a missing file must be re-seeded — that is what missing-only means")
+
+
+def test_frontmatter_folds_block_scalars_and_caps_descriptions(root, cfg, tmp_path):
+    """A `description: >-` header used to read as the literal ">-" and every
+    continuation line as a stray key, so a folded skill showed a one-character
+    description in the L0 index. Block scalars fold into the key above them, the
+    next real key survives, and the value scan() hands the index is capped."""
+    from harness import skills as S
+    d = tmp_path / "fm"
+    d.mkdir()
+    for i, header in enumerate((">-", ">", "|", "|-")):
+        (d / f"s{i}.md").write_text(
+            f"---\nname: s{i}\ndescription: {header}\n"
+            "  first line of the description\n"
+            "  second line, wrapped\n"
+            "license: MIT\n---\n# body\n")
+        fm = S._frontmatter(d / f"s{i}.md")
+        assert fm["name"] == f"s{i}", (header, fm)
+        assert fm["description"] == "first line of the description second line, wrapped", (header, fm)
+        assert fm["license"] == "MIT", f"{header}: folded scalar swallowed the next key"
+    quoted = d / "q.md"
+    quoted.write_text('---\nname: q\ndescription: "quoted value"\n---\n# body\n')
+    assert S._frontmatter(quoted)["description"] == "quoted value"
+
+    # the index line is capped, and the cap is the only thing that shortens it
+    long = root / ".agents" / "skills" / "longdesc"
+    long.mkdir(parents=True)
+    body = "x" * 200
+    (long / "SKILL.md").write_text(f"---\nname: longdesc\ndescription: {body}\n---\n# long\n")
+    got = {s["name"]: s["description"] for s in S.scan(root, cfg)}
+    assert got["longdesc"] == body[:120], len(got["longdesc"])
 
 
 def test_config_policy(root):

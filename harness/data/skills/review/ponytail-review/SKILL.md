@@ -1,11 +1,6 @@
 ---
 name: ponytail-review
-description: >-
-  Code review focused exclusively on over-engineering. Finds what to delete:
-  reinvented standard library, unneeded dependencies, speculative abstractions,
-  dead flexibility. One line per finding: location, what to cut, what replaces
-  it. Use when the user says "review for over-engineering", "what can we
-  delete", "is this over-engineered", "simplify review".
+description: Review a diff for over-engineering: what to delete, what replaces it. "Is this over-engineered?", "what can we delete".
 license: MIT
 source: https://github.com/DietrichGebert/ponytail
 adapted-from: DietrichGebert/ponytail (skills/ponytail-review/SKILL.md)

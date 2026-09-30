@@ -1,15 +1,6 @@
 ---
 name: ponytail
-description: >-
-  Forces the laziest solution that actually works, simplest, shortest, most
-  minimal. Channels a senior dev who has seen everything: question whether the
-  task needs to exist at all (YAGNI), reach for the standard library before
-  custom code, native platform features before dependencies, one line before
-  fifty. Use on ANY coding task: writing, adding, refactoring, fixing,
-  reviewing, or choosing libraries. Also use when the user says "be lazy",
-  "lazy mode", "simplest solution", "minimal solution", "yagni", "do less", or
-  complains about over-engineering, bloat, or unnecessary dependencies.
-  Levels: lite, full (default), ultra.
+description: Lazy senior dev: the laziest solution that works. YAGNI, reuse, stdlib, native, one line. Any coding task, "be lazy".
 license: MIT
 source: https://github.com/DietrichGebert/ponytail
 adapted-from: DietrichGebert/ponytail (skills/ponytail/SKILL.md)

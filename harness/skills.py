@@ -54,7 +54,17 @@ def scan(project_root: Path, cfg: dict) -> list[dict]:
     return sorted(out.values(), key=lambda d: d["name"])
 
 
+_BLOCK_HEAD = {">", "|", ">-", ">+", "|-", "|+"}  # YAML block scalar headers
+_QUOTED = "\"'"
+
+
 def _frontmatter(p: Path) -> dict:
+    """Frontmatter keys -> scalar values, one level deep.
+
+    Block scalars (`>-`, `|`, ...) and quoted multi-line values are folded:
+    continuation lines belong to the key above them, never a new key, so
+    `description: >-` reads as its text instead of the literal `>-`.
+    """
     try:
         text = p.read_text(errors="replace")
     except Exception:
@@ -63,14 +73,43 @@ def _frontmatter(p: Path) -> dict:
         return {}
     try:
         head = text.split("---", 2)[1]
-        out = {}
-        for line in head.splitlines():
-            if ":" in line:
-                k, _, v = line.partition(":")
-                out[k.strip()] = v.strip().strip("\"'")
-        return out
     except Exception:
         return {}
+    out: dict[str, str] = {}
+    key = None
+    parts: list[str] = []
+    quote = ""
+
+    def flush() -> None:
+        nonlocal key, parts, quote
+        if key is None:
+            return
+        raw = "\n".join(parts).strip()
+        if quote and len(raw) >= 2 and raw[0] == raw[-1] == quote:
+            raw = raw[1:-1]
+        out[key] = " ".join(raw.split())
+        key, parts, quote = None, [], ""
+
+    for raw_line in head.splitlines():
+        line = raw_line.strip()
+        if key is not None and (
+            (not line and not parts)          # blank line inside a folded scalar
+            or raw_line[:1].isspace()          # indented continuation
+            or line in _BLOCK_HEAD                  # header of a nested scalar: ignore
+        ):
+            parts.append(line)
+            continue
+        flush()
+        if not line or line.startswith("#"):
+            continue
+        k, sep, v = line.partition(":")
+        if not sep:
+            continue
+        key, v = k.strip(), v.strip()
+        parts = [] if v in _BLOCK_HEAD else ([v] if v else [])
+        quote = v[:1] if v[:1] in _QUOTED else ""
+    flush()
+    return out
 
 
 def view(project_root: Path, cfg: dict, name: str, subpath: str = "") -> str:
@@ -105,7 +144,12 @@ def seed_source() -> Path | None:
 
 
 def ensure_seed_skills() -> list[str]:
-    """Copy missing seed skills to the global dir. Never overwrites user edits."""
+    """Copy missing seed skills to the global dir, whole directory tree.
+
+    SKILL.md is the entry point, not the whole skill: references/*.md and any
+    other sibling file ship with it. Every file is copied missing-only, so user
+    edits are never overwritten. Returns the installed skill names.
+    """
     from .config import user_dir
     src = seed_source()
     if src is None:
@@ -114,10 +158,17 @@ def ensure_seed_skills() -> list[str]:
     installed = []
     for md in src.rglob("SKILL.md"):
         name = _frontmatter(md).get("name", md.parent.name)
-        target = dest / md.parent.parent.name / md.parent.name / "SKILL.md"
-        if target.exists():
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(md.read_text(errors="replace"))
+        sdir = dest / md.parent.parent.name / md.parent.name
+        for f in md.parent.rglob("*"):
+            if not f.is_file() or f.name == "SKILL.md":
+                continue
+            target = sdir / f.relative_to(md.parent)
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f.read_text(errors="replace"))
+        target = sdir / "SKILL.md"
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(md.read_text(errors="replace"))
         installed.append(name)
     return installed
