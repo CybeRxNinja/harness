@@ -607,6 +607,19 @@ def cmd_tui(args) -> int:
     # OPENCODE_EXPERIMENTAL_LSP_TOOL. Set it so agents keep definitions/
     # references access across an upgrade — an unrecognized env var is inert.
     os.environ.setdefault("OPENCODE_EXPERIMENTAL_LSP_TOOL", "true")
+    # Scratch confinement: TMPDIR/TMP/TEMP point at the project so the whole
+    # opencode tree (bun JIT caches, LSP servers, agent-run tools) writes its
+    # temp under <root>/.opencode/harness/tmp/, where it is managed, instead
+    # of piling up in the system temp. The plugin sets the same env at setup
+    # time; doing it here too covers everything spawned before plugin load.
+    scratch = Path(args.root).resolve() / ".opencode" / "harness" / "tmp"
+    try:
+        scratch.mkdir(parents=True, exist_ok=True)
+        os.environ["TMPDIR"] = str(scratch)
+        os.environ["TMP"] = str(scratch)
+        os.environ["TEMP"] = str(scratch)
+    except OSError as e:
+        print(f"harness: cannot confine temp to {scratch} ({e}) — system temp in use", file=sys.stderr)
     os.execvp(binary, [binary])
 
 

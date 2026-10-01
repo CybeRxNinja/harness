@@ -137,6 +137,40 @@ def test_setup_and_tui_setup_only(env, capsys):
     assert (env / "cfg" / "opencode" / "plugins" / "harness" / "server.ts").exists()
 
 
+def test_tui_launch_confines_temp_to_the_project(env, monkeypatch):
+    """`harness tui` exports TMPDIR/TMP/TEMP = <root>/.opencode/harness/tmp
+    before exec, so the whole opencode tree (bun JIT caches, LSP servers,
+    agent-run tools) writes scratch inside the project — enforced by env,
+    not by asking agents. execvp must never actually run: stop it here.
+    """
+    import os as _os
+    from harness import cli as C
+
+    monkeypatch.setattr(C, "_find_opencode", lambda: "/usr/bin/opencode")
+    # env tracking so cmd_tui's exports are undone with the test
+    for key in ("TMPDIR", "TMP", "TEMP"):
+        monkeypatch.setenv(key, _os.environ.get(key, ""))
+    # keep cmd_tui's inert setdefault from leaking past this test
+    monkeypatch.setenv("OPENCODE_EXPERIMENTAL_LSP_TOOL",
+                       _os.environ.get("OPENCODE_EXPERIMENTAL_LSP_TOOL", "true"))
+    seen = {}
+
+    def fake_execvp(binary, argv):
+        seen.update(binary=binary, tmpdir=_os.environ.get("TMPDIR"),
+                    tmp=_os.environ.get("TMP"), temp=_os.environ.get("TEMP"))
+        raise SystemExit(0)  # stop before replacing the test process
+
+    monkeypatch.setattr(C.os, "execvp", fake_execvp)
+    with pytest.raises(SystemExit):
+        cli(env, "tui")
+
+    scratch = env / ".opencode" / "harness" / "tmp"
+    assert scratch.is_dir(), "the scratch dir must exist before exec"
+    assert seen["tmpdir"] == str(scratch), seen
+    assert seen["tmp"] == str(scratch) and seen["temp"] == str(scratch)
+    assert seen["binary"] == "/usr/bin/opencode"
+
+
 def test_setup_reports_zero_new_when_nothing_is_missing(env, capsys):
     """The count is what the run WROTE, not how many seeds exist.
 

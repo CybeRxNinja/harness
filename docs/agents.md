@@ -54,7 +54,12 @@ file:line. At most one worker runs a browser or server and it is the
 `test-engineer`; `code-reviewer` is static-only. Every spawn prompt requires a
 SUMMARY listing each file created/changed with line counts. Scratch lives in
 the project's `.opencode/harness/tmp/` — never `/tmp` or a system directory —
-and no worker installs packages or tools (report the missing tool instead).
+and that rule is **enforced, not just asked for**: plugin setup and
+`harness tui` point `TMPDIR`/`TMP`/`TEMP` at the project, so temp files from
+the whole process tree (bun JIT caches, LSP servers, agent-run tools) land
+there too, and the test suite runs with the same confinement (its scratch is
+reaped between runs). No worker installs packages or tools (report the
+missing tool instead).
 Independent workers run in parallel, two per wave. Installs and scratch that
 land outside the project prompt for approval (`docs/security.md`).
 

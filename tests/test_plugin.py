@@ -135,13 +135,29 @@ console.log(
 # real .opencode/harness/sessions.db (facts) and a virtual builtin skill, then
 # prints what each feature did.
 FEATURES = r"""
-import { mkdtempSync, mkdirSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { join, resolve } from "node:path"
 import { Database } from "bun:sqlite"
 
 const file = process.argv[2]
 const plug: any = (await import(file)).default
+
+// Scratch confinement: every fixture dir lives in the PROJECT under
+// .opencode/harness/tmp/ (cwd is REPO_ROOT — the runner sets it), never the
+// system temp, where these used to pile up unmanaged. fixture() tracks them
+// so the reaper at the end can remove all of them even though `drift` is
+// block-scoped; a crashed run is swept by tests/conftest.py.
+const SCRATCH = (() => {
+  const base = resolve(process.cwd(), ".opencode", "harness", "tmp")
+  mkdirSync(base, { recursive: true })
+  return base
+})()
+const scratchDirs: string[] = []
+const fixture = (prefix: string): string => {
+  const d = mkdtempSync(join(SCRATCH, prefix))
+  scratchDirs.push(d)
+  return d
+}
 
 const BUILTIN = {
   id: "opencode",
@@ -179,14 +195,20 @@ function makeDb(dir: string, rows: string[][]) {
   db.close()
 }
 
-const dir = mkdtempSync(join(tmpdir(), "harness-plugin-"))
+const dir = fixture("harness-plugin-")
 makeDb(dir, [
   ["The plugin loader needs codemode false or the tool stays invisible", "chat"],
   ["unrelated fact about socks", "chat"],
 ])
 
 const s = makeCtx(dir)
+const tmpdirBefore = String(process.env.TMPDIR ?? "")
 await plug.setup(s.ctx)
+// executable proof of temp confinement: setup() must retarget the process
+// tree's TMPDIR into a .opencode/harness/tmp/ path (children inherit it)
+const tmpdirConfined =
+  String(process.env.TMPDIR ?? "") !== tmpdirBefore &&
+  String(process.env.TMPDIR ?? "").includes(join(".opencode", "harness", "tmp"))
 const tools: any = Object.fromEntries(s.tools.map((t: any) => [t.name, t]))
 const call = async (name: string, input?: any, context?: any): Promise<string> => {
   try {
@@ -198,6 +220,7 @@ const call = async (name: string, input?: any, context?: any): Promise<string> =
 }
 
 const out: any = {}
+out.tmpdirConfined = tmpdirConfined
 out.seedCount = s.skills.filter((x: any) => String(x.id).startsWith("harness-")).length
 // activation is idempotent: a reload must not duplicate the seeds
 const before = s.skills.length
@@ -309,7 +332,7 @@ out.todoReplace = await (async () => {
 out.todoBare = await call("todoread", {})
 
 // no facts yet -> no brief, no throw
-const emptyDir = mkdtempSync(join(tmpdir(), "harness-plugin-empty-"))
+const emptyDir = fixture("harness-plugin-empty-")
 const e2 = makeCtx(emptyDir)
 await plug.setup(e2.ctx)
 const ev2: any = { sessionID: "ses_none", system: [] }
@@ -379,7 +402,7 @@ const setupOk = async (ctx: any): Promise<boolean> => {
 // facts DB exists but with a drifted schema (no `facts` table): recall answers,
 // nothing throws, no brief
 {
-  const drift = mkdtempSync(join(tmpdir(), "harness-plugin-drift-"))
+  const drift = fixture("harness-plugin-drift-")
   mkdirSync(join(drift, ".opencode", "harness"), { recursive: true })
   const db = new Database(join(drift, ".opencode", "harness", "sessions.db"))
   db.run("CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT)")
@@ -393,6 +416,12 @@ const setupOk = async (ctx: any): Promise<boolean> => {
   const ev3: any = { sessionID: "ses_drift", system: [] }
   await d3.hooks["session:compaction"](ev3)
   out.degradeSchemaDriftBrief = ev3.system.length
+}
+
+// reaper: remove every fixture dir created above (project-local by
+// construction), so a passing run leaves nothing even behind
+for (const d of scratchDirs) {
+  try { rmSync(d, { recursive: true, force: true }) } catch {}
 }
 
 console.log(JSON.stringify(out))
@@ -1182,6 +1211,11 @@ def test_plugin_features(tmp_path):
                        capture_output=True, text=True, timeout=180, cwd=str(REPO_ROOT), env=env)
     assert r.returncode == 0, r.stderr[-2000:]
     out = json.loads(r.stdout.strip().splitlines()[-1])
+
+    # temp confinement: plugin setup() must point the process tree's TMPDIR
+    # at a .opencode/harness/tmp/ path so children (bun/node caches, LSP
+    # servers, agent tools) write inside the project, never the system temp
+    assert out["tmpdirConfined"] is True, out.get("tmpdirConfined")
 
     # seeding registers every bundled skill once, and reload does not duplicate
     assert out["seedCount"] >= 11, out["seedCount"]

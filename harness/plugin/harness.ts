@@ -1545,6 +1545,28 @@ const HarnessPlugin = {
     const log = (m: string) => console.error(`[harness] ${m}`)
     const directory: string = ctx?.location?.directory || process.cwd()
 
+    // 0. Temp confinement: everything this process tree creates as "temp" —
+    //    bun/node JIT caches, LSP server scratch, browsers, and every tool the
+    //    agents run — lands under THIS PROJECT's .opencode/harness/tmp/, not
+    //    the system temp, where it used to pile up unmanaged (bun's *.so
+    //    drops, fixture dirs, screenshots). A prompt rule only ASKS agents for
+    //    this; env vars are what enforce it — children inherit TMPDIR at
+    //    spawn, and bun/node re-read it per call. Best-effort by design: a
+    //    read-only project dir degrades to the system temp, never a failed
+    //    activation.
+    try {
+      const { mkdirSync } = await import("node:fs")
+      const { join } = await import("node:path")
+      const scratch = join(directory, ".opencode", "harness", "tmp")
+      mkdirSync(scratch, { recursive: true })
+      process.env.TMPDIR = scratch
+      process.env.TMP = scratch
+      process.env.TEMP = scratch
+      log(`temp confined to ${scratch}`)
+    } catch (e) {
+      log(`temp confinement skipped: ${short(e)}`)
+    }
+
     // 1. Seed the bundled skills into opencode's skill store so they are
     //    loadable (by id) without hand-editing opencode.json.
     try {

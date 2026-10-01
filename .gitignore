@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 # harness runtime state (project-local, under .opencode/harness/)
+.opencode/harness/tmp/
 .opencode/harness/sessions.db*
 .opencode/harness/kernel/
 .opencode/harness/runs/
