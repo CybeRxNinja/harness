@@ -289,6 +289,12 @@ def test_config_policy(root):
     with _p.raises(PermissionError):
         set_value(root, "router.api_key", "x", "user")
     assert "sk-abcdef123456" not in str(redact({"k": "sk-abcdef123456"}))
+    # the pre-write copy belongs in the project state dir: .gitignore/AGENTS.md
+    # only cover .opencode/harness/backups/, so a copy in .opencode/backups/ is
+    # a config file nothing ignores and can be committed by accident
+    set_value(root, "budgets.max_turns", 30, "project")
+    set_value(root, "budgets.max_turns", 31, "project")
+    assert list((root / ".opencode" / "harness" / "backups").glob("*.jsonc"))
 
 
 def test_every_bundled_skill_is_committable():

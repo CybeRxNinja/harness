@@ -64,16 +64,18 @@ when called directly).
 Bundled seeds live at `harness/data/skills/<category>/<name>/SKILL.md` (two
 levels), so seeding globs `**/SKILL.md`.
 
-Provider / agents are still merged into `opencode.json` by
-`ensure_opencode_config` — the plugin does not duplicate them, and agents carry
-no model pins: they inherit your opencode default model.
+Agent definitions are installed as native `harness-*` Markdown files under
+`~/.config/opencode/agents/`, so the user's own `opencode.json` stays unchanged.
+At activation, the server plugin sets the runtime default agent
+(`ctx.agent.transform(editor => editor.default(...))`); every agent carries no
+model pins: they inherit your opencode default model.
 
 ## TUI contract (tui.tsx, probed against opencode 2.0.11)
 
 | target | what harness contributes |
 | --- | --- |
 | `home.footer.status` | `harness · 12% ctx · $0.03 · 5.9m tok`, click toggles the sidebar (pressure first, lifetime total last). The chip carries `flexGrow=1 flexShrink=1 minWidth=0` on purpose: opencode renders its own **version** text right after this slot with `flexShrink 0`, so a non-shrinking chip would push it off-screen — the chip truncates instead, the version stays |
-| `sidebar.content` | the stats rows: Window / Tokens / Models / Todo / Workers / Waits / Skills / Agents / Memory, each click-to-expand (several at once). Todo/Workers/Waits/Memory hide when empty (Waits appears/auto-expands while waits pend, hides when none); any list past five rows ends with `… +N more` so counts always match their list |
+| `sidebar.content` | the stats rows: Window / Tokens / Models / Todo / Workers / Waits / Files / Skills / Agents / Memory, each click-to-expand (several at once). Todo/Workers/Waits/Memory hide when empty (Waits appears/auto-expands while waits pend, hides when none); any list past five rows ends with `… +N more` so counts always match their list |
 | `sidebar.footer` | `harness · click a row` / `harness · N expanded` |
 | `app` | the `app` slot hosts the `ctx.keymap.layer` call (see below) |
 
@@ -124,8 +126,8 @@ Traps found by probing the running TUI — do not "simplify" these away:
   at all ("kilo · 392 models" was inventory trivia); the model store only feeds
   the context-limit lookup.
 - **The Workers row is project-wide**, and its count is a `count(*)` query rather
-  than `rows.length` of the six displayed rows: `rlm.spawn` leaves `workers.session`
-  empty, and a worker that runs for an hour can fall outside the newest rows while
+  than `rows.length` of the six displayed rows: a worker that runs for an hour can
+  fall outside the newest rows while short ones finish. `workers.updated` is epoch
   short ones finish. `workers.updated` is epoch **seconds** (`int(time.time())`),
   and the row prints the age instead of re-deriving `stale` (`doctor`'s rule).
 - **Detail lines are budgeted at 34 cells.** The sidebar is a fixed 42 columns;

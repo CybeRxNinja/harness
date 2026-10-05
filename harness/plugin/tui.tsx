@@ -41,8 +41,8 @@
 //     `todos` table the server half's `todowrite` writes), and falls back to
 //     the newest list in that space. Degrades to "none" on schema drift.
 //   * The Workers row reads the RLM pool out of the same DB (`workers`), keyed
-//     by PROJECT — `rlm.spawn` leaves `workers.session` empty, so a worker is
-//     not this session's. It shows the persisted status plus the age of the
+//     by PROJECT — `task` workers are project rows, not session rows, so a
+//     worker is not this session's. It shows the persisted status plus the
 //     last update; a row the server sweep retired to `timeout` keeps its age,
 //     so the flip reads as history — while the active count covers only
 //     queued/running rows. The authoritative stale verdict stays `harness doctor`'s.
@@ -504,6 +504,11 @@ const HarnessTui = {
       waits: [] as string[],
       waitRows: [] as Rec[],
       waitSig: "",
+      lastSkill: "",
+      lastCompaction: "",
+      lastRisk: "",
+      files: [] as Rec[],
+      vcsKnown: false,
     }
     let sqlite: any = null
     let fs: any = null
@@ -615,9 +620,9 @@ const HarnessTui = {
      *
      * Todos: this session's list wins; with none, the newest list in the project
      * stands in, so the row shows the plan the project is following rather than a
-     * dead "0 items". Workers: PROJECT-wide on purpose — `rlm.spawn` writes a row
-     * before the pool runs it and leaves `workers.session` empty, so a worker
-     * belongs to the project, not to whichever opencode session asked for it.
+     * dead "0 items". Workers: PROJECT-wide on purpose — the server half writes
+     * a row when the `task` tool starts a worker, so a worker belongs to the
+     * project, not to whichever opencode session asked for it.
      * Waits: PROJECT-wide like workers — a countdown belongs to the project, not
      * to the session that started it. `waitSig` is the STABLE identity (label +
      * deadline, not the ticking countdown) so a manual collapse sticks while the
@@ -637,10 +642,24 @@ const HarnessTui = {
         waits: [] as string[],
         waitRows: [] as Rec[],
         waitSig: "",
+        lastSkill: "",
+        lastCompaction: "",
+        lastRisk: "",
+        files: [] as Rec[],
+        vcsKnown: false,
       }
       try {
         if (fs === null) fs = await import("node:fs")
         if (sqlite === null) sqlite = await import("bun:sqlite")
+        try {
+          const uiPath = `${directory}/.opencode/harness/ui-state.json`
+          const current = JSON.parse(fs.readFileSync(uiPath, "utf8"))
+          if (current?.last_skill?.id) out.lastSkill = `${shortSkill(current.last_skill.id)}`
+          if (current?.last_compaction?.chars) out.lastCompaction = `${current.last_compaction.chars} chars`
+          if (current?.last_risk?.risk) out.lastRisk = `${current.last_risk.risk}${current.last_risk.ask ? " · ask" : ""}`
+        } catch {
+          /* no UI state yet */
+        }
         const dbPath = stateDb(directory)
         if (!fs.existsSync(dbPath)) return out
         const db = new sqlite.Database(dbPath, { readonly: true })
@@ -1051,6 +1070,25 @@ const HarnessTui = {
           data.waits = state.waits
           data.waitRows = state.waitRows
           data.waitSig = state.waitSig
+          data.lastSkill = state.lastSkill
+          data.lastCompaction = state.lastCompaction
+          data.lastRisk = state.lastRisk
+        }
+        if (typeof ctx?.vcs?.status === "function") {
+          data.vcsKnown = true
+          try {
+            const rows = await settle(ctx.vcs.status(), SCAN_MS)
+            data.files = Array.isArray(rows)
+              ? rows.map((r: Rec) => ({
+                  file: String(r?.file ?? ""),
+                  status: String(r?.status ?? "?"),
+                  additions: Number(r?.additions ?? 0) || 0,
+                  deletions: Number(r?.deletions ?? 0) || 0,
+                }))
+              : []
+          } catch {
+            data.files = []
+          }
         }
 
         // warm the session store for the next poll (see the note above on why
@@ -1455,6 +1493,7 @@ const HarnessTui = {
                 out.push(`${numfmt(used())} / ${numfmt(data.contextLimit)} in context`)
               }
               out.push(`${data.model ? shortModel(data.model) : "model —"} · agent ${data.agent || "—"}`)
+              if (data.lastCompaction) out.push(`brief: ${data.lastCompaction} retained`)
               return out
             }
             const tokenValue = (): string => {
@@ -1579,9 +1618,9 @@ const HarnessTui = {
                   empty="(none in this session)"
                   tone={(l) => (l.startsWith("◐") ? th.accent : l.startsWith("○") ? th.base : th.muted)}
                 />
-                {/* Project-wide, unlike the rows above: `rlm.spawn` records a
-                    worker before the pool runs it and leaves `session` empty, so
-                    the pool belongs to the project, not to this session. */}
+                {/* Project-wide, unlike the rows above: the server half records a
+                    worker when the `task` tool starts it, so the pool belongs to
+                    the project, not to this session. */}
                 <Row
                   id="workers"
                   label="Workers"
@@ -1631,6 +1670,33 @@ const HarnessTui = {
                   tone={() => th.base}
                 />
                 <Row
+                  id="files"
+                  label="Files"
+                  value={() => {
+                    void view.rev
+                    if (!data.vcsKnown) return "unavailable"
+                    const changed = data.files.length
+                    if (!changed) return "clean"
+                    const add = data.files.reduce((sum, r) => sum + Number(r.additions ?? 0), 0)
+                    const del = data.files.reduce((sum, r) => sum + Number(r.deletions ?? 0), 0)
+                    return `${changed} changed · +${add} -${del}`
+                  }}
+                  valueFg={() => {
+                    void view.rev
+                    return data.files.length ? th.base : th.muted
+                  }}
+                  lines={() => {
+                    void view.rev
+                    if (!data.vcsKnown) return ["(repository state unavailable)"]
+                    if (!data.files.length) return ["(no working-copy changes)"]
+                    return data.files.slice(0, 5).map((r) =>
+                      `${String(r.status ?? "?")[0].toUpperCase()} ${wcut(String(r.file ?? ""), 22)} +${Number(r.additions ?? 0)} -${Number(r.deletions ?? 0)}`,
+                    )
+                  }}
+                  empty="(clean)"
+                  tone={(l) => l.startsWith("(") ? th.muted : th.base}
+                />
+                <Row
                   id="skills"
                   label="Skills"
                   value={() => `${view.skills ?? 0} installed`}
@@ -1644,7 +1710,9 @@ const HarnessTui = {
                     // slow half has not latched, say syncing instead of the
                     // settled "none seeded" line below.
                     if (!data.skills.length && !view.scanned) return ["syncing…"]
-                    return data.skills.map((s) => `▪ ${shortSkill(s)}`)
+                    const out = [] as string[]
+                    if (data.lastSkill) out.push(`● last used ${data.lastSkill}`)
+                    return [...out, ...data.skills.map((s) => `▪ ${shortSkill(s)}`)]
                   }}
                   empty="(none seeded at this location)"
                 />
@@ -1680,7 +1748,9 @@ const HarnessTui = {
                   }}
                   lines={() => {
                     void view.rev
-                    return data.facts
+                    const state = [] as string[]
+                    if (data.lastRisk) state.push(`⚠ last risk: ${data.lastRisk}`)
+                    return [...state, ...data.facts]
                   }}
                   empty="(no durable facts yet)"
                   tone={(l) =>

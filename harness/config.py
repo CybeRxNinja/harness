@@ -13,7 +13,7 @@ import shutil
 import time
 from pathlib import Path
 
-from .paths import project_config_file
+from .paths import project_config_file, state_file
 
 USER_ONLY_KEYS = ("secrets", "token", "trusted_project_dirs", "mcp_env_allowlist", "security")
 
@@ -28,8 +28,9 @@ DEFAULT_CONFIG: dict = {
     "budgets": {"max_turns": 25, "max_tokens": 120000, "max_cost_usd": 2.0,
                 "max_parallel": 2, "max_depth": 1, "worker_timeout_s": 600},
     "compress": {"enabled": True, "threshold": 4000, "intensity": "standard"},
-    # the valid spawn intents; rlm.spawn validates against this list, so a typo
-    # is a refused spawn instead of a worker with an unknown kind
+    # the documented spawn intents; nothing in code validates against this list
+    # (intents() reads it and `harness doctor` reports it) — the agents route
+    # by subagent type, not by category
     "categories": ["quick", "deep", "ultrabrain", "visual", "writing",
                    "unspecified-low", "unspecified-high"],
     "skills": {"write_approval": True, "disabled": ["reverse-*"],
@@ -162,7 +163,10 @@ def set_value(project_dir: str | Path, path: str, value, scope: str = "user") ->
     dest.parent.mkdir(parents=True, exist_ok=True)
     old_data = _load_jsonc(dest) if dest.exists() else {}
     if dest.exists():
-        bdir = dest.parent / "backups"
+        # project backups belong to the state dir (.gitignore / AGENTS.md only
+        # cover .opencode/harness/backups/, so the old .opencode/backups/ was
+        # a config copy nothing ignored); the user copy stays beside its file
+        bdir = state_file(project_dir, "backups") if scope == "project" else dest.parent / "backups"
         bdir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(dest, bdir / f"harness-{int(time.time())}.jsonc")
 
