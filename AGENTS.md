@@ -69,9 +69,11 @@ function you touch and fix it once where all callers route through.
 - Single-step work needs no list. Don't write one to look busy.
 
 ## Memory
-- `AGENTS.md > MEMORY.md`. Recall hints are verify-before-rely.
+- `AGENTS.md > MEMORY.md`. Recall hints are verify-before-rely. The lessons file is
+  `.opencode/harness/MEMORY.md` (project state, never committed) — the precedence
+  is about ranking, not location.
 - Capture is automatic: every turn stores its durable lines (decisions, root causes, blockers, outcomes) as facts + a progress note, deduped and capped. Don't narrate what memory already records; don't ask to save.
-- `harness memory refine` needs 2+ distinct evidence excerpts; once met, the lesson auto-promotes into `MEMORY.md` (cap `memory.cap_lines`). One excerpt stays staged — review, don't re-ask.
+- `harness memory refine` needs 2+ distinct evidence excerpts; once met, the lesson auto-promotes into `.opencode/harness/MEMORY.md` (cap `memory.cap_lines`). One excerpt stays staged — review, don't re-ask.
 - Progress closes itself: a turn whose test/lint run came back clean ticks the active plan box. Never tick a box on an unverified claim.
 - Never print secrets. Keys via env/setup only — and the memory layer refuses credentials outright.
 

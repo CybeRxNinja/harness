@@ -1,7 +1,8 @@
 # Memory
 
-`MEMORY.md` (project root), below `AGENTS.md` in the precedence chain, plus SQLite facts
-and FTS5 transcripts under `<project>/.opencode/harness/`. Per project; global
+`MEMORY.md` lives at `<project>/.opencode/harness/MEMORY.md`, next to the SQLite
+facts and FTS5 transcripts and above `AGENTS.md` in the precedence chain. It is
+project state, not a published doc, so it is never committed. Global
 `~/.harness/` holds only global skills and user config.
 
 ## It fills itself
@@ -40,9 +41,18 @@ evidence rather than by a human. Three identical excerpts still count as one.
 
 `MEMORY.md` is kept inside `memory.cap_lines` (default 200) by the writer:
 `memory approve`, `auto_refine` and lesson promotion all go through it, and the
-oldest entries are the ones dropped. `memory.file` is `<project>/MEMORY.md` —
-the file the precedence chain actually reads (approvals used to land in
-`.opencode/harness/MEMORY.md`, which nothing loaded).
+oldest entries are the ones dropped.
+
+`memory.file` is `<project>/.opencode/harness/MEMORY.md` — the one location
+`memory_file()` hands every reader and writer. It had drifted twice: approvals
+landed in `.opencode/harness/MEMORY.md` while the precedence chain read the
+project root, and the fix for that was to publish a per-project file in the
+repo. Neither is right. A root `MEMORY.md` is per-project state masquerading
+as a checked-in doc — it gets committed, published and then forks between
+machines — while every other harness artifact already lives in
+`.opencode/harness/`. The lessons file now joins them there: the same file the
+chain reads, in a directory git already ignores, and `memory_file()` is the
+single answer so it cannot drift again.
 
 ```bash
 harness memory search "rlm mailbox"   # term recall over facts + transcripts

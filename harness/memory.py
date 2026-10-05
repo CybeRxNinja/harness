@@ -11,22 +11,28 @@ Four defects this module used to have, all fixed here:
    (decisions, root causes, migrations, blockers) and stores them, deduped and
    capped, so the next session starts with them.
 3. **Lessons were written where nothing read them.** `harness memory refine`
-   and `harness skills approve` appended to `<state>/.opencode/harness/MEMORY.md`
-   while the durable file is the project's `MEMORY.md`. `memory_file()` is now
-   the single answer to where lessons go.
+   and `harness skills approve` disagreed with each other about the file, and
+   the repo root is a published location no per-project state belongs in.
+   `memory_file()` is now the single answer, and it points at
+   `<project>/.opencode/harness/MEMORY.md` beside the other harness state.
 4. **The `memory` config block did nothing.** `enabled`, `cap_lines` and
    `retention_days` were read by nothing; they are all honored now (cap by the
    writer, retention by `prune()`).
 
-`MEMORY.md > AGENTS.md` in the project's precedence chain, so promotions are
-evidence-gated: a lesson is only auto-written when at least `min_evidence`
-distinct excerpts back it (`/refine`'s rule). Everything else stays staged.
+The lessons file ranks above `AGENTS.md` in the project's precedence chain, so
+promotions are evidence-gated: a lesson is only auto-written when at least
+`min_evidence` distinct excerpts back it (`/refine`'s rule). Everything else
+stays staged.
 """
 from __future__ import annotations
 
 import re
 import time
 from pathlib import Path
+
+from .paths import state_file
+
+MEMORY_NAME = "MEMORY.md"
 
 MAX_FACT_LEN = 1000
 MAX_EVIDENCE_LEN = 8000
@@ -70,8 +76,14 @@ def is_secretish(text: str) -> bool:
 
 
 def memory_file(root: str | Path) -> Path:
-    """Where lessons live: <root>/MEMORY.md (read by AGENTS.md's chain)."""
-    return Path(root).resolve() / "MEMORY.md"
+    """Where lessons live: <project>/.opencode/harness/MEMORY.md.
+
+    Project state, not a published doc: it sits beside sessions.db so nothing
+    per-project is committed, and so every other harness artifact is in one
+    place. `AGENTS.md`'s precedence chain still ranks the lessons above
+    `AGENTS.md` — the file moved, the rule did not.
+    """
+    return state_file(root, MEMORY_NAME)
 
 
 def terms(query: str) -> list[str]:

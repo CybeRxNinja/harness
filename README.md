@@ -35,7 +35,7 @@ and re-runnable locally (the former live smoke is removed):
 | TUI half is real (panel, chip, commands) | the smoke asserted `features.tui` — set only when a `tui.tsx` entrypoint is present |
 | 19 bundled skills seeded into opencode's skill store | the smoke counted them against a live server |
 | plugin is visible in the Plugins panel | the TUI panel filters on `features.tui`; the directory install ships both entrypoints |
-| memory remembers without being asked | `tests/test_memory_auto.py`: durable facts + progress capture; 2-evidence lessons auto-promote to `MEMORY.md`; credentials refused (live sessions capture via the plugin context hook) |
+| memory remembers without being asked | `tests/test_memory_auto.py`: durable facts + progress capture; 2-evidence lessons auto-promote to `.opencode/harness/MEMORY.md`; credentials refused (live sessions capture via the plugin context hook) |
 | dangerous commands ask, safe ones don't | `tests/test_risk.py`: 94 ask-rules generated from `harness/risk.py` (`git push`, `rm -rf`, `DROP TABLE`, deploys) — greps, diffs, fetches, tests never prompt |
 | worker rows reach a terminal state | `tests/test_rlm.py`: `is_terminal` / `worker_timeout` readers behind `harness doctor` (live routing is opencode's native `task` tool) |
 | entrypoints never break a boot | `tests/test_plugin.py` transpiles both files with `Bun.Transpiler`; bad `setup()` returns are pinned by tests |
@@ -116,7 +116,8 @@ An agent asked to install the plugin should follow [`docs/install-for-agents.md`
 
 ```
 <project>/.opencode/harness/   sessions.db (facts, todos, workers, waits),
-                               MEMORY.md, backups
+                               MEMORY.md, STATUS.md, backups  (local state,
+                               never committed)
 ~/.config/opencode/            user config dir, including native agents/harness-* and plugins/harness
 ~/.harness/                    global skills, user config
 ```
@@ -152,7 +153,8 @@ docs/               one page per feature (start at docs/quickstart.md, docs/plug
 `docs/quickstart.md` · `docs/plugin.md` · `docs/tui.md` · `docs/memory.md` ·
 `docs/rlm.md` · `docs/security.md` · `docs/config.md` · `docs/skills.md` ·
 `docs/agents.md` · `docs/mcp.md` · `docs/compression.md` ·
-`AGENTS.md` (build discipline) · `MEMORY.md` (auto-promoted lessons)
+`AGENTS.md` (build discipline) · `.opencode/harness/MEMORY.md` (per-project
+auto-promoted lessons — local state, not a doc)
 
 ## License
 

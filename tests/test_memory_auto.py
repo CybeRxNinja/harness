@@ -256,9 +256,15 @@ def test_evidence_only_counts_a_lesson_once(con, root):
     assert M.memory_file(root).read_text().count("[a-lesson]") == 1
 
 
-def test_memory_file_is_the_projects_memory_md_not_hidden_state(root):
+def test_memory_file_lives_in_the_harness_state_dir_not_the_repo_root(root):
+    """Per-project state is never published: the exact path is pinned.
+
+    A `MEMORY.md` at the project root would be a committed per-project file, so
+    the durable lessons live in `.opencode/harness/` beside sessions.db.
+    """
     from harness import memory as M
-    assert M.memory_file(root) == root / "MEMORY.md"
+    assert M.memory_file(root) == root / ".opencode" / "harness" / "MEMORY.md"
+    assert M.memory_file(root).parent != root
 
 
 def test_manual_approval_writes_the_same_file_and_caps_it(con, root):
@@ -294,8 +300,9 @@ def test_cli_memory_show_and_refine_use_the_project_memory_file(root, monkeypatc
     con.close()
     assert main(["--root", str(root), "memory", "refine", "--name", "cli-lesson", "--session", "default"]) == 0
     assert main(["--root", str(root), "memory", "show"]) == 0
-    assert (root / "MEMORY.md").exists() or True  # staged until 2 excerpts
     import harness.memory as M
+    # one excerpt stays staged, so nothing is written to the state dir yet
+    assert not M.memory_file(root).exists()
     con = connect(root)
     assert M.evidence(con, "cli-lesson")
     con.close()

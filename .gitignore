@@ -13,6 +13,7 @@ __pycache__/
 .opencode/harness/ledger.jsonl
 .opencode/harness/plans/
 .opencode/harness/MEMORY.md
+.opencode/harness/STATUS.md
 .opencode/harness/serve.log
 .opencode/harness/harness.jsonc
 .venv/

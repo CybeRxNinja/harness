@@ -18,6 +18,7 @@
    stock opencode. Each directory gets its own `.opencode/harness/` state.
 
 Key files: `AGENTS.md` (persona + build ladder + rules, highest precedence),
-`MEMORY.md` (auto-promoted lessons), `harness.jsonc` layers
+`.opencode/harness/MEMORY.md` (auto-promoted lessons, per-project state),
+`harness.jsonc` layers
 (defaults < `~/.harness` < `.opencode/harness.jsonc` < env), budgets enforced.
 See `docs/plugin.md` for the opencode plugin install walkthrough.
