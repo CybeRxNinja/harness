@@ -66,6 +66,14 @@ def test_recall_ranks_facts_matching_more_terms_first(con):
     assert "mailbox" in top[0]["text"]
 
 
+def test_recall_promotes_done_over_generic_turns(con):
+    from harness import memory as M
+    M.save_fact(con, "pytest tests/test_risk.py verifies the generic risk flow", "turn")
+    M.save_fact(con, "pytest tests/test_risk.py verifies the verified risk flow", "done")
+    hits = M.recall(con, "pytest tests/test_risk.py risk", 3)
+    assert hits[0]["source"] == "done"
+
+
 def test_recall_uses_session_history_too(con):
     import time as _t
     from harness import memory as M
@@ -148,7 +156,7 @@ def test_capture_turn_remembers_facts_and_progress(con, root, cfg):
     out = M.capture_turn(con, "s1", text, verified=True, cfg=cfg, root=root)
     assert out["facts"] and out["verified"] is True
     sources = {f["source"] for f in _recent(con, 5)}
-    assert "turn" in sources and "done" in sources
+    assert "done" in sources and "done" in {r[0] for r in con.execute("SELECT DISTINCT source FROM facts").fetchall()}
 
 
 def test_capture_turn_notes_progress_without_evidence(con, root, cfg):

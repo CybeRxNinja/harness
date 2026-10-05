@@ -9,8 +9,7 @@ One source of truth, used by both halves of the story:
 
   * `assess(action)` — the classifier. The `risk_check` tool exposes it to the
     model, and the loop consults it before auto-approving.
-  * `opencode_permission()` — the `permission` block `ensure_opencode_config`
-    merges into opencode.json, so the rule the user sees in a prompt is
+  * `opencode_permission()` — the `permission` block rendered into harness-* Markdown agent files, so the rule the user sees in a prompt is
     literally the rule this module classified.
 
 opencode evaluates granular rules by pattern with the LAST match winning, so

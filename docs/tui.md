@@ -5,18 +5,20 @@ TUI, no AppImage, no fork. There is no relay: models come from your opencode
 providers. That observability lives in opencode session transcripts; project state
 lives under `.opencode/harness/`.
 
-- `harness tui` ensures opencode config + plugin, then execs `opencode`
+- `harness tui` ensures native `harness-*` agents + plugin, then execs `opencode`
   (auto-detected on `PATH`). `--setup-only` only ensures setup and prints
   paths (then run `opencode` yourself).
 - `harness plugin path` prints both shipped entrypoints (`harness.ts`, `tui.tsx`);
   `harness plugin install` copies them to `~/.config/opencode/plugins/harness/`
   (auto-loaded by opencode v2). A bare `harness.ts` is server-only and never
   appears in the TUI plugin list, which filters on `features.tui`.
-- Agents `orchestrator/ask/debug/review` + native `plan` come from
-  `opencode.json` (merged by setup) with no model pins — they inherit your
+- Agents `harness-orchestrator/harness-ask/harness-debug/harness-review` +
+  native `harness-plan` come from native Markdown files under
+  `~/.config/opencode/agents/`, with no model pins — they inherit your
   configured default model. The orchestrator's `mode: subagent` specialists
-  (explore, librarian, plan-consultant, plan-reviewer, code-reviewer,
-  test-engineer, security-auditor) come from the same merge.
+  (`harness-explore`, `harness-librarian`, `harness-plan-consultant`,
+  `harness-plan-reviewer`, `harness-code-reviewer`, `harness-test-engineer`,
+  `harness-security-auditor`) come from the same managed files.
 
 ## Thinking / reasoning
 

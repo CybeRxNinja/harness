@@ -2,36 +2,27 @@ def test_tui_config_merge(tmp_path, monkeypatch):
     import json
     cfgdir = tmp_path / "cfg"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfgdir))
-    from harness.cli import ensure_opencode_config
-    dest = tmp_path / "cfg" / "opencode" / "opencode.json"
+    dest = cfgdir / "opencode" / "opencode.json"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps({"model": "openai/gpt", "provider": {"openai": {}}}))
-    out = ensure_opencode_config()
-    d = json.loads(open(out).read())
-    assert d["model"] == "openai/gpt"  # user value kept, never pinned
-    assert "harness" not in d.get("provider", {})  # no relay provider
-    assert set(("orchestrator", "ask", "debug", "review")) <= set(d["agent"])
-    # specialized subagents merge too: the task tool can only route to agents
-    # opencode knows about, and the built-in fallback is `general`
-    assert {"explore", "code-reviewer", "test-engineer"} <= set(d["agent"])
-    assert d["agent"]["code-reviewer"]["mode"] == "subagent"
-    for spec in d["agent"].values():  # agents inherit the user default
-        assert "model" not in spec
-        # relay ids only ever appeared as a value ("harness/auto-fastest"),
-        # so require the quote — a prompt may legitimately name a path like
-        # .opencode/harness/tmp/
-        assert '"harness/' not in json.dumps(spec)
-    # idempotent
-    ensure_opencode_config()
-    d2 = json.loads(open(out).read())
-    assert d2 == d
+    from harness.agents import install_managed_agents, agents_dir, bundled_agents
+    install_managed_agents()
+    assert json.loads(dest.read_text()) == {"model": "openai/gpt", "provider": {"openai": {}}}
+    names = {p.stem for p in agents_dir().glob("harness-*.md")}
+    assert {"harness-orchestrator", "harness-ask", "harness-debug", "harness-review"} <= names
+    assert {"harness-explore", "harness-code-reviewer", "harness-test-engineer"} <= names
+    cr = (agents_dir() / "harness-code-reviewer.md").read_text()
+    assert 'mode: "subagent"' in cr
+    for name in bundled_agents():
+        assert f'harness-{name}' in names
+        assert "model" not in json.dumps(bundled_agents()[name])
 
 
 def test_merge_cleans_legacy_relay(tmp_path, monkeypatch):
     import json
     cfgdir = tmp_path / "cfg"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfgdir))
-    from harness.cli import ensure_opencode_config
+    from harness.agents import install_managed_agents
     dest = tmp_path / "cfg" / "opencode" / "opencode.json"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps({
@@ -39,12 +30,11 @@ def test_merge_cleans_legacy_relay(tmp_path, monkeypatch):
         "provider": {"harness": {"options": {"baseURL": "http://127.0.0.1:8787/v1"}}},
         "agent": {"orchestrator": {"model": "harness/tag:reasoning", "prompt": "mine"}},
     }))
-    out = ensure_opencode_config()
-    d = json.loads(open(out).read())
-    assert "harness" not in d.get("provider", {})
-    assert "model" not in d  # harness default dropped (user sets their own)
-    assert d["agent"]["orchestrator"].get("prompt") == "mine"  # user keys kept
-    assert "model" not in d["agent"]["orchestrator"]  # harness pin dropped
+    install_managed_agents()
+    # native agent files are installed, but the user's default file is not
+    # read or modified by the installer.
+    assert json.loads(dest.read_text())["provider"]["harness"]["options"]["baseURL"]
+    assert "model" in json.loads(dest.read_text())
 
 
 def test_find_opencode(tmp_path, monkeypatch):

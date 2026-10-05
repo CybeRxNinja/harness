@@ -149,9 +149,9 @@ def _bundled_opencode_json() -> dict:
     """harness-opencode.json from repo tree, installed package data, or inline fallback.
 
     Carries the permission ANCHORS (edit/task/webfetch/external_directory) but
-    deliberately no `bash` value: the shell map is generated from risk.py by
-    `ensure_opencode_config`, so the policy the model is told about and the rule
-    opencode enforces are the same object.
+    deliberately no `bash` value: the shell map is added from risk.py when
+    Harness renders native Markdown agent files, so the rule the model sees
+    and the rule opencode enforces come from the same source.
     """
     import json as _j
     from pathlib import Path as _P
@@ -173,160 +173,9 @@ def _bundled_opencode_json() -> dict:
     return {"agent": {}}
 
 
-# First lines of agent prompts harness shipped in EARLIER releases: a config
-# still opening with one of these is harness-originated, so refreshed guidance
-# reaches it (setdefault alone never would — it only fills what is missing).
-# Any other opening line is the owner's rewrite and is left untouched.
-# MAINTENANCE: when you change a prompt's FIRST LINE, append the old line
-# here; edits that only append paragraphs need no entry.
-LEGACY_PROMPT_HEADS = {
-    "orchestrator": frozenset({
-        "You are the ORCHESTRATOR. Never write product code yourself. Decompose work, spawn parallel subagents via the task tool (one responsibility each), merge their diffs, and verify with tests before done. Keep context lean: ask for SUMMARY+DIFF only.",
-        "You are the ORCHESTRATOR. Never write product code yourself. Decompose work, spawn parallel subagents via the task tool (one responsibility each), merge their diffs, and verify with tests before done. Keep context lean: ask for SUMMARY+DIFF only. Discover procedures with the harness skills_list/skill_view tools and recall durable facts with memory_recall before acting.",
-        "You are the ORCHESTRATOR. Never write product code yourself. Decompose work, spawn parallel subagents via the task tool (one responsibility each), merge their diffs, and verify with tests before done. Keep context lean: ask for SUMMARY+DIFF only. Discover procedures with the harness-skills MCP tools (skills_list, then skill_view) and recall durable facts with memory_recall before acting.",
-    }),
-}
-
-
 def ensure_opencode_config() -> str:
-    """Merge harness agents into opencode.json. Never clobbers user keys.
-
-    No provider, no model pinning: agents inherit the user's configured
-    opencode default model. The relay is retired (see git history)."""
-    import json as _j
-    import shutil as _sh
-    import time as _t
-    dest = _opencode_config_path()
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        cur = _j.loads(dest.read_text()) if dest.exists() else {}
-    except Exception:
-        cur = {}
-    if dest.exists():
-        _sh.copy2(dest, dest.with_suffix(f".bak-{int(_t.time())}.json"))
-    want = _bundled_opencode_json()
-    agents = cur.setdefault("agent", {})
-    for name, spec in want.get("agent", {}).items():
-        node = agents.setdefault(name, {})
-        for k, v in spec.items():
-            # `permission` merges one level deeper: setdefault on the whole
-            # dict meant an agent that already had one never received a newly
-            # shipped anchor (webfetch/websearch/external_directory), so those
-            # only ever reached fresh installs.
-            if k == "permission" and isinstance(v, dict) and isinstance(node.get(k), dict):
-                for pk, pv in v.items():
-                    node[k].setdefault(pk, pv)
-            else:
-                node.setdefault(k, v)
-    # `prompt` refresh: guidance improvements (lane discipline, lean-context
-    # rules) must reach installs that already carry the agent — setdefault
-    # alone leaves them on the stale prompt forever. The tell is the opening
-    # line: if it still matches the line THIS build ships (or a line a
-    # previous release shipped, see LEGACY_PROMPT_HEADS), the prompt is
-    # harness-originated and is brought up to date; any other opening is the
-    # owner's rewrite and stays. Every run writes a .bak of opencode.json
-    # first, and prompt edits should APPEND paragraphs rather than rewrite
-    # line 1, so the tell keeps working.
-    refreshed = []
-    for _name, _spec in want.get("agent", {}).items():
-        _prompt = _spec.get("prompt", "")
-        _node = agents.get(_name)
-        if not isinstance(_node, dict) or not isinstance(_prompt, str) or not _prompt:
-            continue
-        _cur = _node.get("prompt")
-        if not (isinstance(_cur, str) and _cur != _prompt):
-            continue
-        _head = _prompt.split("\n", 1)[0].strip()
-        _cur_head = _cur.split("\n", 1)[0].strip()
-        if _cur_head == _head or _cur_head in LEGACY_PROMPT_HEADS.get(_name, ()):
-            _node["prompt"] = _prompt
-            refreshed.append(_name)
-    # Shell policy is GENERATED, not shipped in the JSON (see risk.py): the
-    # destructive-command list is the one thing that must not drift between the
-    # classifier the model consults and the rule opencode enforces. A blanket
-    # "ask" prompted for reads and greps exactly as loudly as `git push`, which
-    # trains the owner to approve reflexively; the generated map allows the
-    # former and asks only for the latter. Migration for upgraders:
-    #   * `bash: "deny"` (the original read-only agents) removed the `shell`
-    #     tool opencode advertises, and zen's free-tier gate 403s any request
-    #     without it — every free model failed under `ask`/`review`.
-    #   * a bare "ask" was the fix for that, and is now replaced by the map.
-    # Only a bare string (a harness-shipped value) is rewritten: a user's own
-    # permission object is left exactly as they set it.
-    from . import risk as _risk
-    migrated = []
-    for _name in want.get("agent", {}):
-        _node = agents.get(_name)
-        if not isinstance(_node, dict):
-            continue
-        _perm = _node.get("permission")
-        if not isinstance(_perm, dict):
-            continue
-        _bash = _perm.get("bash")
-        if "bash" not in _perm:
-            # Shipped JSON carries no bash value and the anchor merge above
-            # only fills keys the JSON ships, so a fresh install (or an old
-            # config that never gained one) leaves the agent with no `shell`
-            # tool and zen's free-tier gate 403s it. Only the missing key is
-            # filled: a bash dict the owner wrote (no harness anchor, below)
-            # is never touched.
-            _perm["bash"] = _risk.bash_permission_map()
-            migrated.append(f"{_name}: bash missing -> generated (shell tool advertised; safe commands run, destructive ones ask)")
-        elif isinstance(_bash, str):
-            _perm["bash"] = _risk.bash_permission_map()
-            migrated.append(f"{_name}: bash {_bash} -> generated (safe commands run, destructive ones ask)")
-        elif isinstance(_bash, dict):
-            # An ALREADY-generated map from an older build would keep the old
-            # rules forever (setdefault never rewrites it) — new ask rules
-            # (installs, outside-project scratch) must reach installs that
-            # already carry one. The harness-only anchor key tells a map THIS
-            # harness generated from the owner's own permission object, which
-            # is left exactly as they set it (a .bak is written every run).
-            _new_map = _risk.bash_permission_map()
-            if "harness checkpoint restore" in _bash and _bash != _new_map:
-                _perm["bash"] = _new_map
-                migrated.append(f"{_name}: generated shell map refreshed (rules added since install)")
-    # The read-only floors are harness-owned negatives: never a prompt, because
-    # a prompt implies a "yes" could unlock them. Seeded only when absent so a
-    # user who deliberately re-enabled edits keeps their choice.
-    for _name in ("ask", "review", "orchestrator"):
-        _node = agents.get(_name)
-        if isinstance(_node, dict) and isinstance(_node.get("permission"), dict):
-            _node["permission"].setdefault("edit", "deny")
-    # Legacy relay cleanup for upgraders: provider.harness and harness/* model
-    # pins are removed (agents inherit the user default now). User-owned keys
-    # are never touched.
-    try:
-        if isinstance(cur.get("provider"), dict) and "harness" in cur["provider"]:
-            del cur["provider"]["harness"]
-        if isinstance(cur.get("agent"), dict):
-            for _name, _spec in cur["agent"].items():
-                if isinstance(_spec, dict) and str(_spec.get("model", "")).startswith("harness/"):
-                    del _spec["model"]
-        if str(cur.get("model", "")).startswith("harness/"):
-            del cur["model"]
-    except Exception:
-        pass
-    # LSP on unless the user already decided (true enables built-ins;
-    # explicit false/object is always respected).
-    cur.setdefault("lsp", True)
-    # NOTE: no mcp.harness-skills block here on purpose — the plugin exposes
-    # skills_list/skill_view/memory_recall as NATIVE tools (no extra process,
-    # no stdio framing to break). The stdio server (`harness mcp`) remains
-    # for non-opencode MCP clients only.
-    try:
-        if isinstance(cur.get("mcp"), dict) and "harness-skills" in cur["mcp"]:
-            del cur["mcp"]["harness-skills"]
-    except Exception:
-        pass
-    if refreshed:
-        print("harness: refreshed guidance for harness-originated agent prompts — "
-              + ", ".join(refreshed), file=sys.stderr)
-    if migrated:
-        print("harness: shell permissions regenerated from the risk policy — "
-              + "; ".join(migrated), file=sys.stderr)
-    dest.write_text(_j.dumps(cur, indent=2) + "\n")
-    return str(dest)
+    """No-op shim for old callers. Harness no longer merges into opencode.json."""
+    return str(_opencode_config_path())
 
 
 def _find_opencode() -> str | None:
@@ -460,11 +309,11 @@ def download_plugin(release: str = "latest") -> Path:
 
 def install_plugin() -> Path:
     """Install the shipped plugin into opencode's auto-loaded plugins dir as
-    <plugins>/harness/{server.ts,tui.tsx} and drop any legacy v1
-    'harness/plugin' specs from opencode.json. Returns the installed dir.
+    <plugins>/harness/{server.ts,tui.tsx}. Returns the installed dir.
 
     Stock opencode v2 auto-loads every plugin from that dir, so no config
-    entry is required (the legacy `plugin` array specs are pruned here).
+    entry is required. Old `harness/plugin` specs in opencode.json are reported
+    by doctor but left in place unless explicitly cleaned up.
     The directory form (not a bare .ts) is what makes the TUI's plugin list
     show harness: the list filters on features.tui, set only for plugins
     with a `tui` entrypoint."""
@@ -479,29 +328,36 @@ def install_plugin() -> Path:
         raise FileNotFoundError("plugin source missing from install (dev: run from repo)")
     dest_dir = _install_dir(plugdir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    _sh.copy2(src_server, dest_dir / "server.ts")
+
+    def _sync(src: Path, name: str) -> None:
+        """Copy unless the installed bytes are already identical.
+
+        Keeps the installed mtime on a no-change reinstall, so one is
+        visibly a no-op (and opencode has no reason to reload)."""
+        dst = dest_dir / name
+        try:
+            if dst.is_file() and dst.read_bytes() == src.read_bytes():
+                return
+        except OSError:
+            pass
+        _sh.copy2(src, dst)
+
+    _sync(src_server, "server.ts")
     if src_tui.exists():
-        _sh.copy2(src_tui, dest_dir / "tui.tsx")
+        _sync(src_tui, "tui.tsx")
     _remove_legacy_single_file(plugdir)
-    dest = _opencode_config_path()
-    try:
-        cur = _j.loads(dest.read_text()) if dest.exists() else {}
-    except Exception:
-        cur = {}
-    plugs = cur.setdefault("plugin", [])
-    before = len(plugs)
-    plugs[:] = [p for p in plugs
-                if not (isinstance(p, str) and "harness/plugin" in p)]
-    if len(plugs) != before or not dest.exists():
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(_j.dumps(cur, indent=2) + "\n")
+    # Old Harness installs could leave `plugin` specs in opencode.json. Do not
+    # rewrite the user's default file here; report the legacy IDs separately.
     return dest_dir
 
 
 def uninstall_plugin() -> list[str]:
-    """Remove everything `install` manages: the plugin dir (plus any legacy
-    single-file install) and harness-merged agent blocks. User-owned keys are
-    never touched: agents with a user-set (non-harness) model pin are kept.
+    """Remove everything `install` manages: the plugin dir, the legacy
+    single-file install, and the generated harness-* agent files.
+
+    It intentionally NEVER rewrites opencode.json: if an old Harness install
+    left a merged config, `harness doctor` reports it, and only an explicit
+    legacy-cleanup action should remove it.
     Returns human-readable lines."""
     import json as _j
     import shutil as _sh
@@ -514,39 +370,9 @@ def uninstall_plugin() -> list[str]:
     legacy = _remove_legacy_single_file(plugdir)
     if legacy:
         done.append(f"removed legacy plugin file {legacy}")
-    dest = _opencode_config_path()
-    try:
-        cur = _j.loads(dest.read_text()) if dest.exists() else {}
-    except Exception:
-        cur = {}
-    changed = False
-    if isinstance(cur.get("provider"), dict) and "harness" in cur["provider"]:
-        del cur["provider"]["harness"]
-        done.append("removed provider.harness")
-        changed = True
-    if isinstance(cur.get("agent"), dict):
-        # keep in step with harness-opencode.json (install merges every agent
-        # in that file; uninstall has no way to know which ones it added)
-        for name in ("orchestrator", "ask", "debug", "review", "plan",
-                     "explore", "librarian", "plan-consultant", "plan-reviewer",
-                     "code-reviewer", "test-engineer", "security-auditor"):
-            if name in cur["agent"] and isinstance(cur["agent"][name], dict):
-                model = str(cur["agent"][name].get("model", ""))
-                if not model or model.startswith("harness/"):
-                    del cur["agent"][name]
-                    done.append(f"removed agent.{name}")
-                    changed = True
-    if str(cur.get("model", "")).startswith("harness/"):
-        cur.pop("model", None)
-        done.append("removed default model (was harness/*)")
-        changed = True
-    if isinstance(cur.get("mcp"), dict) and "harness-skills" in cur["mcp"]:
-        del cur["mcp"]["harness-skills"]
-        done.append("removed mcp.harness-skills")
-        changed = True
-    if changed:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(_j.dumps(cur, indent=2) + "\n")
+    from .agents import uninstall_managed_agents
+    for path in uninstall_managed_agents():
+        done.append(f"removed managed agent file {path}")
     if not done:
         done.append("nothing harness-owned found")
     return done
@@ -561,9 +387,10 @@ def cmd_plugin(args) -> int:
         else:
             plug = install_plugin()
         try:
-            ensure_opencode_config()
+            from .agents import install_managed_agents
+            install_managed_agents()
         except Exception as e:
-            print(f"harness: provider merge failed ({e}) — continuing", file=sys.stderr)
+            print(f"harness: managed agent install failed ({e}) — continuing", file=sys.stderr)
         print(f"plugin installed at {plug} (stock opencode v2, no fork needed)")
         print("restart opencode/TUI to load it; agents use your opencode default model")
     elif args.plugin_action == "uninstall":
@@ -580,27 +407,30 @@ def cmd_tui(args) -> int:
     from .skills import ensure_seed_skills
     ensure_seed_skills()
     if args.dry_run:
-        print(f"would: merge {_opencode_config_path()}, install plugin, exec opencode")
+        from .agents import agents_dir
+        print(f"would: write {agents_dir()}/harness-*.md, install plugin, exec opencode")
         return 0
     try:
-        cfg_path = ensure_opencode_config()
+        from .agents import install_managed_agents, agents_dir
+        agent_paths = install_managed_agents()
     except Exception as e:
-        print(f"harness: config merge failed ({e}) — continuing", file=sys.stderr)
-        cfg_path = _opencode_config_path()
+        from .agents import agents_dir
+        print(f"harness: managed agent install failed ({e}) — continuing", file=sys.stderr)
+        agent_paths = []
     try:
         plug = install_plugin()
     except Exception as e:
         print(f"harness: plugin install failed ({e}) — continuing", file=sys.stderr)
         plug = Path(__file__).resolve().parent / "plugin" / "harness.ts"
     if args.setup_only:
-        print(f"opencode config: {cfg_path}")
+        print(f"managed agents: {agents_dir()}/harness-*.md")
         print(f"harness plugin: {plug}")
         return 0
     binary = _find_opencode()
     if not binary:
         print("opencode binary not found. Install stock opencode, e.g.:")
         print("  npm create opencode@latest   (or: npx opencode)")
-        print(f"(opencode.json wired at {cfg_path}; harness plugin at {plug})")
+        print(f"(managed agents wired at {agents_dir()}/harness-*.md; harness plugin at {plug})")
         return 1
     print(f"launching {binary} (agents inherit your opencode default model; no relay)")
     # LSP: 2.0.x ships the `lsp` tool ungated; newer builds gate it behind
@@ -621,6 +451,24 @@ def cmd_tui(args) -> int:
     except OSError as e:
         print(f"harness: cannot confine temp to {scratch} ({e}) — system temp in use", file=sys.stderr)
     os.execvp(binary, [binary])
+
+
+def cmd_risk(args) -> int:
+    from . import risk as R
+    if args.risk_action == "check":
+        text = args.text
+        if not text.strip():
+            text = sys.stdin.read().strip()
+        if not text:
+            print("risk check needs a command or action", file=sys.stderr)
+            return 2
+        out = R.assess(text, kind=args.kind, path=args.path)
+        if args.json:
+            print(json.dumps(out, indent=2))
+        else:
+            print(json.dumps(out, indent=2))
+        return 0
+    return 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -652,6 +500,13 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--days", type=int, default=30,
                    help="retention window for `memory prune`")
     m.set_defaults(fn=cmd_memory)
+    r = sub.add_parser("risk")
+    r.add_argument("risk_action", choices=["check"])
+    r.add_argument("text", nargs="?", default="")
+    r.add_argument("--kind", default="auto")
+    r.add_argument("--path", default="")
+    r.add_argument("--json", action="store_true")
+    r.set_defaults(fn=cmd_risk)
     su = sub.add_parser("setup", help="install seed skills, check the model backend")
     su.add_argument("--update-skills", action="store_true",
                     help="overwrite installed seed skills with the packaged "
@@ -681,7 +536,7 @@ def main(argv=None) -> int:
               f"from your opencode config (`harness doctor` to verify).", file=sys.stderr)
         return 2
     if argv and not argv[0].startswith("-") and argv[0] not in (
-            "doctor", "config", "skills", "memory", "setup", "tui", "plugin"):
+            "doctor", "config", "skills", "memory", "setup", "tui", "plugin", "risk"):
         print(f"harness: unknown command {argv[0]!r} (retired headless commands: "
               f"chat, plan, checkpoint, mcp — live sessions run in opencode)",
               file=sys.stderr)

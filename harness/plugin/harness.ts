@@ -192,6 +192,28 @@ function stateDb(projectDir: string): string {
   return `${projectDir}/.opencode/harness/sessions.db`
 }
 
+async function writeUiState(projectDir: string, update: Rec): Promise<void> {
+  try {
+    const fs = await import("node:fs/promises")
+    const pathMod = await import("node:path")
+    const dir = pathMod.join(projectDir, ".opencode", "harness")
+    const target = pathMod.join(dir, "ui-state.json")
+    let current: Rec = {}
+    try {
+      current = JSON.parse(await fs.readFile(target, "utf8"))
+    } catch {
+      current = {}
+    }
+    const next = { ...current, ...update }
+    const tmp = `${target}.tmp`
+    await fs.mkdir(dir, { recursive: true })
+    await fs.writeFile(tmp, JSON.stringify(next, null, 2))
+    await fs.rename(tmp, target)
+  } catch {
+    /* the panel must survive any UI-state write failure */
+  }
+}
+
 /**
  * Escape a raw term for a LIKE pattern: `%`, `_` and `\` in the query must
  * match literally, never act as wildcards.
@@ -218,9 +240,10 @@ const factLine = (r: Rec) => `- [${r.source}] ${String(r.text).slice(0, 200)}`
  * step"/"todo:" — exactly the status-report chatter this demotes).
  */
 const MEM_NEEDLE =
-  /\b(decision|decided|root cause|bug|blocker|blocked|blocking|fix|fixes|fixed|regression|security|vulnerab\w*|exploit\w*|leak\w*|secret|credential|breach)\b/i
+  /\b(decision|decided|root cause|bug|blocker|blocked|blocking|fix|fixes|fixed|regression|security|vulnerab\w*|exploit\w*|leak\w*|secret|credential|breach|done|verified|success)\b/i
 
-const isNeedle = (r: Rec): boolean => MEM_NEEDLE.test(String(r?.text ?? ""))
+const isNeedle = (r: Rec): boolean =>
+  MEM_NEEDLE.test(String(r?.text ?? "")) || String(r?.source ?? "") === "done"
 
 /**
  * THE fact selection, shared by the compaction brief and memory_recall so the
@@ -248,7 +271,17 @@ function rankFacts(rows: any[], patterns: string[] = []): any[] {
     // score DESC, recency as the tiebreak. The rows arrive `ORDER BY id DESC`
     // and Array#sort is stable (ES2019), so equal scores keep id DESC without
     // the query having to hand us the id column.
-    const byRelevance = (a: Rec, b: Rec) => score(b) - score(a)
+    const sourceWeight = (r: Rec) => {
+      const s = String(r?.source ?? "")
+      if (s === "done") return 0
+      if (s === "decision") return 1
+      if (s === "blocked") return 2
+      if (s === "error") return 3
+      if (s === "progress") return 4
+      return 5
+    }
+    const byRelevance = (a: Rec, b: Rec) =>
+      score(b) - score(a) || sourceWeight(a) - sourceWeight(b)
     needles.sort(byRelevance)
     rest.sort(byRelevance)
   }
@@ -651,7 +684,7 @@ async function recallFacts(query: string, projectDir: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Auto-memory: live turns persist durable facts with zero model effort.
+// 6. Auto-memory: live turns persist durable facts with zero model effort.
 //
 // The Python loop path (run_turn -> capture_turn in harness/memory.py) is
 // healthy, but live opencode sessions never run through it — the plugin only
@@ -712,7 +745,7 @@ const MEM_MARKERS = [
   "remember:", "constraint:", "requirement:", "must ", "never ", "always ",
 ]
 const MEM_OUTCOME =
-  /\b(passed|failing|failed|regression|tests? (pass|fail)|reproduced|timeout|permission denied|not found|traceback)\b/i
+  /\b(passed|failing|failed|regression|tests? (pass|fail)|reproduced|timeout|permission denied|not found|traceback|done|fixed|verified|success)\b/i
 /** Buckets that stage for manual `memory approve` but NEVER auto-promote:
  * status-report verbs that appear in ordinary progress chatter (a release note
  * saying "fixed …" or "verified …" is not a lesson). Anything shorter than 4
@@ -1397,7 +1430,7 @@ function condenseToolResult(event: Rec): void {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Worker rows: the subagent tool is registered through the standard
+// 7. Worker rows: the subagent tool is registered through the standard
 //    tool.transform/add path (opencode.tool.subagent, codemode:false) and every
 //    model tool call runs through the one Tool.execute dispatch, which triggers
 //    execute.before ({tool, sessionID, id, input}) before the call and
@@ -1567,7 +1600,26 @@ const HarnessPlugin = {
       log(`temp confinement skipped: ${short(e)}`)
     }
 
-    // 1. Seed the bundled skills into opencode's skill store so they are
+    // 1. Runtime default: opencode discovers the harness-* agents from native
+    //    markdown files, and this transform makes the orchestrator the active
+    //    default for a session without writing anything to opencode.json.
+    try {
+      if (typeof ctx?.agent?.transform !== "function") throw new Error("ctx.agent.transform unavailable")
+      const wanted = String(process.env.HARNESS_DEFAULT_AGENT || "harness-orchestrator").trim()
+      if (wanted) {
+        await ctx.agent.transform((editor: Rec) => {
+          try {
+            if (typeof editor?.default === "function") editor.default(wanted)
+          } catch (e) {
+            log(`default agent set skipped: ${short(e)}`)
+          }
+        })
+      }
+    } catch (e) {
+      log(`default agent transform failed: ${short(e)}`)
+    }
+
+    // 2. Seed the bundled skills into opencode's skill store so they are
     //    loadable (by id) without hand-editing opencode.json.
     try {
       // guarded: a future host that renames/removes this API degrades to a log
@@ -1591,7 +1643,7 @@ const HarnessPlugin = {
       log(`skill seeding failed: ${short(e)}`)
     }
 
-    // 2. Native tools (no MCP hop): skills + memory read straight off disk.
+    // 3. Native tools (no MCP hop): skills + memory read straight off disk.
     //    codemode:false is what makes a tool DIRECT (visible in the model's
     //    tool list); the v2 default puts a tool in the Code Mode catalog only,
     //    where it is reachable as `tools.<name>()` inside `execute` and calls
@@ -1658,7 +1710,15 @@ const HarnessPlugin = {
             if (!items.length) items = await seedSkills(directory)
             const skill = items.find((s: Rec) => String(s.id) === want || String(s.name) === want)
             if (!skill) return { content: `skill not found: ${want}` }
-            return { content: await readSkill(skill, input?.path ? String(input.path) : undefined) }
+            const out = await readSkill(skill, input?.path ? String(input.path) : undefined)
+            try {
+              await writeUiState(directory, {
+                last_skill: { id: String(skill.id ?? want), path: String(skill.path ?? ""), ts: Date.now() / 1000 },
+              })
+            } catch {
+              /* panel state is best-effort */
+            }
+            return { content: out }
           },
         })
 
@@ -1675,6 +1735,57 @@ const HarnessPlugin = {
           execute: async (input: Rec) => ({
             content: (await recallFacts(String(input?.query ?? ""), directory)) || NO_FACTS,
           }),
+        })
+
+        add({
+          name: "risk_check",
+          description:
+            "Dry-run a shell command or action through harness/risk.py before running it. Returns the same risk verdict the permission generator uses.",
+          input: {
+            type: "object",
+            properties: {
+              command: { type: "string", description: "The shell command or action to preview" },
+              action: { type: "string", description: "Alternative to command" },
+              kind: { type: "string", description: "Optional harness risk kind" },
+            },
+            additionalProperties: false,
+          },
+          options: direct,
+          execute: async (input: Rec) => {
+            const text = String(input?.command ?? input?.action ?? "").trim()
+            if (!text) return { content: "risk_check needs command or action" }
+            try {
+              const { spawn } = await import("node:child_process")
+              const args = ["-m", "harness", "risk", "check", text, "--json"]
+              if (input?.kind) args.push("--kind", String(input.kind))
+              const out = await new Promise<string>((resolve) => {
+                const proc = spawn("python3", args, { cwd: directory } as any)
+                let stdout = ""
+                let stderr = ""
+                proc.stdout.on("data", (d: any) => { stdout += String(d) })
+                proc.stderr.on("data", (d: any) => { stderr += String(d) })
+                proc.on("error", (e: any) => resolve(`ERROR ${e.message}`))
+                proc.on("close", () => resolve(stdout || stderr))
+              })
+              let parsed: any = null
+              try {
+                parsed = JSON.parse(out)
+              } catch {
+                parsed = null
+              }
+              if (parsed) {
+                try {
+                  await writeUiState(directory, { last_risk: { text, ...parsed, ts: Date.now() / 1000 } })
+                } catch {
+                  /* best-effort panel state */
+                }
+                return { content: JSON.stringify(parsed, null, 2) }
+              }
+              return { content: out.trim() || "risk_check failed" }
+            } catch (e) {
+              return { content: `risk_check unavailable: ${short(e)}` }
+            }
+          },
         })
 
         // The plan tool opencode 2.x no longer has, backed by the harness todo
@@ -1780,7 +1891,7 @@ const HarnessPlugin = {
       log(`tool registration failed: ${short(e)}`)
     }
 
-    // 3. Condense oversized tool results in place (errors untouched), and mark
+    // 4. Condense oversized tool results in place (errors untouched), and mark
     //    subagent calls done/error in the workers table (see section 6: the
     //    same after-event carries both).
     try {
@@ -1802,7 +1913,7 @@ const HarnessPlugin = {
       log(`tool hook failed: ${short(e)}`)
     }
 
-    // 4. Compaction brief: the compaction run's system array is built here, so
+    // 5. Compaction brief: the compaction run's system array is built here, so
     //    the newest durable facts AND the open todos ride along into the summary
     //    instead of being summarized away — a plan that only lives in the
     //    transcript is exactly what a compaction destroys. Verified payload
@@ -1820,6 +1931,13 @@ const HarnessPlugin = {
           const text = await compactionBrief(directory, String(event?.sessionID ?? ""))
           if (!text) return
           event.system.push({ type: "text", text })
+          try {
+            await writeUiState(directory, {
+              last_compaction: { sessionID: String(event?.sessionID ?? ""), chars: text.length, ts: Date.now() / 1000 },
+            })
+          } catch {
+            /* panel state is best-effort */
+          }
         } catch (e) {
           // never break compaction, but never fail silently either
           log(`compaction brief failed: ${short(e)}`)
@@ -1829,7 +1947,7 @@ const HarnessPlugin = {
       log(`compaction hook failed: ${short(e)}`)
     }
 
-    // 5. Auto-memory on the session "context" hook (see the section above for
+    // 6. Auto-memory on the session "context" hook (see the section above for
     //    why this hook: no post-turn hook exists in opencode 2.x). Own guard
     //    block so a host that accepts "compaction" but rejects "context"
     //    loses only auto-memory, never the brief.
@@ -1848,7 +1966,7 @@ const HarnessPlugin = {
       log(`auto-memory hook failed: ${short(e)}`)
     }
 
-    // 6. Worker rows on the tool "execute.before" hook (see the section above
+    // 7. Worker rows on the tool "execute.before" hook (see the section above
     //    for why this fires for subagent calls: one dispatch, every tool). Own
     //    guard block so a host that accepts "execute.after" but rejects
     //    "execute.before" loses only the queued rows, never condensing.

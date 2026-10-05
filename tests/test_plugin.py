@@ -1457,8 +1457,6 @@ def test_plugin_install_idempotent(tmp_path, monkeypatch):
                        capture_output=True, text=True, timeout=60,
                        cwd=str(REPO_ROOT))
     assert r.returncode == 0, r.stderr[:300]
-    d = json.loads((_opencode_config_path()).read_text())
-    assert not [p for p in d.get("plugin", []) if "harness/plugin" in str(p)], "legacy specs removed"
     plugdir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "plugins"
     # directory layout: server entrypoint + TUI entrypoint (the tui one is what
     # makes the TUI plugin list include harness)
@@ -1468,11 +1466,10 @@ def test_plugin_install_idempotent(tmp_path, monkeypatch):
                        capture_output=True, text=True, timeout=60,
                        cwd=str(REPO_ROOT))
     assert r.returncode == 0
-    # install merges agents (model-free, inherit user default) and no relay
-    d = json.loads((_opencode_config_path()).read_text())
-    assert "harness" not in d.get("provider", {})
-    assert "orchestrator" in d.get("agent", {})
-    assert "code-reviewer" in d.get("agent", {}), "specialized subagents merge too"
+    # native managed agents are installed too, not opencode.json mutation
+    agents_dir = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode" / "agents"
+    assert (agents_dir / "harness-orchestrator.md").exists()
+    assert not _opencode_config_path().exists()
     # a legacy single-file install is superseded, not left behind to double-load
     legacy = plugdir / "harness.ts"
     legacy.write_text("// stale single-file install")
@@ -1484,10 +1481,30 @@ def test_plugin_install_idempotent(tmp_path, monkeypatch):
                        capture_output=True, text=True, timeout=60,
                        cwd=str(REPO_ROOT))
     assert r.returncode == 0 and "removed plugin dir" in r.stdout
-    d = json.loads((_opencode_config_path()).read_text())
-    assert "harness" not in d.get("provider", {})
-    assert "code-reviewer" not in d.get("agent", {}), "uninstall removes the subagents it merged"
     assert not (plugdir / "harness").exists()
+    assert not (agents_dir / "harness-orchestrator.md").exists()
+
+
+def test_plugin_records_last_skill_compaction_and_risk():
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[0]).read_text()
+    assert "async function writeUiState" in text
+    assert 'name: "risk_check"' in text
+    assert 'await writeUiState(directory, {' in text
+    assert 'last_skill: { id:' in text
+    assert 'last_compaction:{'.replace(" ", "") in text.replace(" ", "")
+    assert 'last_risk:' in text
+
+
+def test_tui_reads_ui_state_and_vcs():
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[1]).read_text()
+    assert "ui-state.json" in text
+    assert "data.lastCompaction" in text
+    assert "data.lastSkill" in text
+    assert "data.lastRisk" in text
+    assert "data.vcsKnown" in text
+    assert "ctx.vcs.status" in text
 
 
 def test_tui_window_bar_is_the_last_message_not_the_session_total():

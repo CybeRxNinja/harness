@@ -61,19 +61,10 @@ def test_agents_status_catches_a_config_merged_by_an_older_harness(tmp_path,
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
 
     msg, ok = agents_status()
-    assert not ok and "not found" in msg, msg
+    assert not ok and "missing 12 harness agent file" in msg, msg
 
-    dest = tmp_path / "cfg" / "opencode" / "opencode.json"
-    dest.parent.mkdir(parents=True)
-    # an old merge: primaries only, no mode:subagent specialists
-    dest.write_text(json.dumps({"agent": {"orchestrator": {}, "ask": {}}}))
-    msg, ok = agents_status()
-    assert not ok and "explore" in msg and "code-reviewer" in msg, msg
-    assert "harness plugin install" in msg, msg
-
-    from harness.cli import _bundled_opencode_json
-    dest.write_text(json.dumps(
-        {"agent": {n: {} for n in _bundled_opencode_json()["agent"]}}))
+    from harness.agents import install_managed_agents
+    install_managed_agents()
     msg, ok = agents_status()
     assert ok and "harness agents" in msg, msg
     assert run(tmp_path)["checks"]["agents"] == msg

@@ -42,7 +42,7 @@ IMPORTANT_MARKERS = (
 # A line carrying a failure/verification result is worth keeping too.
 OUTCOME_RE = re.compile(
     r"\b(passed|failing|failed|regression|tests? (pass|fail)|reproduced|timeout"
-    r"|permission denied|not found|traceback)\b", re.I)
+    r"|permission denied|not found|traceback|done\b|fixed\b|verified\b|success\b)", re.I)
 
 # Never remember anything that looks like a credential.
 SECRET_RES = (
@@ -232,9 +232,9 @@ def recall(con, query: str, limit: int = 3) -> list[dict]:
         for text, source, fid in rows:
             low = text.lower()
             score = sum(1 for w in ws if w.lower() in low)
-            scored.append((score, fid, text, source))
-        scored.sort(key=lambda r: (-r[0], -r[1]))
-        hits += [{"text": t, "source": s, "score": sc} for sc, _, t, s in scored]
+            scored.append((_source_priority(source), -score, -fid, text, source))
+        scored.sort()
+        hits += [{"text": t, "source": s, "score": -neg_score} for _, neg_score, _, t, s in scored]
     except Exception:
         pass
     try:
@@ -393,7 +393,8 @@ def capture_turn(con, session: str, text: str, verified: bool = False,
                 "skipped": "memory disabled"}
     cap = int(mend.get("cap_lines", 200))
     max_facts = int(mend.get("max_facts", 2000))
-    ids = remember(con, text, source="turn", max_facts=max_facts)
+    ids = remember(con, text, source="done" if verified else "turn",
+                   max_facts=max_facts)
     if error:
         fid = save_fact(con, f"error: {normalize(error)[:300]}", "error", max_facts=max_facts)
         if fid:
@@ -409,3 +410,17 @@ def capture_turn(con, session: str, text: str, verified: bool = False,
         promoted = auto_refine(con, memory_file(root), min_evidence=2, cap_lines=cap)
     prune(con, int(mend.get("retention_days", 30)))
     return {"facts": ids, "progress": pid, "verified": verified, "promoted": promoted}
+
+
+def _source_priority(source: str) -> int:
+    """Ordered evidence value for recall ranking."""
+    return {
+        "done": 0,
+        "decision": 1,
+        "lesson": 2,
+        "blocked": 3,
+        "error": 4,
+        "progress": 5,
+        "turn": 6,
+        "agent": 7,
+    }.get(str(source or ""), 99)

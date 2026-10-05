@@ -64,31 +64,12 @@ def _stale_entrypoints(installed: Path) -> list[str]:
 
 
 def agents_status() -> tuple[str, bool]:
-    """opencode.json must carry every bundled agent.
-
-    The task tool resolves subagent_type against opencode's agent registry, so
-    a config merged by an older harness (primaries only, no `mode: subagent`
-    entries) leaves the orchestrator spawning `general` for every task.
-    """
-    import json as _j
-    from .paths import opencode_config_dir
+    """Bundled agents must be installed as native `harness-*` Markdown files."""
     try:
-        from .cli import _bundled_opencode_json
-        want = set(_bundled_opencode_json().get("agent", {}))
+        from .agents import status
+        return status()
     except Exception as e:
-        return f"bundled agents unreadable: {e}", False
-    dest = opencode_config_dir() / "opencode.json"
-    try:
-        cur = _j.loads(dest.read_text()) if dest.exists() else None
-    except Exception:
-        return f"{dest} unreadable — re-run: harness plugin install", False
-    if cur is None:
-        return f"{dest} not found (run: harness plugin install)", False
-    missing = sorted(want - set(cur.get("agent") or {}))
-    if missing:
-        return (f"{dest} missing {len(missing)} harness agent(s): "
-                f"{', '.join(missing)} — re-run: harness plugin install"), False
-    return f"{dest} ({len(want)} harness agents)", True
+        return f"managed agents unreadable: {e}", False
 
 
 def _project_db(root: Path) -> Path | None:

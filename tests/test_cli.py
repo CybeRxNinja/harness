@@ -220,6 +220,14 @@ def test_setup_update_skills_is_opt_in_and_names_what_it_changed(env, capsys):
     assert "0 new" in capsys.readouterr().out
 
 
+def test_cli_risk_check_outputs_json(env, capsys):
+    from harness.cli import main
+    assert main(["risk", "check", "rm -rf ./dist", "--json"]) == 0
+    dec = json.loads(capsys.readouterr().out)
+    assert dec["ask"] is True and dec["risk"] == "destructive"
+    assert dec["irreversible"] is True
+
+
 def test_retired_relay_subcommands_exit_2(env, capsys):
     for retired in ("serve", "router"):
         assert cli(env, retired) == 2

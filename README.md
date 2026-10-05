@@ -1,6 +1,6 @@
 [![ci](https://github.com/CybeRxNinja/harness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CybeRxNinja/harness/actions/workflows/ci.yml)
 [![release](https://github.com/CybeRxNinja/harness/actions/workflows/release.yml/badge.svg)](https://github.com/CybeRxNinja/harness/releases)
-[![tests](https://img.shields.io/badge/tests-203%20passing-brightgreen)](.github/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-201%20passing-brightgreen)](.github/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![release](https://img.shields.io/github/v/tag/CybeRxNinja/harness?filter=plugin-v*&label=plugin)](https://github.com/CybeRxNinja/harness/releases/latest)
 
@@ -40,7 +40,7 @@ and re-runnable locally (the former live smoke is removed):
 | worker rows reach a terminal state | `tests/test_rlm.py`: `is_terminal` / `worker_timeout` readers behind `harness doctor` (live routing is opencode's native `task` tool) |
 | entrypoints never break a boot | `tests/test_plugin.py` transpiles both files with `Bun.Transpiler`; bad `setup()` returns are pinned by tests |
 | the model's plan lands in the harness todo space | verified on a real server: `opencode run "…call todowrite…"` → rows landed in `<project>/.opencode/harness/sessions.db` under the run's session id, painted by the panel off a real pty capture |
-| 203 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
+| 201 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
 
 Latest release: **[`plugin-v0.17`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.17)**
 — `--from-release` assets are byte-identical to the checkout, a path last verified
@@ -68,12 +68,12 @@ opencode v2:
   FTS5 brief is appended to the summarization request, so decisions and root
   causes survive a condensed transcript; oversized tool outputs are condensed
   in place (`ctx.tool.hook("execute.after")`).
-- **Agents** — `orchestrator/ask/debug/review/plan` plus the specialized
-  subagents (`explore`, `librarian`, `plan-consultant`, `plan-reviewer`,
-  `code-reviewer`, `test-engineer`, `security-auditor`) merged into
-  `opencode.json` by the installer (backed up, never clobbered), no model pins:
-  the orchestrator routes by role instead of falling back to the built-in
-  `general`.
+- **Agents** — `harness-orchestrator/harness-ask/harness-debug/harness-review/harness-plan`
+  plus the specialized subagents (`harness-explore`, `harness-librarian`,
+  `harness-plan-consultant`, `harness-plan-reviewer`, `harness-code-reviewer`,
+  `harness-test-engineer`, `harness-security-auditor`) as native Markdown files:
+  no `opencode.json` merge, no model pins; the orchestrator routes by role
+  instead of falling back to the built-in `general`.
 - **Risk-gated shell policy** — opencode permissions generated from
   `harness/risk.py`, so the model's advice and the host's enforcement are the
   same object: reads/fetches/tests run free, destructive commands ask with a
@@ -95,7 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/CybeRxNinja/harness/main/install.sh
 # or from a checkout
 pip install -e .
 python -m harness setup            # seed skills, verify model + opencode binary
-python -m harness plugin install   # -> ~/.config/opencode/plugins/harness/{server.ts,tui.tsx}
+python -m harness plugin install   # -> plugins/harness/{server.ts,tui.tsx} + agents/harness-*.md
 opencode                           # launch stock opencode, or: harness tui
 ```
 
@@ -117,8 +117,7 @@ An agent asked to install the plugin should follow [`docs/install-for-agents.md`
 ```
 <project>/.opencode/harness/   sessions.db (facts, todos, workers, waits),
                                MEMORY.md, backups
-~/.config/opencode/            opencode.json (merged agents + shell policy)
-                               + plugins/harness/{server.ts,tui.tsx}
+~/.config/opencode/            user config dir, including native agents/harness-* and plugins/harness
 ~/.harness/                    global skills, user config
 ```
 

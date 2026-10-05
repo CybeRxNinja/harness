@@ -14,7 +14,7 @@
    model, plugin layout, memory, workers, and the permission policy.
 6. `harness skills list` / `harness memory search <query>` — the kept operators
    read the same store the plugin writes.
-7. `harness tui` — ensures opencode config + plugin, then launches
+7. `harness tui` — ensures native harness-* agents + plugin, then launches
    stock opencode. Each directory gets its own `.opencode/harness/` state.
 
 Key files: `AGENTS.md` (persona + build ladder + rules, highest precedence),

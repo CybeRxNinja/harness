@@ -1,6 +1,6 @@
 # Harness — status
 
-`python -m pytest -q` → **170 passed** (`HARNESS_MOCK=1`, as CI runs it).
+`python -m pytest -q` → **201 passed, 8 skipped** (`HARNESS_MOCK=1`, as CI runs it).
 The headless CLI path was retired (9 modules + 4 commands deleted; live features run in the
 plugin) — history lives in `git log`; this file is current state only.
 
@@ -55,8 +55,8 @@ row summed the session's tokens against the context window, so the bar pinned at
 session: opencode's own header reads the LAST assistant message (`usage.Output > 0`; a compaction
 summary counts output only), and the panel now does the same, while the Tokens row keeps the
 lifetime total. And the orchestrator could only spawn opencode's built-in `general` subagent,
-because nothing else was registered: `opencode.json` now ships `explore`, `librarian`,
-`plan-consultant`, `plan-reviewer`, `code-reviewer`, `test-engineer`, `security-auditor`
+because nothing else was registered: native agent files now install `harness-explore`, `harness-librarian`,
+`harness-plan-consultant`, `harness-plan-reviewer`, `harness-code-reviewer`, `harness-test-engineer`, `harness-security-auditor`
 (`mode: subagent`, an own prompt each, edit-denied except the test engineer, `task: deny` so depth
 stays 1) and the orchestrator prompt routes by `subagent_type` (the retired Python RLM path used to
 give each of those kinds its own brief too, instead of one generic worker prompt).
@@ -107,8 +107,7 @@ See `docs/memory.md`.
 
 **Approval means "this is dangerous".** Shell permissions are generated from `harness/risk.py`, so a
 grep, a diff or a test run never prompts and `git push`/`rm -rf`/`DROP TABLE`/deploys always do, each
-with a reason a human can act on. Applied to the live
-`~/.config/opencode/opencode.json` (94 ask rules behind a permissive default). See
+with a reason a human can act on. applied to native `~/.config/opencode/agents/harness-*.md` files (94 ask rules behind a permissive default). See
 `docs/security.md`, `docs/config.md`.
 
 **RLM retired.** Workers used to run in a headless pool sized by `budgets.max_parallel`, reaching a
@@ -147,7 +146,7 @@ a worker with an unknown kind (the headless spawn path has since been retired).
 ## Verify
 
 ```bash
-HARNESS_MOCK=1 python -m pytest -q          # 170
+HARNESS_MOCK=1 python -m pytest -q          # 201 passed, 8 skipped
 sqlite3 .opencode/harness/sessions.db "select session,status,text from todos order by id desc limit 5"
 python -m harness doctor --verbose          # plugin, memory, workers, permission policy
 python -m harness memory show               # current MEMORY.md
