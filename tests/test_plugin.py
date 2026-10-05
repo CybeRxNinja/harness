@@ -620,10 +620,10 @@ def test_plugin_history_feed_uses_high_water_mark():
 
 def test_plugin_lesson_loop_needs_two_distinct_excerpts():
     """Each durable assistant line stages one evidence excerpt into `pending`;
-    a lesson promotes into the project's MEMORY.md only at >=2 DISTINCT
-    excerpts (the same line staged twice is one piece of evidence, not two).
-    Staged rows are consumed on promotion; mock echoes and secrets never
-    stage; the entry keeps the writer's cap/dupe/secret guarantees."""
+    a lesson promotes into the project state dir's MEMORY.md only at >=2
+    DISTINCT excerpts (the same line staged twice is one piece of evidence,
+    not two). Staged rows are consumed on promotion; mock echoes and secrets
+    never stage; the entry keeps the writer's cap/dupe/secret guarantees."""
     from harness.cli import _plugin_files
     text = Path(_plugin_files()[0]).read_text()
     assert "function memStageLesson" in text and "async function memAutoRefine" in text
@@ -631,7 +631,17 @@ def test_plugin_lesson_loop_needs_two_distinct_excerpts():
     assert "ev.length < Math.max(2, minEvidence)" in text
     assert "SELECT diff FROM pending WHERE kind='lesson'" in text
     assert "DELETE FROM pending WHERE kind='lesson' AND name=?" in text
-    assert "`${projectDir}/MEMORY.md`" in text
+    # The resolved path, not a truthiness check: lessons land where
+    # memory_file() puts them (<project>/.opencode/harness/MEMORY.md), the dir
+    # is created before the write, and the old project-root literal is gone.
+    assert re.search(
+        r'function stateDir\(projectDir: string\): string \{\s*'
+        r'return `\$\{projectDir\}/\.opencode/harness`\s*\}',
+        text,
+    ), "stateDir() must resolve to <project>/.opencode/harness"
+    assert 'mkdirSync(dir, { recursive: true })' in text
+    assert "`${dir}/MEMORY.md`" in text
+    assert "`${projectDir}/MEMORY.md`" not in text
     assert "if (memNormalize(memHeadline(t)).startsWith(\"[mock:\")) continue" in text
     assert "if (memSecret(line)) continue" in text
 

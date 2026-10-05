@@ -66,9 +66,11 @@ def cmd_skills(args) -> int:
                     con.commit()
                     print(f"approved {pid}")
                 else:
-                    # MEMORY.md at the project root is the file AGENTS.md's
-                    # precedence chain reads; writing <state>/MEMORY.md (as this
-                    # used to) put approved lessons somewhere nothing read.
+                    # Approvals land in memory_file()'s path,
+                    # <project>/.opencode/harness/MEMORY.md: project state, not a
+                    # committed doc (it used to sit at the project root). It is
+                    # still the file AGENTS.md's precedence chain ranks above
+                    # AGENTS.md — the file moved, the rule did not.
                     ok = approve(con, pid, _memory_file(root))
                     print(f"{'approved' if ok else 'missing'} {pid}")
             else:

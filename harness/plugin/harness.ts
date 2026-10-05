@@ -188,6 +188,10 @@ async function readSkill(skill: Rec, subpath?: string): Promise<string> {
 
 // Project-local only: a $HOME probe here recalled a different project's facts
 // (state_dir() in harness/paths.py is always <root>/.opencode/harness).
+function stateDir(projectDir: string): string {
+  return `${projectDir}/.opencode/harness`
+}
+
 function stateDb(projectDir: string): string {
   return `${projectDir}/.opencode/harness/sessions.db`
 }
@@ -1259,7 +1263,14 @@ async function captureLessons(db: any, projectDir: string, fresh: string[], capL
         memStageLesson(db, memLessonName(line), line, line.slice(0, 120))
       }
     }
-    return await memAutoRefine(db, `${projectDir}/MEMORY.md`, capLines)
+    // The same file the Python writer owns (memory_file() -> paths.state_file()
+    // in harness/memory.py), so both sides append to one set of lessons. The
+    // state dir is no longer the project root, so a project that never ran
+    // harness may not have it yet: mkdir first (idempotent — memDb made it).
+    const dir = stateDir(projectDir)
+    const { mkdirSync } = await import("node:fs")
+    mkdirSync(dir, { recursive: true })
+    return await memAutoRefine(db, `${dir}/MEMORY.md`, capLines)
   } catch {
     return []
   }
