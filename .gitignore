@@ -16,6 +16,9 @@ __pycache__/
 .opencode/harness/STATUS.md
 .opencode/harness/serve.log
 .opencode/harness/harness.jsonc
+.opencode/harness/ui-state.json
+# atomic-write temp files: ui-state.json.tmp, harness.jsonc.tmp
+.opencode/**/*.tmp
 .venv/
 /build/
 # stray chat exports, MBs of them at the repo root
