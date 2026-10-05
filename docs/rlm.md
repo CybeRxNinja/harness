@@ -38,19 +38,10 @@ semaphore to drift out of sync. `max_depth: 0` refuses spawns outright.
 | `timeout` | the backend exceeded `budgets.worker_timeout_s` (default 600s) |
 | `stale` | the row still claims queued/running long after its last update |
 
-Every exit path writes a terminal status — including a worker whose
-`connect()` fails before it starts, which used to leave a row that said
-`queued` forever. `list_subagents(con, stale_after_s=…)` reports the stale
-verdict, and `prune_stale` persists it. A finished worker also records what it
-did as a durable fact, so the next session knows the work happened.
-
-```python
-h  = rlm.spawn(con, cfg, root, "where is auth?", name="explore1", subagent_type="explore")
-rlm.wait(con, h["rlm_child_id"], timeout_s=60)   # -> {status: "done"|"timeout"|…}
-rlm.result(con, h["rlm_child_id"])               # the worker's output
-rlm.list_subagents(con, stale_after_s=900)       # newest first
-rlm.inbox(con)                                   # undelivered child messages
-```
+Every exit path writes a terminal status. What ships today is
+`harness/rlm.py` reduced to the read-only helpers `harness doctor` uses to
+classify a row (`is_terminal`, `worker_timeout`); the rest of this file
+describes the retired path.
 
 ## Mailbox
 
@@ -63,14 +54,3 @@ a sibling or the parent.
 Workers get `SUMMARY + DIFF` instructions (`≤4k`) and a read-only clause for
 `explore`/`librarian`; `load_skills` prepends up to three skill bodies to the
 system prompt, which is what makes a worker follow a project procedure.
-
-## CLI (`plan`)
-
-```
-plan start --title T --items "a;b"
-plan next                 # next unchecked item
-plan check                # tick (also happens automatically after verified turns)
-```
-`boulder.json` + `ledger.jsonl` resume across sessions. Categories are the
-orchestrator's intent labels, validated by `rlm.spawn` against the `categories`
-config list; waves run `max_parallel` at a time.

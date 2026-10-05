@@ -26,8 +26,7 @@ The destructive and irreversible set does:
   environment, `playwright install` (browser binaries into `~/.cache`),
   `apt|dnf|yum|brew|snap|pacman` (OS packages). Project-local `npm install`
   still runs unattended.
-- harness's own — `checkpoint restore`, `plugin uninstall`, `config set`,
-  `memory forget`
+- harness's own — `plugin uninstall`, `config set`, `memory forget`
 
 Plus two things a command string cannot express: a write to a **sensitive path**
 (`.env*`, `.ssh/`, `.aws/`, `id_rsa`, `.netrc`, `.git/config`, CI workflows) and
@@ -35,6 +34,15 @@ a write **outside the project root**, which checkpoints cannot undo
 (`external_directory`). Every verdict carries the reason a human needs
 ("publishes commits to a remote; other people may already have them"), so the
 owner decides on facts instead of a generic yes/no.
+
+You can pre-flight a command without running it:
+
+```bash
+harness risk check "rm -rf ./dist" --json
+```
+
+The same output is available to live agents through the native `risk_check`
+plugin tool, whose last result can appear in the sidebar Memory detail.
 
 Scratch that escapes the project follows the same rule: a `> /tmp/...`
 redirect, `tee /tmp/...`, or running a script out of `/tmp` asks as *elevated*

@@ -19,8 +19,8 @@ purpose:
 - **Progress** — a one-line headline per turn with source `progress`, or `done`
   when the turn *verified* itself: a test/lint/typecheck command ran and came
   back clean. `blocked` when a turn reports a blocker.
-- **Ledger** — a verified turn also closes the active plan's next box
-  (`orchestrator.auto_check`). The project's rule is that the verification
+- **Ledger** — a verified turn also closes the active plan's next box.
+  The project's rule is that the verification
   section is the acceptance for the checkbox, so a turn that merely *says*
   "done" closes nothing. A red test run closes nothing either.
 

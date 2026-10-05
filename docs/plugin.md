@@ -24,7 +24,7 @@ the TUI's Plugins panel lists only plugins with a `tui` entrypoint
 solely under the panel's Server section. `harness tui` does the above setup and launches opencode for you:
 
 ```bash
-harness tui             # opencode config + plugin, then exec opencode
+harness tui             # native agent files + plugin, then exec opencode
 harness tui --setup-only  # prep only, then run `opencode` yourself
 ```
 
@@ -187,10 +187,11 @@ the panel look like an overlay bolted onto the app instead of part of it.
 | Tokens | `input · output`, `reasoning · cache` (a `cache write` line only when non-zero; a `+ N subagents · M tok` line when subagents spent anything) — no cost line: the value already carries it | `session.get(sid).tokens` **merged over `session.family(sid)`** (this session + its `task` children — the single-row read was the "not counting sub-agents" bug), cost from `session.cost(sid)` (already family-summing) with a hand-summed fallback |
 | Models | per **used** provider a bare `name:` header (no catalog counts), then aligned `model … N steps`; value = models/providers this session actually routed through (`not used` before the first message, whose `· selected` fallback row is not counted as usage) | assistant messages of this session **and of its subagent sessions** grouped by provider/model — re-read on **every** pass, so it fills as the message store does |
 | Todo | value is progress, `1/4 done` (+ `· project` for a fallback list); rows are `● completed ◐ in_progress ○ pending ✕ cancelled` + text — this session's list, else the project's newest — **opens itself** when the list changes; **hidden when empty** | the harness todo space, read-only |
-| Workers | `◐ running ○ queued ● done ✕ error ! timeout ~ stale` + worker name + age of its last update, newest first; value is live occupancy (`2 active` / `idle`); **hidden when empty** | the `workers` table in the same `sessions.db` — **project-wide, not session-scoped**: `rlm.spawn` records the row and leaves `workers.session` empty, so a worker belongs to the project, not to the opencode session that asked for it. The active count comes from SQL, not the six displayed rows (a long worker can sit outside the newest ones). Deliberately no `stale` verdict here — `harness doctor` owns that rule (`budgets.worker_timeout_s` × 2) and a second copy would drift; the age is printed instead (`◐ map-auth · running 42m`) |
-| Skills | the bundled harness skills, `… +N more` past five | `location.skill` after `sync()` |
+| Workers | `◐ running ○ queued ● done ✕ error ! timeout ~ stale` + worker name + age of its last update, newest first; value is live occupancy (`2 active` / `idle`); **hidden when empty** | the `workers` table in the same `sessions.db` — **project-wide, not session-scoped**: the server half records the row when the `task` tool starts a worker, so a worker belongs to the project, not to the opencode session that asked for it. The active count comes from SQL, not the six displayed rows (a long worker can sit outside the newest ones). Deliberately no `stale` verdict here — `harness doctor` owns that rule (`budgets.worker_timeout_s` × 2) and a second copy would drift; the age is printed instead (`◐ map-auth · running 42m`) |
+| Skills | the bundled harness skills, `… +N more` past five — first row is `last used` when a skill was loaded | `location.skill` after `sync()`, plus `ui-state.json.last_skill` |
 | Agents | the registered agents — opencode's internal `compaction`/`title` plumbing agents are filtered out, the active agent is listed first with `●`, `… +N more` past five | `location.agent` after `sync()` |
-| Memory | durable facts for the project — value is a real `count(*)`; **hidden at zero** | the same `sessions.db` the server half uses |
+| Memory | durable facts for the project — value is a real `count(*)`; **hidden at zero**; last risk preview can appear as the first detail row | the same `sessions.db` the server half uses, plus `ui-state.json.last_risk` |
+| Files | working-copy changes from VCS status, newest rows first | `ctx.vcs.status()` — `+additions/-deletions` when available |
 
 A usage bar always shows at least one cell for non-zero usage: 1% of eight cells
 rounds to zero, and an empty bar next to `1%` reads as a broken panel. The
@@ -293,18 +294,27 @@ Implementation notes worth keeping (all probed against opencode 2.0.11):
   space and the harness facts DB — measured at ~4ms warm, which is why the
   placeholder is the thing worth watching, not the cost.
 
-## What the plugin does NOT do (those come from opencode.json)
+## What the plugin does NOT do (those come from native config files)
 
-Agents are merged into `~/.config/opencode/opencode.json` by
-`harness plugin install`/`harness tui` (`ensure_opencode_config`), not by the
-plugin:
+Agents are installed as native Markdown files:
 
-- `agent` — `orchestrator/ask/debug/review` + native `plan`, plus the
-  `mode: subagent` specialists the orchestrator routes to (`explore`,
-  `librarian`, `plan-consultant`, `plan-reviewer`, `code-reviewer`,
-  `test-engineer`, `security-auditor`), with modern `permission` maps
-  (auto-approve compatible). No `model` keys: every agent
+```text
+~/.config/opencode/agents/harness-<name>.md
+```
+
+by `harness plugin install`/`harness tui` (`harness.agents.install_managed_agents`),
+not by merging into `~/.config/opencode/opencode.json`:
+
+- `harness-orchestrator`, `harness-ask`, `harness-debug`, `harness-review`, and
+  `harness-plan`, plus the `mode: subagent` specialists the orchestrator routes
+  to (`harness-explore`, `harness-librarian`, `harness-plan-consultant`,
+  `harness-plan-reviewer`, `harness-code-reviewer`, `harness-test-engineer`,
+  `harness-security-auditor`), with permissions rendered from the same
+  `risk.py` policy that powers the classifier. No `model` keys: every agent
   runs on your configured default unless you pin one yourself.
+
+The plugin can set the runtime default agent (`HARNESS_DEFAULT_AGENT`, default
+`harness-orchestrator`), but it does not persist that into your default config.
 
 Skills need no MCP hop. The former stdio server (`harness mcp`, for non-opencode
 MCP clients) was retired with the headless path.
@@ -312,13 +322,13 @@ MCP clients) was retired with the headless path.
 ## Uninstall
 
 ```bash
-harness plugin uninstall   # removes plugin file + harness-merged agents (user keys untouched)
+harness plugin uninstall   # removes plugin files + generated harness-* agent files
 pip uninstall harness      # remove the CLI (optional)
 ```
 
-Uninstall only removes harness-owned entries (agents without a user model pin,
-legacy `provider.harness` / `harness/*` leftovers). Anything you customized
-beyond that is left alone.
+Uninstall removes the plugin directory, the legacy single-file plugin, and only
+the `harness-*` native agent files. It does not edit opencode.json or delete
+user files, state, or custom agents.
 
 ## Troubleshooting
 

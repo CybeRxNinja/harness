@@ -26,10 +26,11 @@ The Python CLI installs and inspects; the plugin does the work at runtime. Both 
 pip install -e .                  # harness CLI, stdlib-only, no dependencies
 harness setup                     # seeds the 17 bundled skills, reports model + binary
 harness plugin install            # -> ~/.config/opencode/plugins/harness/{server.ts,tui.tsx}
+                                 #   + ~/.config/opencode/agents/harness-*.md
 ```
 
 - `harness setup` (`cli.py:120`) is the **only** step that copies bundled skills to the user-global layer `~/.harness/skills/<category>/<name>/SKILL.md` (`skills.py:107-123`); `skills approve` writes into that same layer.
-- `harness plugin install` (`cli.py:549-562`) copies the two entrypoints and merges the 12 harness agents into `opencode.json` via `ensure_opencode_config`. It does **not** seed skills.
+- `harness plugin install` (`install_plugin()` at `cli.py:310-352`, dispatched by `cmd_plugin()` at `cli.py:381-403`) copies the two entrypoints and renders the 12 harness agents as native `~/.config/opencode/agents/harness-*.md` files. It does **not** seed skills or merge into `opencode.json`.
 - Skipping `harness setup` still leaves `skills_list` working — the plugin reads the bundled skills from the installed package at activation (`harness.ts:94-108`) — but the user-global skill layer is never created.
 
 ### 1b. Shortcut — no checkout
@@ -50,7 +51,7 @@ Run it from the project root (project state is cwd-relative; `--root` is a globa
 
 - `"ok": true`
 - `"plugin": "<...>/plugins/harness (server + tui)"` — the phrase `(server + tui)` present, the word `STALE` absent
-- `"agents": "<...>/opencode.json (12 harness agents)"`
+- `"agents": "<...>/opencode/agents (12 harness agents)"`
 - `"user_model": "provider/model"` — not `missing: ...`
 - `"memory"`: object with `file`, `lines`, `facts` (a fresh project legitimately shows `"lines": 0, "facts": 0`; the key must exist). `"workers"`: object with `total`, `unfinished`, `stale`.
 - Functional, inside an opencode session after restart: `skills_list` returns seeded ids such as `using-agent-skills` and `ponytail` (an empty list means the plugin never activated); the footer chip reads `harness · <ctx>% · $<cost> · <tok> tok` (or `harness · click for stats` with no session) and clicking it opens the panel (Window, Tokens, Models, Todo, Workers, Waits, Skills, Agents, Memory).
@@ -64,7 +65,7 @@ Run it from the project root (project state is cwd-relative; `--root` is a globa
 | `"plugin": "missing (run: harness plugin install)"` | nothing installed | `harness plugin install` |
 | `"plugin": "... (server.ts) — missing tui.tsx ..."` | single-entrypoint release, or a pre-directory install | `harness plugin install --from-release latest` (the TUI plugin list only shows plugins with a `tui` entrypoint) |
 | `"plugin": "... — legacy server-only layout ..."` | a pre-2.x single-file install | `harness plugin install` supersedes it |
-| `"agents": "... missing N harness agent(s): <names> — re-run: harness plugin install"` | `opencode.json` predates the bundled agent set | `harness plugin install` (merges agents; user keys are never clobbered) |
+| `"agents": "... missing N harness agent(s): <names> — re-run: harness plugin install"` | `~/.config/opencode/agents` is missing managed files | `harness plugin install` (renders native agent files, never clobbers foreign files) |
 | `"agents": "... not found"` | installer never ran, or `XDG_CONFIG_HOME` differs from the launching shell | `harness plugin install`, then confirm `XDG_CONFIG_HOME` matches the shell that launches opencode |
 | `"user_model": "missing: no model configured: ..."` | no `model` key in `opencode.json` | ask the user to set `"model": "provider/model"` there, or `export HARNESS_MODEL=provider/model`. Never invent a model id. |
 | `"opencode_version": "missing"`, or a 1.x string | see §0 | `opencode upgrade`, then re-verify |
@@ -73,18 +74,18 @@ Run it from the project root (project state is cwd-relative; `--root` is a globa
 ## 4. Uninstall
 
 ```bash
-harness plugin uninstall           # plugin dir + harness-owned opencode.json keys
+harness plugin uninstall           # plugin dir + generated harness-* agent files
 pip uninstall harness              # optional: removes the CLI
 ```
 
-`harness plugin uninstall` (`cli.py:495-546`) removes `<config>/opencode/plugins/harness/`, any legacy `<config>/opencode/plugins/harness.ts`, `provider.harness`, the 12 `agent.*` blocks (only those with no user-set model pin), a `model` key that was `harness/*`, and `mcp.harness-skills`. It rewrites `opencode.json` only when something was removed. Left behind, removable only with explicit consent: `~/.harness/` (global `skills/`, `harness.jsonc`); `<project>/.opencode/harness/` (`sessions.db` with facts, todos, workers, waits; plus `workers/`, `runs/`, `tmp/`, `shadow/`); and the `opencode.json.bak-<timestamp>.json` backups written on every merge, by install and by uninstall.
+`harness plugin uninstall` (`cli.py:478-505`) removes `<config>/opencode/plugins/harness/`, any legacy `<config>/opencode/plugins/harness.ts`, and the native `harness-*.md` agent files. It no longer rewrites `opencode.json`. Left behind, removable only with explicit consent: `~/.harness/` (global `skills/`, `harness.jsonc`); `<project>/.opencode/harness/` (`sessions.db` with facts, todos, workers, waits; plus `workers/`, `runs/`, `tmp/`, `shadow/`); and any older `opencode.json.bak-<timestamp>.json` backups from earlier merges.
 
 Full wipe = `harness plugin uninstall`, `pip uninstall harness`, then `rm -rf ~/.harness` and `rm -rf <project>/.opencode/harness`. Those deletes are irreversible: name them to the user and get a yes first. Never delete `<project>/.opencode/` wholesale — other opencode state lives there.
 
 ## 5. Rules for you
 
 - Never install system packages, edit shell profiles, or mutate global interpreter state without asking. `pip install -e .` into a virtualenv you create is fine; `pip install --break-system-packages` is not.
-- Never hand-edit `~/.config/opencode/opencode.json`: the installer owns it and writes a timestamped `.bak` before every merge. Use `harness config set` for harness layers (`~/.harness/harness.jsonc`, `.opencode/harness.jsonc`).
+- Never hand-edit `~/.config/opencode/opencode.json`: treat it as the user's private config. Harness installs native files beside it and does not merge agents or shell policy into it. Use `harness config set` for harness layers (`~/.harness/harness.jsonc`, `.opencode/harness.jsonc`).
 - Never force-push, tag, or cut a release. `--from-release` only downloads assets that already exist.
 - Paste `harness doctor` output verbatim to the user, failing lines included, and tell them to restart opencode after any install, uninstall, or config merge: the plugin loads at process start.
 - If a check fails and its failure branch does not resolve it, stop and report. Do not hand-patch installed files to make doctor go green.

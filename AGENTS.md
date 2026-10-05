@@ -34,12 +34,12 @@ function you touch and fix it once where all callers route through.
 
 ## Spawn contract (hard rules)
 - Exactly one of `category` XOR `subagent_type` per spawn. Never both/neither.
-- `category` takes INTENT: quick|deep|ultrabrain|visual|writing|unspecified-low|unspecified-high (the `categories` config list; rlm.spawn refuses anything else). Never provider/model strings.
-- `subagent_type` in: explore|librarian|plan-consultant|plan-reviewer|code-reviewer|test-engineer|security-auditor. Read-only ones never write.
-- `plan-consultant|plan-reviewer` only after `.opencode/harness/plans/*.md` touched this session and before `/execute`. Else refuse, self-review instead.
+- `category` takes INTENT: quick|deep|ultrabrain|visual|writing|unspecified-low|unspecified-high (the `categories` config list; read by `intents()`, reported by `doctor.py`, validated by nothing). Never provider/model strings.
+- `subagent_type` in: harness-explore|harness-librarian|harness-plan-consultant|harness-plan-reviewer|harness-code-reviewer|harness-test-engineer|harness-security-auditor. Read-only ones never write.
+- `plan-consultant|plan-reviewer` only after `.opencode/harness/plans/*.md` touched this session and before `/execute` (an opencode slash command, not a harness one). Else refuse, self-review instead.
 - `max_depth=1`: workers cannot spawn. `max_parallel=2` (pool width): queue the rest.
 - Workers return SUMMARY+DIFF (<=4k). Full logs stay in `.opencode/harness/workers/<id>/`, not parent context.
-- Status is always terminal: done|error|timeout|stale (never a row stuck at running past `worker_timeout_s`, default 600s). Read results with `rlm.result(id)`; `rlm.inbox()` marks messages delivered, so a child's summary surfaces once, not every turn.
+- Status ends done|error|timeout (`rlm.py:11`); `stale` is a computed verdict, not a terminal state. `rlm.worker_timeout` defaults 600s. A child's summary arrives once, as the task tool's result: read it there, never hunt a second copy.
 
 ## Modes
 - code: all tools. orchestrator: never write product code; only plan/dispatch/merge/verify.
@@ -58,7 +58,7 @@ function you touch and fix it once where all callers route through.
 
 ## Skills
 - L0 index only in context. `skill_view(name)` then `skill_view(name, references/x.md)` on demand.
-- `load_skills` param scopes worker skills. Lessons-not-logs. Verification section = acceptance for ledger checkbox.
+- Lessons-not-logs. Verification section = acceptance for ledger checkbox.
 - One system message per turn wins: history replays only the latest system note; never restate superseded directives.
 
 ## Todo — one plan, kept current
@@ -71,13 +71,13 @@ function you touch and fix it once where all callers route through.
 ## Memory
 - `AGENTS.md > MEMORY.md`. Recall hints are verify-before-rely.
 - Capture is automatic: every turn stores its durable lines (decisions, root causes, blockers, outcomes) as facts + a progress note, deduped and capped. Don't narrate what memory already records; don't ask to save.
-- `/refine` needs 2+ distinct evidence excerpts; once met, the lesson auto-promotes into `MEMORY.md` (cap `memory.cap_lines`). One excerpt stays staged — review, don't re-ask.
+- `harness memory refine` needs 2+ distinct evidence excerpts; once met, the lesson auto-promotes into `MEMORY.md` (cap `memory.cap_lines`). One excerpt stays staged — review, don't re-ask.
 - Progress closes itself: a turn whose test/lint run came back clean ticks the active plan box. Never tick a box on an unverified claim.
 - Never print secrets. Keys via env/setup only — and the memory layer refuses credentials outright.
 
 ## Config self-manage
 - Mutable: model_profile|budgets|categories|skills|memory|mcp|compress. Denied: secrets|token|trusted_project_dirs|mcp_env_allowlist|security.
-- Every set: validate -> diff preview -> backup -> apply -> re-validate. Corrupt file boots from `.opencode/harness/backups/`.
+- Every set: validate -> diff preview -> backup -> apply -> re-validate. The pre-write copy lands in `.opencode/harness/backups/`; a corrupt file raises, it does not self-restore.
 
 ## Budgets
-- Stop at max_turns/tokens/cost or 10m/turn (`worker_timeout_s` 600 for a worker). Surface `/usage`. Never retry 401/404. Cooldown providers 60s on 2 fails.
+- Stop at max_turns/tokens/cost or 10m/turn (`worker_timeout_s` 600 for a worker). Surface `/usage` (an opencode slash command, not a harness one). Never retry 401/404. Cooldown providers 60s on 2 fails.
