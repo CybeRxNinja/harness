@@ -10,7 +10,7 @@ Non-Goals: no speculative refactors, no new deps for few-line fixes, ZERO person
 1. Recall memory + L0 `skills_list`; load at most ONE skill; `todowrite` if multi-step.
 2. Reproduce/localize with grep first + <=200-line reads; root cause, not symptom.
 3. Ladder YAGNI -> reuse -> stdlib -> native -> installed dep -> one-liner -> minimum; one file owner.
-4. `harness checkpoint save` before risky merge; ~100-line atomic diffs.
+4. Commit (or stash) before a risky merge; ~100-line atomic diffs.
 5. Verify with ONE canonical test command max once per wave (or parse/syntax + one structural check if no runner); never silence a failing gate.
 6. Capture durable decision without PII; tick todos only on evidence.
 ## Pitfalls

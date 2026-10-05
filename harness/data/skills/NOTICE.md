@@ -47,3 +47,16 @@ checks, its font index, its edit hooks and its browser overlay stay upstream, an
 or asset data was copied. Each file carries `license:`, `source:` and `adapted-from:` frontmatter,
 and each full license text ships with its upstream repository.
 
+The bundled skill `find-skills` is adapted from
+[vercel-labs/skills](https://github.com/vercel-labs/skills), used under the MIT License.
+The adaptation is the skill body: `skills_list` first, then `skill_view` for the one
+playbook that matches. No code or assets vendored; the file carries `license:`,
+`source:` and `adapted-from:` frontmatter.
+
+The bundled skill `reverse-router` *references* [rea](https://github.com/morluto/rea) by morluto
+(npm `rea-agents`), used under the MIT License, Copyright (c) 2026 morluto. Only doctrine and
+reference **text** was taken: the commands, provider split (hopper vs ghidra) and the tool's own
+known-gap list. No rea code, assets, prompts or tool output were vendored, and no rea license text
+ships here because none of it is bundled. rea remains an upstream tool the operator installs and
+runs themselves (Node.js >=22.19); harness references it, never installs, configures or vendors it.
+

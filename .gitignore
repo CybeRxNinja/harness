@@ -17,6 +17,8 @@ __pycache__/
 .opencode/harness/harness.jsonc
 .venv/
 /build/
+# stray chat exports, MBs of them at the repo root
+freebuff-chat-*.md
 # anchored: a bare `build/` also ignored harness/data/skills/build/, which
 # silently kept a new skill out of every commit (the two files already there
 # were tracked before the rule existed)
