@@ -1,6 +1,6 @@
 # Security
 Lawful-use only. Paths jailed to project root; shell allowlist + 10s timeout;
-200k file cap; 8k tool-output truncation with spill to `runs/`. Secrets are
+200k file cap; 8k tool-output truncation (in memory, no spill file). Secrets are
 env-only and redacted in logs/trajectories, and **never** written to memory
 (`memory.is_secretish` refuses credentials before they reach the facts table).
 `/sec` skills need a scope file (`auth` + network profile, no target ACT until

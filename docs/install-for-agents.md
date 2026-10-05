@@ -78,7 +78,7 @@ harness plugin uninstall           # plugin dir + generated harness-* agent file
 pip uninstall harness              # optional: removes the CLI
 ```
 
-`harness plugin uninstall` (`cli.py:478-505`) removes `<config>/opencode/plugins/harness/`, any legacy `<config>/opencode/plugins/harness.ts`, and the native `harness-*.md` agent files. It no longer rewrites `opencode.json`. Left behind, removable only with explicit consent: `~/.harness/` (global `skills/`, `harness.jsonc`); `<project>/.opencode/harness/` (`sessions.db` with facts, todos, workers, waits; plus `workers/`, `runs/`, `tmp/`, `shadow/`); and any older `opencode.json.bak-<timestamp>.json` backups from earlier merges.
+`harness plugin uninstall` (`cli.py:478-505`) removes `<config>/opencode/plugins/harness/`, any legacy `<config>/opencode/plugins/harness.ts`, and the native `harness-*.md` agent files. It no longer rewrites `opencode.json`. Left behind, removable only with explicit consent: `~/.harness/` (global `skills/`, `harness.jsonc`); `<project>/.opencode/harness/` (`sessions.db` with facts, todos, workers, waits; plus `tmp/`, `MEMORY.md`, `STATUS.md`); and any older `opencode.json.bak-<timestamp>.json` backups from earlier merges.
 
 Full wipe = `harness plugin uninstall`, `pip uninstall harness`, then `rm -rf ~/.harness` and `rm -rf <project>/.opencode/harness`. Those deletes are irreversible: name them to the user and get a yes first. Never delete `<project>/.opencode/` wholesale — other opencode state lives there.
 

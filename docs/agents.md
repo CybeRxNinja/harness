@@ -22,7 +22,8 @@ edit-denied.
 Flow: `todowrite` the plan → `todoread` before re-planning → parallel `task`
 bursts (the orchestrator picks the category itself; `rlm.spawn` validates it
 against the `categories` config list) → independent review before `plan check`.
-`boulder.json` + `ledger.jsonl` resume across sessions, and a turn whose
+The memory layer resumes across sessions (durable facts plus lessons
+auto-promoted into `.opencode/harness/MEMORY.md`), and a turn whose
 test/lint run came back clean ticks the next box on its own.
 Concurrency `budgets.max_parallel` (2), depth 1, worker timeout 600s. File
 ownership lease: only the orchestrator merges; workers return SUMMARY+DIFF

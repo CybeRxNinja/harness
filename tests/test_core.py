@@ -19,6 +19,20 @@ def test_config_layers(tmp_path, monkeypatch):
     except PermissionError:
         pass
 
+def test_skill_discovery_does_not_create_state_dir(tmp_path, monkeypatch):
+    # scan() only probes its candidate roots with .exists(); resolving a path
+    # must not mkdir. state_dir() did, so merely LISTING skills left an
+    # .opencode/ behind in every project a session touched.
+    from harness import skills as S
+    from harness.config import load_config
+    from pathlib import Path
+    monkeypatch.setenv("HARNESS_HOME", str(tmp_path / "home"))
+    root = tmp_path / "proj"
+    root.mkdir()
+    cfg, _ = load_config(root)
+    S.scan(root, cfg)
+    assert not (root / ".opencode").exists(), "a read must not mkdir"
+
 def test_skills_scan(tmp_path, monkeypatch):
     from harness import skills as S
     from harness.config import load_config

@@ -22,9 +22,8 @@ curated filler list, collapses whitespace/repeats, and restores blocks.
 ## Config (`compress` section)
 `enabled` (default true), `threshold` chars (default 4000),
 `intensity`: `minimal` (collapse only) / `standard` (default, truncate 120
-lines) / `aggressive` (truncate 60). Raw output spills to
-`.opencode/harness/runs/tool-<name>-<ts>.log`; the model sees compressed text
-plus a stats trailer naming engines, filter and raw filename.
+lines) / `aggressive` (truncate 60). Raw output is not spilled to disk; the
+model sees compressed text plus a stats trailer naming engines and filter.
 
 ## Plugin hook
 The opencode plugin's `ctx.tool.hook("execute.after")` handler runs the same

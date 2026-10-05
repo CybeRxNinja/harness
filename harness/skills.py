@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .paths import state_dir
+from .paths import state_file
 
 
 def skill_roots(project_root: Path, cfg: dict) -> list[tuple[str, Path, int]]:
@@ -18,7 +18,9 @@ def skill_roots(project_root: Path, cfg: dict) -> list[tuple[str, Path, int]]:
     from .config import user_dir
     roots: list[tuple[str, Path, int]] = []
     # project tiers
-    for cand in (state_dir(project_root) / "skills", project_root / ".agents" / "skills"):
+    # state_file, not state_dir: discovery only probes candidates with
+    # .exists(), so resolving a path must not create .opencode/ as a side effect.
+    for cand in (state_file(project_root, "skills"), project_root / ".agents" / "skills"):
         if cand.exists():
             roots.append(("project", cand, 0))
     local = user_dir() / "skills"

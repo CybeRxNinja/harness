@@ -1,22 +1,14 @@
 __pycache__/
 *.pyc
 *.egg-info/
-# harness runtime state (project-local, under .opencode/harness/)
-.opencode/harness/tmp/
-.opencode/harness/sessions.db*
-.opencode/harness/kernel/
-.opencode/harness/runs/
-.opencode/harness/shadow/
-.opencode/harness/workers/
-.opencode/harness/backups/
-.opencode/harness/boulder.json
-.opencode/harness/ledger.jsonl
-.opencode/harness/plans/
-.opencode/harness/MEMORY.md
-.opencode/harness/STATUS.md
-.opencode/harness/serve.log
-.opencode/harness/harness.jsonc
-.opencode/harness/ui-state.json
+# harness runtime state (project-local, under .opencode/harness/): ignore the
+# DIRECTORY, not a hand-listed set of files. A per-file list only ever covers
+# what someone remembered to add, which is how ui-state.json leaked; the
+# wildcard makes a new state file ignored by default. `skills/` stays trackable
+# because harness only ever READS it. `.opencode/harness.jsonc` is per-project
+# CONFIG and sits one level up, so it is deliberately NOT ignored.
+.opencode/harness/*
+!.opencode/harness/skills/
 # atomic-write temp files: ui-state.json.tmp, harness.jsonc.tmp
 .opencode/**/*.tmp
 .venv/
