@@ -191,7 +191,7 @@ the panel look like an overlay bolted onto the app instead of part of it.
 | Skills | the bundled harness skills, `… +N more` past five — first row is `last used` when a skill was loaded | `location.skill` after `sync()`, plus `ui-state.json.last_skill` |
 | Agents | the registered agents — opencode's internal `compaction`/`title` plumbing agents are filtered out, the active agent is listed first with `●`, `… +N more` past five | `location.agent` after `sync()` |
 | Memory | durable facts for the project — value is a real `count(*)`; **hidden at zero**; last risk preview can appear as the first detail row | the same `sessions.db` the server half uses, plus `ui-state.json.last_risk` |
-| Files | working-copy changes from VCS status, newest rows first | `ctx.vcs.status()` — `+additions/-deletions` when available |
+| Files | working-copy changes from VCS status, newest rows first | `ctx.vcs.status()` when the host provides it, otherwise `git status --porcelain` + `git diff --numstat HEAD` — `+additions/-deletions` when available |
 
 A usage bar always shows at least one cell for non-zero usage: 1% of eight cells
 rounds to zero, and an empty bar next to `1%` reads as a broken panel. The

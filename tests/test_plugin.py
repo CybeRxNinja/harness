@@ -1517,6 +1517,20 @@ def test_tui_reads_ui_state_and_vcs():
     assert "ctx.vcs.status" in text
 
 
+def test_tui_vcs_falls_back_to_git_when_host_lacks_status():
+    """Hosts without ctx.vcs.status must still fill the Files row: the TUI
+    spawns git itself (porcelain + numstat) and only then marks the data as
+    known. A git failure leaves vcsKnown false so the row stays 'unavailable'.
+    """
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[1]).read_text()
+    assert "--porcelain=v1" in text
+    assert "--numstat" in text
+    assert '"git"' in text
+    assert "Bun.spawn" in text
+    assert "data.vcsKnown = true" in text
+
+
 def test_tui_window_bar_is_the_last_message_not_the_session_total():
     """The Window row summed the session's lifetime tokens against the context
     window, so the bar pinned at 100% early in a real session: the aggregate

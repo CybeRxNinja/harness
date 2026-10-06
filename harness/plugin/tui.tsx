@@ -1089,6 +1089,48 @@ const HarnessTui = {
           } catch {
             data.files = []
           }
+        } else {
+          // Host without ctx.vcs.status: ask git directly (git status --porcelain=v1
+          // and git diff --numstat HEAD). Same row shape as the host API so the
+          // render path is unchanged; untracked rows have no numstat line,
+          // so they report +0/-0.
+          try {
+            let rows: Rec[] | null = null
+            const done = await settle((async () => {
+              const run = async (cmd: string[]): Promise<{ ok: boolean; text: string }> => {
+                try {
+                  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" })
+                  const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+                  return { ok: code === 0, text: out ?? "" }
+                } catch {
+                  return { ok: false, text: "" }
+                }
+              }
+              const st = await run(["git", "-C", directory, "status", "--porcelain=v1"])
+              const ns = await run(["git", "-C", directory, "diff", "--numstat", "HEAD"])
+              if (!st.ok || !ns.ok) return
+              const adds = new Map<string, { additions: number; deletions: number }>()
+              for (const line of ns.text.split("\n")) {
+                const parts = line.split("\t")
+                if (parts.length >= 3) adds.set(parts[2], { additions: Number(parts[0]) || 0, deletions: Number(parts[1]) || 0 })
+              }
+              const merged: Rec[] = []
+              for (const line of st.text.split("\n")) {
+                if (line.length < 4) continue
+                const path = line.slice(3)
+                const a = adds.get(path)
+                merged.push({ file: path, status: line.slice(0, 2).trim() || "?", additions: a?.additions ?? 0, deletions: a?.deletions ?? 0 })
+              }
+              rows = merged
+            })(), SCAN_MS)
+            if (done && rows !== null) {
+              data.vcsKnown = true
+              data.files = rows
+            }
+          } catch {
+            // git missing or no Bun global: degrade exactly as before —
+            // vcsKnown stays false and the row renders unavailable.
+          }
         }
 
         // warm the session store for the next poll (see the note above on why
