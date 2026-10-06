@@ -1531,6 +1531,34 @@ def test_tui_vcs_falls_back_to_git_when_host_lacks_status():
     assert "data.vcsKnown = true" in text
 
 
+def test_tui_rows_pad_columns():
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[1]).read_text()
+    assert ".padEnd(" in text
+    assert ".padStart(" in text
+
+
+def test_tui_feedback_colors_have_literal_fallbacks():
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[1]).read_text()
+    assert "feedback?.success" in text
+    assert "feedback?.error" in text
+
+
+def test_tui_tokens_row_shows_children_split():
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[1]).read_text()
+    assert "↳ workers:" in text
+    assert "incl." in text
+
+
+def test_tui_worker_names_are_width_capped():
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[1]).read_text()
+    assert "wcut(r?.name, 26)" in text
+    assert "padEnd(26)" in text
+
+
 def test_tui_window_bar_is_the_last_message_not_the_session_total():
     """The Window row summed the session's lifetime tokens against the context
     window, so the bar pinned at 100% early in a real session: the aggregate

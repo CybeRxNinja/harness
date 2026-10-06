@@ -312,7 +312,7 @@ def test_tui_user_names_word_boundary_truncation():
     assert "function wcut(value: unknown, max: number)" in tui
     # Todo text, Worker name, Wait label — the user-facing names.
     assert "wcut(r?.text, 30)" in tui
-    assert "wcut(r?.name, 15)" in tui
+    assert "wcut(r?.name, 26)" in tui
     assert "wcut(r?.label, 15)" in tui
     # detail rows (covers Memory display) + the fact humanizer itself.
     assert "wcut(l, 32)" in tui

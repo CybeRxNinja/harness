@@ -100,6 +100,8 @@ const SLOW_RETRY_MS = 2000
 const ROW_LIMIT = 6
 /** Detail rows per section when expanded (the sidebar viewport is short). */
 const DETAIL_LIMIT = 5
+/** Row-label column width — the longest current label ("Workers") is 7. */
+const LABEL_W = 7
 
 /**
  * opencode's internal agents run its own plumbing (conversation compaction,
@@ -211,6 +213,12 @@ function cut(value: unknown, max: number): string {
   const s = String(value ?? "").replace(/\s+/g, " ").trim()
   return s.length <= max ? s : `${s.slice(0, Math.max(1, max - 1))}…`
 }
+
+/**
+ * Pack (text, fg) pairs for the segmented line renderer — one colour per
+ * token (a mark, a path, a count) inside a single row line.
+ */
+const segs = (parts: Array<[string, string]>) => parts.map(([text, fg]) => ({ text, fg }))
 
 /**
  * cut() at a word boundary instead of mid-word: the Memory rows showed
@@ -423,6 +431,11 @@ const HarnessTui = {
       accent: ctx?.theme?.text?.action ?? ctx?.theme?.text?.accent ?? ctx?.theme?.categorical?.[0] ?? "magenta",
       warn: ctx?.theme?.text?.feedback?.warning ?? ctx?.theme?.text?.warning ?? "yellow",
     }
+    // Per-token accents for the segmented rows. The literal tails are the
+    // floor: not every theme ships feedback.success/error.
+    const ok = ctx?.theme?.text?.feedback?.success ?? "green"
+    const bad = ctx?.theme?.text?.feedback?.error ?? "red"
+    const warn = ctx?.theme?.text?.feedback?.warning ?? th.warn
 
     // Reactive view state. storage.memory is a reactive [store, update] pair:
     // clicking a row writes to it and the sidebar repaints. Without it the panel
@@ -486,6 +499,9 @@ const HarnessTui = {
       subCount: 0,
       subTokens: 0,
       subCost: 0,
+      // Children-only per-field breakdown of the same totals as subTokens —
+      // null when host family discovery never ran or there are no children.
+      subSplit: null as Rec | null,
       agent: "",
       model: "",
       contextLimit: 0,
@@ -692,7 +708,7 @@ const HarnessTui = {
               // is visible as history, not a disappearance — while the active
               // count above already excludes it.
               const since = WORKER_LIVE.has(status) || status === "timeout" ? ` ${age(r?.updated)}` : ""
-              return `${workerMark(status)} ${wcut(r?.name, 15)} · ${status}${since}`
+              return `${workerMark(status)} ${wcut(r?.name, 26).padEnd(26)} · ${status}${since}`
             })
           } catch {
             /* no workers table yet */
@@ -993,6 +1009,10 @@ const HarnessTui = {
         let subCount = 0
         let subTokens = 0
         let subCost = 0
+        let subInput = 0
+        let subOutput = 0
+        let subReasoning = 0
+        let subCache = 0
         for (const id of familyIds(data_, sessionID)) {
           const s = id === sessionID ? session : data_?.session?.get?.(id) ?? null
           const t = s?.tokens ?? null
@@ -1007,12 +1027,19 @@ const HarnessTui = {
             subCount += 1
             subTokens += totalTokens(t)
             subCost += Number(s?.cost ?? 0) || 0
+            subInput += Number(t.input ?? 0) || 0
+            subOutput += Number(t.output ?? 0) || 0
+            subReasoning += Number(t.reasoning ?? 0) || 0
+            subCache += (Number(t.cache?.read ?? 0) || 0) + (Number(t.cache?.write ?? 0) || 0)
           }
         }
         data.tokens = merged
         data.subCount = subCount
         data.subTokens = subTokens
         data.subCost = subCost
+        // The per-field split of the SAME child set subTokens totals — shown
+        // in the Tokens row so the family total is traceable, never re-summed.
+        data.subSplit = subCount > 0 ? { input: subInput, output: subOutput, reasoning: subReasoning, cache: subCache } : null
         // opencode's own cost accessor: it sums the family for a root row, so
         // the children are already inside it once discovery lands. The fallback
         // hand-sums this row plus the subagents for when that accessor drifts.
@@ -1415,10 +1442,9 @@ const HarnessTui = {
     }
 
     /**
-     * One stat row: label on the left in the theme's label colour, value pinned
-     * to the right edge. Built like opencode's own rows — the label takes
-     * `flexGrow` and the value `flexShrink 0`, so the value sits at the right
-     * edge whatever width the sidebar is, with no width constant to guess.
+     * One stat row: caret, fixed-width label column, then the value. The
+     * header is one string (`caret + " " + padded label + " " + value`) with
+     * the spaces as literals, so it never depends on the host honouring `gap`.
      *
      * `lines()` is called INSIDE the JSX expression on purpose: Solid re-runs
      * tracked JSX expressions, not the component/render body, so a plain
@@ -1440,6 +1466,16 @@ const HarnessTui = {
        * active items pop in the stronger colour, settled ones recede to muted.
        */
       tone?: (line: string) => string
+      /**
+       * Optional per-token colours for detail lines: when present it wins for
+       * that row and `tone` is skipped. Strings unchanged — colour only.
+       */
+      lineParts?: (line: string) => Array<{ text: string; fg: string }>
+      /**
+       * Optional per-token colours for the header value: when present it wins
+       * and `valueFg` is skipped. Strings unchanged — colour only.
+       */
+      valueParts?: () => Array<{ text: string; fg: string }>
     }) => {
       // A section with nothing in it is noise, not honesty: an empty Workers
       // row or "0 facts" Memory is exactly the clutter the panel must drop.
@@ -1448,7 +1484,6 @@ const HarnessTui = {
       <box flexDirection="column">
         <box
           flexDirection="row"
-          gap={1}
           minWidth={0}
           onMouseDown={() =>
             patch((d) => {
@@ -1459,15 +1494,21 @@ const HarnessTui = {
             })
           }
         >
-          <text fg={isOpen(props.id) ? th.accent : th.base} flexShrink={0}>
-            {isOpen(props.id) ? "▾" : "▸"}
+          <text fg={isOpen(props.id) ? th.accent : th.base} flexShrink={0} wrapMode="none">
+            {`${isOpen(props.id) ? "▾" : "▸"} `}
           </text>
-          <text fg={isOpen(props.id) ? th.accent : th.base} flexGrow={1} wrapMode="none" truncate>
-            {props.label}
+          <text fg={isOpen(props.id) ? th.accent : th.base} flexShrink={0} wrapMode="none" truncate>
+            {`${props.label.padEnd(LABEL_W)} `}
           </text>
-          <text fg={props.valueFg ? props.valueFg() : th.muted} flexShrink={0} wrapMode="none">
-            {props.value()}
-          </text>
+          {props.valueParts
+            ? props.valueParts().map((p) => (
+                <text fg={p.fg} flexShrink={0} wrapMode="none">
+                  {p.text}
+                </text>
+              ))
+            : <text fg={props.valueFg ? props.valueFg() : th.muted} flexShrink={0} wrapMode="none">
+                {props.value()}
+              </text>}
         </box>
         {isOpen(props.id) ? (
           <box flexDirection="column">
@@ -1477,16 +1518,29 @@ const HarnessTui = {
               // A count that outgrows its list ("11 available", 5 shown) is
               // the dishonesty users notice — always say how many more exist.
               if (all.length > DETAIL_LIMIT) rows.push(`… +${all.length - DETAIL_LIMIT} more`)
-              return rows.map((l) => (
-                // 32 columns + the two-space indent is the sidebar's whole content
-                // width (measured off a real 42-column sidebar): one more and
-                // opencode middle-truncates the row it is already showing.
-                // Word-boundary cut, like the fact rows: a mid-word cut hid the
-                // end of the token it landed on.
-                <text fg={props.tone ? props.tone(l) : th.muted} wrapMode="none" truncate>
-                  {`  ${wcut(l, 32)}`}
-                </text>
-              ))
+              return rows.map((l) =>
+                props.lineParts ? (
+                  // 32 columns + the ten-column detail indent is the sidebar's
+                  // whole content width (measured off a real 42-column sidebar):
+                  // one more and opencode middle-truncates the row it is already
+                  // showing. Word-boundary cut, like the fact rows: a mid-word
+                  // cut hid the end of the token it landed on.
+                  <box flexDirection="row" minWidth={0}>
+                    <text wrapMode="none" truncate>
+                      {" ".repeat(2 + LABEL_W + 1)}
+                    </text>
+                    {props.lineParts(l).map((p) => (
+                      <text fg={p.fg} wrapMode="none" truncate>
+                        {p.text}
+                      </text>
+                    ))}
+                  </box>
+                ) : (
+                  <text fg={props.tone ? props.tone(l) : th.muted} wrapMode="none" truncate>
+                    {`${" ".repeat(2 + LABEL_W + 1)}${wcut(l, 32)}`}
+                  </text>
+                ),
+              )
             })()}
           </box>
         ) : null}
@@ -1552,11 +1606,24 @@ const HarnessTui = {
               // No cost line: it is the row's value already, and a repeat of
               // the same number was pure noise. Cache write is shown only
               // when there is any (it is usually 0).
+              const incl =
+                (data.subCount ?? 0) > 0
+                  ? ` (incl. ${data.subCount} subagent${data.subCount === 1 ? "" : "s"})`
+                  : ""
               const out = [
-                `input ${numfmt(t.input)} · output ${numfmt(t.output)}`,
+                `input ${numfmt(t.input)} · output ${numfmt(t.output)}${incl}`,
                 `reasoning ${numfmt(t.reasoning)} · cache ${kfmt(cache.read)}`,
               ]
               if (Number(cache.write ?? 0) > 0) out.push(`cache write ${numfmt(cache.write)}`)
+              // The children-only split of the same totals, so the family
+              // number above stays traceable. subSplit is absent on hosts
+              // without family discovery (and when no child exists) — then
+              // the line is dropped, never shown as fake zeros.
+              if (data.subSplit && (data.subCount ?? 0) > 0) {
+                out.push(
+                  `↳ workers: input ${numfmt(data.subSplit.input)} · output ${numfmt(data.subSplit.output)} · cache ${kfmt(data.subSplit.cache)}`,
+                )
+              }
               // The value above is session + subagents; say what the workers
               // contributed so the family total is traceable, not mysterious.
               if ((data.subCount ?? 0) > 0) {
@@ -1618,6 +1685,35 @@ const HarnessTui = {
                   lines={tokenLines}
                   empty="(no usage yet)"
                   tone={(l) => (l.startsWith("+ ") ? th.base : th.muted)}
+                  valueParts={() => {
+                    void view.rev
+                    const t = data.tokens
+                    if (!t) return segs([["—", th.muted]])
+                    return segs([
+                      [`${kfmt(total())} · `, th.base],
+                      [`$${Number(data.cost ?? 0).toFixed(4)}`, th.accent],
+                    ])
+                  }}
+                  lineParts={(l) => {
+                    if (l.startsWith("input ")) {
+                      const i = l.indexOf(" (incl.")
+                      return i >= 0
+                        ? segs([[l.slice(0, i), th.base], [l.slice(i), th.muted]])
+                        : segs([[l, th.base]])
+                    }
+                    if (l.startsWith("reasoning ")) {
+                      const i = l.indexOf(" · cache ")
+                      return i >= 0
+                        ? segs([[l.slice(0, i + 9), th.base], [l.slice(i + 9), th.muted]])
+                        : segs([[l, th.base]])
+                    }
+                    if (l.startsWith("cache write ")) {
+                      return segs([["cache write ", th.base], [l.slice("cache write ".length), th.muted]])
+                    }
+                    if (l.startsWith("+ ")) return segs([[l, th.base]])
+                    // the ↳ workers line and anything else reads as an annotation
+                    return segs([[l, th.muted]])
+                  }}
                 />
                 <Row
                   id="models"
@@ -1687,6 +1783,20 @@ const HarnessTui = {
                         ? th.base
                         : th.muted
                   }
+                  lineParts={(l) => {
+                    const i = l.indexOf(" ")
+                    const mark = i > 0 ? l.slice(0, i) : l
+                    const rest = i > 0 ? l.slice(i + 1) : ""
+                    const j = rest.indexOf(" · ")
+                    const markFg =
+                      mark === "●" ? ok
+                        : mark === "✕" ? bad
+                          : mark === "!" ? warn
+                            : mark === "◐" ? th.accent
+                              : th.muted
+                    if (j < 0) return segs([[l, th.muted]])
+                    return segs([[mark + " ", markFg], [rest.slice(0, j), th.base], [rest.slice(j), th.muted]])
+                  }}
                 />
                 {/* Project-wide like Workers above: a countdown belongs to the
                     project, not to whichever session started it. Hidden while
@@ -1732,11 +1842,25 @@ const HarnessTui = {
                     if (!data.vcsKnown) return ["(repository state unavailable)"]
                     if (!data.files.length) return ["(no working-copy changes)"]
                     return data.files.slice(0, 5).map((r) =>
-                      `${String(r.status ?? "?")[0].toUpperCase()} ${wcut(String(r.file ?? ""), 22)} +${Number(r.additions ?? 0)} -${Number(r.deletions ?? 0)}`,
+                      `${String(r.status ?? "?")[0].toUpperCase()} ${wcut(String(r.file ?? ""), 22).padEnd(22)} +${String(Number(r.additions ?? 0)).padStart(4)} -${String(Number(r.deletions ?? 0)).padStart(4)}`,
                     )
                   }}
                   empty="(clean)"
                   tone={(l) => l.startsWith("(") ? th.muted : th.base}
+                  lineParts={(l) => {
+                    if (l.startsWith("(")) return segs([[l, th.muted]])
+                    const letter = l.slice(0, 1)
+                    const letterFg = letter === "M" ? warn : letter === "A" ? ok : letter === "D" ? bad : th.muted
+                    const plus = l.lastIndexOf(" +")
+                    const minus = l.lastIndexOf(" -")
+                    if (plus < 2 || minus <= plus) return segs([[l, th.base]])
+                    return segs([
+                      [letter + " ", letterFg],
+                      [l.slice(2, plus), th.base],
+                      [l.slice(plus, minus), ok],
+                      [l.slice(minus), bad],
+                    ])
+                  }}
                 />
                 <Row
                   id="skills"
@@ -1798,6 +1922,19 @@ const HarnessTui = {
                   tone={(l) =>
                     l.startsWith("◐") ? th.accent : l.startsWith("✕") || l.startsWith("⚠") ? th.warn : th.muted
                   }
+                  lineParts={(l) => {
+                    const i = l.indexOf(" ")
+                    const mark = i > 0 ? l.slice(0, i) : l
+                    const markFg =
+                      mark === "●" ? ok
+                        : mark === "✕" ? bad
+                          : mark === "⚠" ? warn
+                            : mark === "◐" ? th.accent
+                              : th.muted
+                    return i > 0
+                      ? segs([[mark + " ", markFg], [l.slice(i + 1), th.base]])
+                      : segs([[l, markFg]])
+                  }}
                 />
               </box>
             )
