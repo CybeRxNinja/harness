@@ -236,17 +236,21 @@ def test_tui_session_change_resets_both_slow_budget_fields():
 
 
 def test_tui_header_separator_is_a_literal_middot_not_the_box_gap():
-    """The header spaces itself with CHARACTERS: opencode drops box `gap`.
+    """The PANEL header spaces itself with CHARACTERS: opencode drops box `gap`.
 
     Live on 2.0.18 the row rendered `harnessses_f29…` — the host did not space
     the header's texts, so the brand carries its own trailing space and the
     tail emits the `·` as a literal, which reads the same on a host that
     honours `gap` and one that drops it. A bare text node would be trimmed
     back to `harness<tail>`, so all three are explicit expression containers.
+
+    Scoped to the panel header (slot to first row) on purpose: Row SECTIONS
+    use the box gap by design (the Kilo pins in test_plugin.py), so a
+    file-wide `gap=` ban would forbid the new grammar.
     """
     tui = _tui_text()
-    header = _region(tui, 'flexDirection="row" minWidth={0}>', 'id="window"')
-    assert "gap=" not in header, "the box gap is not what spaces the header"
+    header = _region(tui, 'append: "sidebar.content"', 'id="window"')
+    assert "gap=" not in header, "the panel header still spaces itself with characters"
     assert '{"harness "}' in header, "the brand carries the space"
     assert 'return tail ? `· ${tail}` : ""' in header, "the tail carries the `·`"
     assert '{" ⋯"}' in header, "the in-flight glyph carries its own space"
@@ -273,11 +277,12 @@ def test_tui_waits_rows_carry_live_icon():
 
 
 def test_tui_value_emphasis_wiring():
-    """Value-vs-muted hierarchy: values pop, calm states recede to muted.
+    """Kilo value hierarchy: titles pop in base, values recede to muted.
 
     The Row owns the hierarchy (`valueFg`/`tone` props, colour only —
-    strings unchanged); each row wires its pressure/occupancy into it, and
-    empty/calm states stay dimmed instead of shouting in the label colour.
+    strings unchanged); only the Window row tints its value (pressure), every
+    other value renders muted, and detail colour lives only in status dots
+    and +/- diffs — metric lines are plain muted justified pairs.
     """
     tui = _tui_text()
     # the props exist and the Row falls back to muted without them.
@@ -285,17 +290,27 @@ def test_tui_value_emphasis_wiring():
     assert "tone?: (line: string) => string" in tui
     assert "props.valueFg ? props.valueFg() : th.muted" in tui
     assert "props.tone ? props.tone(l) : th.muted" in tui
-    # rows wire it: at least one per-row valueFg and tone.
-    assert "valueFg={()" in tui
+    # only the Window row wires a value tint (pressure); every other value is
+    # muted by default — no per-row valueFg, no accent right-values.
+    assert "valueFg={windowFg}" in tui
+    assert "valueFg={()" not in tui, "calm values must not re-tint to base"
+    assert "return data.tokens ? th.base : th.muted" not in tui
+    assert "return view.workersActive ? th.base : th.muted" not in tui
+    assert "return (view.skills ?? 0) > 0 ? th.base : th.muted" not in tui
+    assert "return pct() >= 80 ? th.warn : pct() >= 60 ? th.base : ok" in tui
+    # dots/diffs carry the only detail colour (todo tone, worker/agent/memory
+    # marks, file +/- counts); metric rows have no tone at all.
     assert "tone={(l)" in tui
-    assert "tone={() => th.base}" in tui
-    # muted calm states: collapsed footer, empty window/tokens, idle pool,
-    # unseeded stores — colour only, same strings as before.
-    assert "openCount() ? th.base : th.muted" in tui
-    assert "return pct() >= 80 ? th.warn : th.base" in tui
-    assert "return data.tokens ? th.base : th.muted" in tui
-    assert "return view.workersActive ? th.base : th.muted" in tui
-    assert "return (view.skills ?? 0) > 0 ? th.base : th.muted" in tui
+    assert "tone={() => th.base}" not in tui
+    assert "lineParts={(l)" in tui
+    assert 'l.startsWith("◐") ? warn' in tui
+    # worker/memory marks: the dot carries the state colour (◐/! warn, never
+    # the accent) while the name and the status read muted.
+    assert 'mark === "◐" || mark === "!" ? warn' in tui
+    assert "[rest.slice(0, j), th.muted]" in tui
+    assert ': mark === "◐" ? warn' in tui
+    assert "[l.slice(plus, minus), ok]" in tui
+    assert "[l.slice(minus), bad]" in tui
     # value strings byte-identical under the new colours.
     assert "click a row" in tui
     assert "${openCount()} expanded" in tui
@@ -315,14 +330,20 @@ def test_tui_user_names_word_boundary_truncation():
     assert "wcut(r?.name, 26)" in tui
     assert "wcut(r?.label, 15)" in tui
     # detail rows (covers Memory display) + the fact humanizer itself.
-    assert "wcut(l, 32)" in tui
+    assert "wcut(l, 40)" in tui
     assert "wcut(m[3], 30)" in tui
 
 
-def test_tui_no_bold_prop():
-    """No `bold` prop: the host never verified one, so emphasis is colour-only."""
+def test_tui_bold_section_titles():
+    """Section titles (and the brand) render bold in the text colour.
+
+    Kilo section grammar: the chevron + title read as a bold heading, the
+    values and details recede to muted. Colour alone no longer carries the
+    title/value distinction.
+    """
     tui = _tui_text()
-    assert "bold" not in tui.lower()
+    assert "<text fg={th.base} bold" in tui, "Row titles are bold in the text colour"
+    assert "th.base} bold" in tui, "the brand carries it too"
 
 
 def test_tui_waits_tick_timer_self_clearing_and_cleanup():

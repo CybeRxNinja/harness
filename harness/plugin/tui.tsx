@@ -6,10 +6,11 @@
 // slots. It is
 // built to read as part of opencode rather than bolted onto it:
 //
-//   * same visual grammar as opencode's own sidebar rows — a label in
-//     `theme.text.base` and a value in `theme.text.muted`, on one line, with the
-//     label taking `flexGrow` and the value `flexShrink 0` so the value pins to
-//     the right edge at any panel width (opencode's own MCP rows do this);
+//   * Kilo-style side-panel grammar — a section header (chevron + bold title
+//     in `theme.text.base`, muted value pinned right via a spacer) with
+//     justified detail rows (label left, value right, both muted) full-bleed
+//     from the left edge (no `paddingLeft` indent); green/red/yellow reserved
+//     for status dots, +/- diffs and window pressure;
 //   * same numbers as opencode's readout (total tokens = in+out+reasoning+
 //     cache read+write; window % = LAST assistant message / model.limit.context,
 //     opencode's own header rule) — and the usage totals plus the Models steps
@@ -100,8 +101,6 @@ const SLOW_RETRY_MS = 2000
 const ROW_LIMIT = 6
 /** Detail rows per section when expanded (the sidebar viewport is short). */
 const DETAIL_LIMIT = 5
-/** Row-label column width — the longest current label ("Workers") is 7. */
-const LABEL_W = 7
 
 /**
  * opencode's internal agents run its own plumbing (conversation compaction,
@@ -234,6 +233,30 @@ function wcut(value: unknown, max: number): string {
 }
 
 /**
+ * Split a detail line into [left, right] at the first " · " (or ": ") so the
+ * row renders Kilo-justified: label left, value right on the same line. No
+ * separator — a single left-aligned line. Splits the RAW line first, then
+ * budgets truncation: the right stat is NEVER cut while the left name yields
+ * with `max(10, 40 - v.length - 3)` (room for the separator + full stat,
+ * floor 10 so the name never vanishes).
+ */
+function splitRow(l: string): [string, string] {
+  let i = l.indexOf(" · ")
+  if (i >= 0) {
+    const v = l.slice(i + 3)
+    const k = l.slice(0, i)
+    return [wcut(k, Math.max(10, 40 - v.length - 3)), v]
+  }
+  i = l.indexOf(": ")
+  if (i >= 0) {
+    const v = l.slice(i + 2)
+    const k = l.slice(0, i + 1)
+    return [wcut(k, Math.max(10, 40 - v.length - 3)), v]
+  }
+  return [wcut(l, 40), ""]
+}
+
+/**
  * One Memory detail row per fact: a progress note ("done [s_x]: …") renders
  * as its status mark plus the core message, any other fact keeps "✎".
  * Consecutive identical rows collapse with a ×N suffix, so six mock-echo
@@ -334,6 +357,65 @@ function totalTokens(tokens: Rec | null): number {
     Number(cache.read ?? 0) +
     Number(cache.write ?? 0)
   )
+}
+
+/**
+ * ms epoch, or 0 when the value is unusable. Seconds-shaped values normalize
+ * to ms: ms now is ~1.8e12 and seconds ~1.8e9, so anything below 1e11 can only
+ * be seconds — without this a seconds shape would read a 1000x rate.
+ */
+function asMs(v: unknown): number {
+  const n = Number(v ?? 0)
+  if (!Number.isFinite(n) || n <= 0) return 0
+  return n < 1e11 ? n * 1000 : n
+}
+
+/**
+ * The turn opencode's own footer rate covers: the trailing run of assistant
+ * messages after the last non-assistant one. The shipped TUI slices the
+ * transcript at the previous user/synthetic/idle message and rates the
+ * assistant tail (`$a` beside the assistant footer); a transcript with no
+ * user message yet is one turn from the start. Reads ONLY messages the panel
+ * already lists — never a new call.
+ */
+function lastTurn(msgs: Rec[]): Rec[] {
+  const turn: Rec[] = []
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i]
+    if (String(m?.role ?? m?.type) !== "assistant") break
+    turn.unshift(m)
+  }
+  return turn
+}
+
+/**
+ * Tokens/sec the way opencode's own footer computes it (the `$a` beside the
+ * assistant footer in the shipped opencode binary, v2.0.24): the turn's
+ * output+reasoning tokens over its summed per-message generation durations
+ * (streamed−created, ms -> s). Input and cache tokens never enter the
+ * numerator, and tool-wait/idle gaps (completed−streamed, between messages)
+ * never enter the denominator — the old wall-span rate counted both and read
+ * ~36x high live (2,267 vs opencode's 63 tok/s on the same session; verified
+ * against a live opencode session database, where time.created/streamed/
+ * completed are ms and assistant rows carry input+cache.read in the 10-100k
+ * range against ~100 output tokens). A turn with no streamed timestamp, no
+ * output, or no positive duration reads "" so the Window header renders
+ * exactly as before instead of noise.
+ */
+function turnRate(turn: Rec[]): string {
+  if (!turn.length) return ""
+  let toks = 0
+  let ms = 0
+  for (const m of turn) {
+    const t = m?.time && typeof m.time === "object" ? (m.time as Rec) : null
+    const streamed = asMs(t?.streamed)
+    if (!(streamed > 0)) return ""
+    const created = asMs(t?.created)
+    toks += Number(m?.tokens?.output ?? 0) + Number(m?.tokens?.reasoning ?? 0)
+    ms += Math.max(0, streamed - (created > 0 ? created : streamed))
+  }
+  if (!(toks > 0) || !(ms > 0) || !Number.isFinite(ms)) return ""
+  return `${fmt(Math.round(toks / (ms / 1000)))} tok/s`
 }
 
 /** Normalize whatever a data store hands back into an array. */
@@ -508,6 +590,10 @@ const HarnessTui = {
       contextUsed: 0,
       steps: [] as Rec[],
       provsUsed: 0,
+      // The last turn's tokens/sec for the Window header value (see
+      // scanModels): "" when unmeasurable, so the header renders exactly as
+      // before instead of noise.
+      currentRate: "",
       agents: [] as string[],
       skills: [] as string[],
       facts: [] as string[],
@@ -906,7 +992,10 @@ const HarnessTui = {
       for (const m of msgs) {
         if (String(m?.role ?? m?.type) !== "assistant") continue
         const prov = String(m?.providerID ?? m?.model?.providerID ?? "unknown")
-        const name = shortModel(modelId(m?.model) || data.model) || "unknown"
+        // Full model id, provider prefix stripped (the `prov:` header above
+        // already says which provider): Row() left cell truncates the name
+        // while the right stat never clips — no pre-truncation.
+        const name = splitModel(modelId(m?.model) || data.model)[1] || "unknown"
         if (!byProv.has(prov)) byProv.set(prov, new Map())
         const inner = byProv.get(prov)!
         const cur = inner.get(name) ?? { steps: 0, cost: 0 }
@@ -914,6 +1003,15 @@ const HarnessTui = {
         cur.cost += Number(m?.cost ?? 0)
         inner.set(name, cur)
       }
+
+      // The last turn's tokens/sec travels in the Window header value, not
+      // on a step row (see windowValue): a `· rate` suffix jammed name,
+      // steps and rate together on narrow panels. This session only, like
+      // the Window number itself — a subagent's window is not this one.
+      // Only a real measurement is kept — turnRate's "" (unmeasurable)
+      // collapses to no prefix at all.
+      const measured = turnRate(lastTurn(mine))
+      data.currentRate = /^\d[\d,]* tok\/s$/.test(measured) ? measured : ""
 
       const steps: Rec[] = []
       for (const [prov, used] of byProv) {
@@ -923,21 +1021,20 @@ const HarnessTui = {
         // Provider.Info row carries no `models` map on 2.0.14).
         steps.push({ row: `${cut(prov, 20)}:`, kind: "provider" })
         for (const [name, e] of used) {
-          // Aligned columns inside the 32-cell detail budget: model left,
-          // steps right, with a `·` separator so a truncated name can never
-          // glue to the count (`…849 steps`). Per-model cost stays out —
-          // the Tokens row owns `$`.
-          steps.push({
-            row: `${cut(name, 18).padEnd(18)} · ${e.steps} step${e.steps === 1 ? "" : "s"}`,
-            kind: "row",
-          })
+          // Justified inside the detail budget: model left, steps right via
+          // space-between, with a `·` separator so the name can never glue
+          // to the count. The full model id rides along — Row() left cell
+          // truncates the name, the right stat never clips.
+          // Per-model cost stays out — the Tokens row owns `$`.
+          const row = `${name} · ${e.steps} step${e.steps === 1 ? "" : "s"}`
+          steps.push({ row, kind: "row" })
         }
       }
       // Nothing sent yet: the selected model is still the model in use — a
       // "fallback" row that is deliberately NOT counted as usage ("1 used"
       // before the first message was the old lie).
       if (!steps.length && data.model) {
-        steps.push({ row: `${shortModel(data.model)} · selected`, kind: "fallback" })
+        steps.push({ row: `${data.model} · selected`, kind: "fallback" })
       }
       data.steps = steps
       data.provsUsed = byProv.size
@@ -1204,7 +1301,7 @@ const HarnessTui = {
         notes.push(short(e))
       } finally {
         patch((d) => {
-          d.sessionID = sessionID.slice(0, 12)
+          d.sessionID = sessionID
           d.skills = data.skills.length
           d.agents = data.agents.length
           d.todos = data.todos.length
@@ -1442,9 +1539,12 @@ const HarnessTui = {
     }
 
     /**
-     * One stat row: caret, fixed-width label column, then the value. The
-     * header is one string (`caret + " " + padded label + " " + value`) with
-     * the spaces as literals, so it never depends on the host honouring `gap`.
+     * One stat row in the Kilo section grammar: a header of chevron + bold
+     * title (text colour) + spacer pinning the muted value right, and
+     * justified detail rows (label left, value right, both muted) full-bleed
+     * from the left edge (paddingLeft 0) — split at the separators the data
+     * already uses. Colour lives only in status dots and +/- diffs (via
+     * tone/lineParts); every other line renders muted.
      *
      * `lines()` is called INSIDE the JSX expression on purpose: Solid re-runs
      * tracked JSX expressions, not the component/render body, so a plain
@@ -1484,6 +1584,7 @@ const HarnessTui = {
       <box flexDirection="column">
         <box
           flexDirection="row"
+          gap={1}
           minWidth={0}
           onMouseDown={() =>
             patch((d) => {
@@ -1494,11 +1595,14 @@ const HarnessTui = {
             })
           }
         >
-          <text fg={isOpen(props.id) ? th.accent : th.base} flexShrink={0} wrapMode="none">
-            {`${isOpen(props.id) ? "▾" : "▸"} `}
+          <text fg={th.base} flexShrink={0} wrapMode="none">
+            {isOpen(props.id) ? "▾" : "▸"}
           </text>
-          <text fg={isOpen(props.id) ? th.accent : th.base} flexShrink={0} wrapMode="none" truncate>
-            {`${props.label.padEnd(LABEL_W)} `}
+          <text fg={th.base} bold flexShrink={0} wrapMode="none" truncate>
+            {props.label}
+          </text>
+          <text flexGrow={1} wrapMode="none" truncate>
+            {" "}
           </text>
           {props.valueParts
             ? props.valueParts().map((p) => (
@@ -1511,7 +1615,7 @@ const HarnessTui = {
               </text>}
         </box>
         {isOpen(props.id) ? (
-          <box flexDirection="column">
+          <box flexDirection="column" paddingLeft={0}>
             {(() => {
               const all = props.lines()
               const rows: string[] = all.length ? all.slice(0, DETAIL_LIMIT) : [props.empty]
@@ -1519,27 +1623,88 @@ const HarnessTui = {
               // the dishonesty users notice — always say how many more exist.
               if (all.length > DETAIL_LIMIT) rows.push(`… +${all.length - DETAIL_LIMIT} more`)
               return rows.map((l) =>
-                props.lineParts ? (
-                  // 32 columns + the ten-column detail indent is the sidebar's
-                  // whole content width (measured off a real 42-column sidebar):
-                  // one more and opencode middle-truncates the row it is already
-                  // showing. Word-boundary cut, like the fact rows: a mid-word
-                  // cut hid the end of the token it landed on.
-                  <box flexDirection="row" minWidth={0}>
-                    <text wrapMode="none" truncate>
-                      {" ".repeat(2 + LABEL_W + 1)}
-                    </text>
-                    {props.lineParts(l).map((p) => (
-                      <text fg={p.fg} wrapMode="none" truncate>
-                        {p.text}
+                props.lineParts ? (() => {
+                  // Justified dot/status rows: label left, value right,
+                  // full-bleed from column 0. The dot keeps its colour left;
+                  // the trailing value (after " · ") pins right. No " · " —
+                  // full-width left line, the justified-with-no-value form.
+                  const parts = props.lineParts(l)
+                  const joined = parts.map((p) => p.text).join("")
+                  const sep = joined.indexOf(" · ")
+                  if (sep < 0) {
+                    return (
+                      <box flexDirection="row" justifyContent="space-between" minWidth={0}>
+                        <box flexDirection="row" flexGrow={1} minWidth={0}>
+                          {parts.map((p, idx) => (
+                            <text fg={p.fg} wrapMode="none" truncate={idx === parts.length - 1}>
+                              {p.text}
+                            </text>
+                          ))}
+                        </box>
+                      </box>
+                    )
+                  }
+                  const leftStr = joined.slice(0, sep)
+                  const rightStr = joined.slice(sep + 3)
+                  if (!rightStr) {
+                    return (
+                      <box flexDirection="row" justifyContent="space-between" minWidth={0}>
+                        <box flexDirection="row" flexGrow={1} minWidth={0}>
+                          {parts.map((p, idx) => (
+                            <text fg={p.fg} wrapMode="none" truncate={idx === parts.length - 1}>
+                              {p.text}
+                            </text>
+                          ))}
+                        </box>
+                      </box>
+                    )
+                  }
+                  let acc = 0
+                  const leftParts: Array<{ text: string; fg: string }> = []
+                  let rightFg = th.muted
+                  for (const p of parts) {
+                    const start = acc
+                    const end = acc + p.text.length
+                    if (start < leftStr.length) {
+                      leftParts.push({ text: p.text.slice(0, leftStr.length - start), fg: p.fg })
+                    }
+                    if (sep >= start && sep < end) rightFg = p.fg
+                    acc = end
+                  }
+                  return (
+                    <box flexDirection="row" justifyContent="space-between" minWidth={0}>
+                      <box flexDirection="row" flexGrow={1} minWidth={0}>
+                        {leftParts.map((p, idx) => (
+                          <text fg={p.fg} wrapMode="none" truncate={idx === leftParts.length - 1}>
+                            {p.text}
+                          </text>
+                        ))}
+                      </box>
+                      <text fg={rightFg} flexShrink={0} wrapMode="none">
+                        {rightStr}
                       </text>
-                    ))}
-                  </box>
-                ) : (
-                  <text fg={props.tone ? props.tone(l) : th.muted} wrapMode="none" truncate>
-                    {`${" ".repeat(2 + LABEL_W + 1)}${wcut(l, 32)}`}
-                  </text>
-                ),
+                    </box>
+                  )
+                })() : (() => {
+                  // Metric rows: label left, value right on the same line,
+                  // both muted unless tone says otherwise (todo dots).
+                  const [k, v] = splitRow(l)
+                  const fg = props.tone ? props.tone(l) : th.muted
+                  return v ? (
+                    <box flexDirection="row" justifyContent="space-between" minWidth={0}>
+                      <text fg={fg} flexGrow={1} minWidth={0} wrapMode="none" truncate>
+                        {k}
+                      </text>
+                      <text fg={fg} flexShrink={0} wrapMode="none">
+                        {v}
+                      </text>
+                    </box>
+                  ) : (
+                    <text fg={fg} wrapMode="none" truncate>
+                      {k}
+                    </text>
+                  )
+                })(),
               )
             })()}
           </box>
@@ -1573,13 +1738,19 @@ const HarnessTui = {
             const windowValue = (): string => {
               void view.rev
               if (!data.tokens) return "—"
-              return data.contextLimit > 0 ? `${bar(pct())} ${pct()}%` : `${kfmt(used())} tok`
+              // The last turn's speed rides here, ahead of the bar — one
+              // value string, still right-pinned under the existing pressure
+              // tint. Only a real measurement shows: without one this is
+              // byte-identical to the bar (or token count) below.
+              const rate = String(data.currentRate ?? "")
+              const prefix = /^\d[\d,]* tok\/s$/.test(rate) ? `${rate} ` : ""
+              return data.contextLimit > 0 ? `${prefix}${bar(pct())} ${pct()}%` : `${prefix}${kfmt(used())} tok`
             }
             /** Pressure tint: quiet until the window is actually filling up. */
             const windowFg = (): string => {
               void view.rev
               if (!data.tokens) return th.muted
-              return pct() >= 80 ? th.warn : th.base
+              return pct() >= 80 ? th.warn : pct() >= 60 ? th.base : ok
             }
             const windowLines = (): string[] => {
               void view.rev
@@ -1588,7 +1759,8 @@ const HarnessTui = {
               if (data.contextLimit > 0) {
                 out.push(`${numfmt(used())} / ${numfmt(data.contextLimit)} in context`)
               }
-              out.push(`${data.model ? shortModel(data.model) : "model —"} · agent ${data.agent || "—"}`)
+              out.push(`${data.model || "model —"}`)
+              out.push(`agent ${data.agent || "—"}`)
               if (data.lastCompaction) out.push(`brief: ${data.lastCompaction} retained`)
               return out
             }
@@ -1603,31 +1775,33 @@ const HarnessTui = {
               const t = data.tokens
               if (!t) return []
               const cache = t.cache ?? {}
-              // No cost line: it is the row's value already, and a repeat of
-              // the same number was pure noise. Cache write is shown only
-              // when there is any (it is usually 0).
-              const incl =
-                (data.subCount ?? 0) > 0
-                  ? ` (incl. ${data.subCount} subagent${data.subCount === 1 ? "" : "s"})`
-                  : ""
+              // One label/value pair per line. splitRow() justifies at the
+              // FIRST " · ", so a packed pair truncated into "input 897,811
+              // output 60,762" — label and value jammed together. The subagent
+              // note folds onto the output line; no cost line (it is the row's
+              // value already). Cache write only when nonzero.
+              const subN = data.subCount ?? 0
+              const incl = subN > 0 ? ` (incl. ${subN} subagent${subN === 1 ? "" : "s"})` : ""
               const out = [
-                `input ${numfmt(t.input)} · output ${numfmt(t.output)}${incl}`,
-                `reasoning ${numfmt(t.reasoning)} · cache ${kfmt(cache.read)}`,
+                `input · ${numfmt(t.input)}`,
+                `output · ${numfmt(t.output)}${incl}`,
+                `reasoning · ${numfmt(t.reasoning)}`,
+                `cache · ${kfmt(cache.read)}`,
               ]
-              if (Number(cache.write ?? 0) > 0) out.push(`cache write ${numfmt(cache.write)}`)
+              if (Number(cache.write ?? 0) > 0) out.push(`cache write · ${numfmt(cache.write)}`)
               // The children-only split of the same totals, so the family
-              // number above stays traceable. subSplit is absent on hosts
-              // without family discovery (and when no child exists) — then
-              // the line is dropped, never shown as fake zeros.
-              if (data.subSplit && (data.subCount ?? 0) > 0) {
-                out.push(
-                  `↳ workers: input ${numfmt(data.subSplit.input)} · output ${numfmt(data.subSplit.output)} · cache ${kfmt(data.subSplit.cache)}`,
-                )
+              // number above stays traceable — one line per field, never
+              // packed mid-line. subSplit is absent on hosts without family
+              // discovery (and when no child exists) — then the lines are
+              // dropped, never shown as fake zeros.
+              if (data.subSplit && subN > 0) {
+                out.push(`↳ workers input · ${numfmt(data.subSplit.input)}`)
+                out.push(`↳ workers output · ${numfmt(data.subSplit.output)}`)
               }
               // The value above is session + subagents; say what the workers
               // contributed so the family total is traceable, not mysterious.
-              if ((data.subCount ?? 0) > 0) {
-                out.push(`+ ${data.subCount} subagent${data.subCount === 1 ? "" : "s"} · ${numfmt(data.subTokens)} tok`)
+              if (subN > 0) {
+                out.push(`+ ${subN} subagent${subN === 1 ? "" : "s"} · ${numfmt(data.subTokens)} tok`)
               }
               return out
             }
@@ -1642,20 +1816,12 @@ const HarnessTui = {
                     as literals — the line then reads the same on a host that
                     honours `gap` and one that drops it. */}
                 <box flexDirection="row" minWidth={0}>
-                  <text fg={view.note ? th.warn : th.base} flexShrink={0}>
+                  <text fg={view.note ? th.warn : th.base} bold flexShrink={0}>
                     {"harness "}
                   </text>
                   <text fg={th.muted} flexGrow={1} wrapMode="none" truncate>
                     {(() => {
-                      const tail = view.note
-                        ? cut(view.note, 40)
-                        : [
-                            view.sessionID || "",
-                            (view.skills ?? 0) > 0 ? `${view.skills} skills` : "",
-                            (view.facts ?? 0) > 0 ? `${view.facts} facts` : "",
-                          ]
-                            .filter((s) => s.length)
-                            .join(" · ")
+                      const tail = view.note ? cut(view.note, 40) : view.sessionID || ""
                       return tail ? `· ${tail}` : ""
                     })()}
                   </text>
@@ -1678,42 +1844,8 @@ const HarnessTui = {
                   id="tokens"
                   label="Tokens"
                   value={tokenValue}
-                  valueFg={() => {
-                    void view.rev
-                    return data.tokens ? th.base : th.muted
-                  }}
                   lines={tokenLines}
                   empty="(no usage yet)"
-                  tone={(l) => (l.startsWith("+ ") ? th.base : th.muted)}
-                  valueParts={() => {
-                    void view.rev
-                    const t = data.tokens
-                    if (!t) return segs([["—", th.muted]])
-                    return segs([
-                      [`${kfmt(total())} · `, th.base],
-                      [`$${Number(data.cost ?? 0).toFixed(4)}`, th.accent],
-                    ])
-                  }}
-                  lineParts={(l) => {
-                    if (l.startsWith("input ")) {
-                      const i = l.indexOf(" (incl.")
-                      return i >= 0
-                        ? segs([[l.slice(0, i), th.base], [l.slice(i), th.muted]])
-                        : segs([[l, th.base]])
-                    }
-                    if (l.startsWith("reasoning ")) {
-                      const i = l.indexOf(" · cache ")
-                      return i >= 0
-                        ? segs([[l.slice(0, i + 9), th.base], [l.slice(i + 9), th.muted]])
-                        : segs([[l, th.base]])
-                    }
-                    if (l.startsWith("cache write ")) {
-                      return segs([["cache write ", th.base], [l.slice("cache write ".length), th.muted]])
-                    }
-                    if (l.startsWith("+ ")) return segs([[l, th.base]])
-                    // the ↳ workers line and anything else reads as an annotation
-                    return segs([[l, th.muted]])
-                  }}
                 />
                 <Row
                   id="models"
@@ -1724,16 +1856,11 @@ const HarnessTui = {
                     const p = view.providers ?? 0
                     return `${view.models} model${view.models === 1 ? "" : "s"} · ${p} provider${p === 1 ? "" : "s"}`
                   }}
-                  valueFg={() => {
-                    void view.rev
-                    return view.models ? th.base : th.muted
-                  }}
                   lines={() => {
                     void view.rev
                     return data.steps.map((s: Rec) => String(s.row))
                   }}
                   empty="(none used in this session)"
-                  tone={(l) => (l.endsWith(":") ? th.base : th.muted)}
                 />
                 <Row
                   id="todo"
@@ -1744,7 +1871,6 @@ const HarnessTui = {
                     if (!n) return "—"
                     return `${view.todosDone ?? 0}/${n} done${view.todosProject ? " · project" : ""}`
                   }}
-                  valueFg={() => th.base}
                   hide={() => {
                     void view.rev
                     return !(view.todos ?? 0)
@@ -1754,7 +1880,7 @@ const HarnessTui = {
                     return data.todos
                   }}
                   empty="(none in this session)"
-                  tone={(l) => (l.startsWith("◐") ? th.accent : l.startsWith("○") ? th.base : th.muted)}
+                  tone={(l) => (l.startsWith("●") ? ok : l.startsWith("◐") ? warn : l.startsWith("○") ? th.muted : l.startsWith("✕") ? bad : th.muted)}
                 />
                 {/* Project-wide, unlike the rows above: the server half records a
                     worker when the `task` tool starts it, so the pool belongs to
@@ -1763,10 +1889,6 @@ const HarnessTui = {
                   id="workers"
                   label="Workers"
                   value={() => (view.workersActive ? `${view.workersActive} active` : "idle")}
-                  valueFg={() => {
-                    void view.rev
-                    return view.workersActive ? th.base : th.muted
-                  }}
                   hide={() => {
                     void view.rev
                     return !view.workers
@@ -1776,26 +1898,20 @@ const HarnessTui = {
                     return data.workers
                   }}
                   empty="(no workers in this project)"
-                  tone={(l) =>
-                    l.startsWith("✕") || l.startsWith("!") || l.startsWith("~")
-                      ? th.warn
-                      : l.startsWith("◐") || l.startsWith("○")
-                        ? th.base
-                        : th.muted
-                  }
                   lineParts={(l) => {
                     const i = l.indexOf(" ")
                     const mark = i > 0 ? l.slice(0, i) : l
                     const rest = i > 0 ? l.slice(i + 1) : ""
                     const j = rest.indexOf(" · ")
+                    // The dot carries the state colour; the name and the status
+                    // read muted.
                     const markFg =
                       mark === "●" ? ok
                         : mark === "✕" ? bad
-                          : mark === "!" ? warn
-                            : mark === "◐" ? th.accent
-                              : th.muted
+                          : mark === "◐" || mark === "!" ? warn
+                            : th.muted
                     if (j < 0) return segs([[l, th.muted]])
-                    return segs([[mark + " ", markFg], [rest.slice(0, j), th.base], [rest.slice(j), th.muted]])
+                    return segs([[mark + " ", markFg], [rest.slice(0, j), th.muted], [rest.slice(j), th.muted]])
                   }}
                 />
                 {/* Project-wide like Workers above: a countdown belongs to the
@@ -1809,7 +1925,6 @@ const HarnessTui = {
                     const n = view.waits ?? 0
                     return n === 1 ? "1 waiting" : `${n} waiting`
                   }}
-                  valueFg={() => th.base}
                   hide={() => {
                     void view.rev
                     return !(view.waits ?? 0)
@@ -1819,7 +1934,6 @@ const HarnessTui = {
                     return liveWaits()
                   }}
                   empty="(no waits pending)"
-                  tone={() => th.base}
                 />
                 <Row
                   id="files"
@@ -1833,10 +1947,6 @@ const HarnessTui = {
                     const del = data.files.reduce((sum, r) => sum + Number(r.deletions ?? 0), 0)
                     return `${changed} changed · +${add} -${del}`
                   }}
-                  valueFg={() => {
-                    void view.rev
-                    return data.files.length ? th.base : th.muted
-                  }}
                   lines={() => {
                     void view.rev
                     if (!data.vcsKnown) return ["(repository state unavailable)"]
@@ -1846,17 +1956,16 @@ const HarnessTui = {
                     )
                   }}
                   empty="(clean)"
-                  tone={(l) => l.startsWith("(") ? th.muted : th.base}
                   lineParts={(l) => {
                     if (l.startsWith("(")) return segs([[l, th.muted]])
                     const letter = l.slice(0, 1)
                     const letterFg = letter === "M" ? warn : letter === "A" ? ok : letter === "D" ? bad : th.muted
                     const plus = l.lastIndexOf(" +")
                     const minus = l.lastIndexOf(" -")
-                    if (plus < 2 || minus <= plus) return segs([[l, th.base]])
+                    if (plus < 2 || minus <= plus) return segs([[l, th.muted]])
                     return segs([
                       [letter + " ", letterFg],
-                      [l.slice(2, plus), th.base],
+                      [l.slice(2, plus), th.muted],
                       [l.slice(plus, minus), ok],
                       [l.slice(minus), bad],
                     ])
@@ -1866,10 +1975,6 @@ const HarnessTui = {
                   id="skills"
                   label="Skills"
                   value={() => `${view.skills ?? 0} installed`}
-                  valueFg={() => {
-                    void view.rev
-                    return (view.skills ?? 0) > 0 ? th.base : th.muted
-                  }}
                   lines={() => {
                     void view.rev
                     // Cold stores answer empty on the first pass: while the
@@ -1886,10 +1991,6 @@ const HarnessTui = {
                   id="agents"
                   label="Agents"
                   value={() => `${view.agents ?? 0} available`}
-                  valueFg={() => {
-                    void view.rev
-                    return (view.agents ?? 0) > 0 ? th.base : th.muted
-                  }}
                   lines={() => {
                     void view.rev
                     // Active agent first and marked; internals were filtered
@@ -1901,13 +2002,16 @@ const HarnessTui = {
                       .map((a) => `${a === cur ? "●" : "◦"} ${a}`)
                   }}
                   empty="(none registered)"
-                  tone={(l) => (l.startsWith("●") ? th.base : th.muted)}
+                  // The active dot carries the colour; names read muted.
+                  lineParts={(l) => {
+                    const dot = l.slice(0, 1)
+                    return segs([[dot + " ", dot === "●" ? ok : th.muted], [l.slice(2), th.muted]])
+                  }}
                 />
                 <Row
                   id="memory"
                   label="Memory"
                   value={() => `${view.facts ?? 0} fact${(view.facts ?? 0) === 1 ? "" : "s"}`}
-                  valueFg={() => th.base}
                   hide={() => {
                     void view.rev
                     return !(view.facts ?? 0)
@@ -1919,9 +2023,6 @@ const HarnessTui = {
                     return [...state, ...data.facts]
                   }}
                   empty="(no durable facts yet)"
-                  tone={(l) =>
-                    l.startsWith("◐") ? th.accent : l.startsWith("✕") || l.startsWith("⚠") ? th.warn : th.muted
-                  }
                   lineParts={(l) => {
                     const i = l.indexOf(" ")
                     const mark = i > 0 ? l.slice(0, i) : l
@@ -1929,10 +2030,10 @@ const HarnessTui = {
                       mark === "●" ? ok
                         : mark === "✕" ? bad
                           : mark === "⚠" ? warn
-                            : mark === "◐" ? th.accent
+                            : mark === "◐" ? warn
                               : th.muted
                     return i > 0
-                      ? segs([[mark + " ", markFg], [l.slice(i + 1), th.base]])
+                      ? segs([[mark + " ", markFg], [l.slice(i + 1), th.muted]])
                       : segs([[l, markFg]])
                   }}
                 />

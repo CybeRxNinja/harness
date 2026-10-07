@@ -10,6 +10,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUN = shutil.which("bun")
+NODE = shutil.which("node")
 
 # Loads the plugin exactly like opencode's plugin host does (default export +
 # setup(ctx)) against a recording stub context, then exercises the executors.
@@ -906,6 +907,21 @@ def test_tui_plugin_is_a_sidebar_panel_not_a_layout_change():
     # edge at any panel width without a hard-coded width constant
     assert 'flexGrow={1} wrapMode="none" truncate' in tui
     assert 'flexShrink={0} wrapMode="none"' in tui
+    # Kilo side-panel grammar: section headers are chevron + bold title with a
+    # box gap and a spacer pinning the muted value right; details are justified
+    # label/value pairs full-bleed from the left edge (paddingLeft 0), split
+    # at the separators the data already uses — never a padded label column
+    # or a literal indent
+    assert 'gap={1}' in tui
+    assert tui.count('justifyContent="space-between"') >= 2, "both detail branches justify (metric + dot/status)"
+    assert 'paddingLeft={0}' in tui
+    assert 'paddingLeft={2}' not in tui, "detail rows start at column 0, full-bleed"
+    assert "function splitRow(" in tui
+    assert "padEnd(18)" not in tui, "space-between owns Models alignment, not table padding"
+    assert '<box flexDirection="row" flexGrow={1} minWidth={0}>' in tui, "dot/status LEFT group spans the full line"
+    assert "LABEL_W" not in tui, "no label-width column in the Kilo header"
+    assert "padEnd(LABEL_W)" not in tui
+    assert '{"  "}' not in tui, "no literal two-space detail indent"
     # theme keys opencode actually exposes (text.base/muted/action/feedback);
     # text.default/text.subdued are from a different version and resolve to
     # undefined, which renders rows in a fallback colour — i.e. "foreign"
@@ -1065,14 +1081,22 @@ def test_tui_models_rows_are_computed_on_every_load():
     gate = tui.index("if (full || (!scanned && Date.now() >= slowNext)) {")
     assert "scanModels" not in tui[gate:tui.index("\n        }\n", gate)]
     assert "warmedFor = sessionID" in tui and "setTimeout(() => void load(), 500)" in tui
-    # real step counts, not a hard-coded "1 step", aligned in columns that fit
-    # the 32-cell detail budget: model left, steps right, split by a `·`
-    # separator so a truncated name can never glue to the count (`…2 steps`)
+    # real step counts, not a hard-coded "1 step", justified left/right via
+    # space-between: model left, steps right, split by a `·`
+    # separator so the name can never glue to the count (`…2 steps`).
+    # Step rows carry the FULL model id — no pre-truncation: a full name
+    # (~30ch) + ` · N steps` (~12ch) fits the ~46-col panel, and both Row()
+    # value cells truncate, so a narrow panel clips instead of overlapping.
     assert 'e.steps === 1 ? "" : "s"' in tui
-    assert "`${cut(name, 18).padEnd(18)} · ${e.steps} step" in tui
-    assert "`${cut(name, 18).padEnd(18)}${e.steps} step" not in tui, (
-        "the separator must survive truncation: no `…<digits> step` glue"
+    assert "`${name} · ${e.steps} step" in tui, "step rows carry the full model id"
+    assert "cut(name, 18)" not in tui, "no pre-truncation on step rows"
+    assert "padEnd(18)" not in tui, "space-between owns the alignment, not table padding"
+    scan = tui[tui.index("const scanModels = (data_: Rec): void => {"):tui.index("const liveWaits = ")]
+    assert "shortModel" not in scan, "step rows group and render the full model id"
+    assert "splitModel(modelId(m?.model) || data.model)[1]" in scan, (
+        "grouping key is the full model part (provider prefix stripped, never cut)"
     )
+    assert "`${data.model} · selected`" in scan, "fallback shows the full selected model"
     # a session that has sent nothing still shows the selected model — as a
     # "fallback" row that is NOT counted as usage ("1 used" before the first
     # message was the old lie)
@@ -1546,10 +1570,224 @@ def test_tui_feedback_colors_have_literal_fallbacks():
 
 
 def test_tui_tokens_row_shows_children_split():
+    """Tokens details are one label/value pair per line.
+
+    Packed pairs (`input 897,811 · output 60,762`) truncated into each other
+    ("input 897,811output 60,762") because splitRow() justifies at the FIRST
+    " · " — so each metric gets its own line, the subagent note folds onto
+    the output line, and the workers split is one field per line.
+    """
     from harness.cli import _plugin_files
     text = Path(_plugin_files()[1]).read_text()
-    assert "↳ workers:" in text
+    for line in (
+        "`input · ${numfmt(t.input)}`",
+        "`output · ${numfmt(t.output)}${incl}`",
+        "`reasoning · ${numfmt(t.reasoning)}`",
+        "`cache · ${kfmt(cache.read)}`",
+        "`cache write · ${numfmt(cache.write)}`",
+        "`↳ workers input · ${numfmt(data.subSplit.input)}`",
+        "`↳ workers output · ${numfmt(data.subSplit.output)}`",
+        "`+ ${subN} subagent",
+    ):
+        assert line in text, line
+    # the packed pairs are gone: no line may carry two metrics
+    assert "`input ${numfmt(t.input)} · output" not in text
+    assert "`reasoning ${numfmt(t.reasoning)} · cache" not in text
+    assert "↳ workers:" not in text
+    # ...while the subagent note survives, folded onto the output line
     assert "incl." in text
+
+
+def test_tui_window_value_shows_tokens_per_sec():
+    """The last turn's tokens/sec rides the Window header, not Models rows.
+
+    A `· rate` suffix on the step row jammed name, steps and tok/s together on
+    narrow panels (the right value cell had flexShrink 0 with no truncate, so
+    the cells collided instead of clipping). Step rows are back to
+    `name · N steps` for clean splitRow() justification; the rate prefixes the
+    Window header value ahead of the bar (`1,234 tok/s █░░░░░░░ 5%`) — and only
+    when it is a real measurement, so an unmeasurable window renders exactly
+    as before. No new store sync, fetch or host call: scanModels still reads
+    only the already-listed messages.
+
+    The rate IS opencode's own definition (its `$a` beside the assistant
+    footer in the shipped binary): the turn's output+reasoning tokens over
+    its summed streamed−created durations — never input/cache tokens, never
+    a wall span. The old wall-span rate counted both and read ~36x high live.
+    """
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[1]).read_text()
+    assert "function lastTurn(msgs: Rec[]): Rec[]" in text
+    assert "function turnRate(turn: Rec[]): string" in text
+    assert "tok/s" in text
+    assert '"—/s"' not in text, "unmeasurable renders as no prefix, never a sentinel"
+    assert "function modelRate" not in text and "function msgSpan" not in text, (
+        "the wall-span machinery is gone"
+    )
+    # opencode's numerator/denominator (its $a): output+reasoning over summed
+    # streamed−created — never input/cache totals, never a completed stamp.
+    rate = text[text.index("function turnRate"):text.index("function asArray")]
+    assert "m?.tokens?.output" in rate and "m?.tokens?.reasoning" in rate
+    assert "t?.streamed" in rate
+    assert "totalTokens" not in rate, "input+cache must not enter the rate"
+    assert "t?.completed" not in rate, "tool-wait gaps (completed−streamed) must not enter the denominator"
+    # Models rows carry no rate: no suffix on the step row, no rate-only row.
+    assert "` · ${rate}`" not in text, "no rate suffix on Models step rows"
+    assert "`tok/s · —/s`" not in text, "no rate-only Models row either"
+    assert "`${name} · ${e.steps} step" in text, "rows are back to name · N steps"
+    scan = text[text.index("const scanModels = (data_: Rec): void => {"):text.index("const liveWaits = ")]
+    assert "turnRate(lastTurn(mine))" in scan, "this session's last turn, like the Window number itself"
+    assert "msgSpan" not in scan and "modelRate" not in scan and "firstTs" not in scan
+    assert "{ steps: 0, cost: 0 }" in scan, "model groups keep steps+cost only — the rate left them"
+    assert "data.currentRate" in scan, "the measured rate travels to the Window value"
+    for banned in ("sync?.(", "fetch(", "import("):
+        assert banned not in scan, f"scanModels must not gain a data source: {banned}"
+    # Window header: `<rate> ` ahead of the bar when real, byte-identical shape
+    # when not (no placeholder, no sentinel noise).
+    win = text[text.index("const windowValue = "):text.index("const windowFg = ")]
+    assert "data.currentRate" in win
+    assert "${prefix}${bar(pct())} ${pct()}%" in win, "rate + bar + pct stay one value string"
+    assert "${bar(pct())} ${pct()}%" in win
+    assert '"—/s"' not in win, "an unmeasurable window shows no rate noise"
+    # Flex priority: the right stat NEVER clips (flexShrink 0, no truncate,
+    # pinned right) while the left name yields (flexGrow 1, minWidth 0,
+    # truncate). Clipping the value side cut the IMPORTANT side
+    # (`muse-spark-1.3-contributor-free414…`, `fledge-alpha-free44 steps`).
+    assert '<text fg={rightFg} flexShrink={0} wrapMode="none">' in text
+    assert '<text fg={rightFg} flexShrink={0} wrapMode="none" truncate>' not in text
+    assert '<text fg={fg} flexGrow={1} minWidth={0} wrapMode="none" truncate>' in text
+    assert '<text fg={fg} flexShrink={0} wrapMode="none">' in text
+    assert '<text fg={fg} flexShrink={0} wrapMode="none" truncate>' not in text
+    # step rows carry the full `N steps` stat, so e.g. `383 steps` renders whole
+    assert '`${name} · ${e.steps} step' in text
+
+
+# Drives the REAL helpers sliced out of tui.tsx (type Rec … HarnessTui —
+# pure functions, no imports, no JSX; node strips the types natively) with a
+# small fixed message fixture, proving the Window rate equals opencode's own
+# figure for the same fixture and NOT the old wall-span figure.
+RATE_CHECK = r"""
+const C = 1791348000000
+const msgs = [
+  // stale assistant from BEFORE the turn: lastTurn must stop at the user
+  // message, so its 99999 output tokens never enter the numerator.
+  { role: "assistant", tokens: { input: 1, output: 99999, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: C - 100000, streamed: C - 99000, completed: C - 98000 } },
+  { role: "user", text: "go" },
+  // turn message 1: 132 output+reasoning tokens in 2.0s of generation, then
+  // a 7s tool wait (completed−streamed) that must NOT enter the denominator.
+  { role: "assistant", tokens: { input: 5000, output: 120, reasoning: 12, cache: { read: 20000, write: 0 } },
+    time: { created: C, streamed: C + 2000, completed: C + 9000 } },
+  // turn message 2: 120 output+reasoning tokens in 2.0s.
+  { role: "assistant", tokens: { input: 8000, output: 108, reasoning: 12, cache: { read: 40000, write: 0 } },
+    time: { created: C + 12000, streamed: C + 14000, completed: C + 15000 } },
+]
+const turn = lastTurn(msgs)
+// The OLD wall-span figure for the same turn, for contrast: every token
+// kind (input+cache included) over last−first.
+const tot = (t) => (t?.input ?? 0) + (t?.output ?? 0) + (t?.reasoning ?? 0) + (t?.cache?.read ?? 0) + (t?.cache?.write ?? 0)
+const oldToks = turn.reduce((n, m) => n + tot(m.tokens), 0)
+const oldSecs = (Math.max(...turn.map((m) => m.time.completed)) - Math.min(...turn.map((m) => m.time.created))) / 1000
+const check = (label, got, want) => {
+  if (got !== want) throw new Error(`${label}: got ${JSON.stringify(got)}, want ${JSON.stringify(want)}`)
+}
+check("turn", turn.length, 2)
+check("rate", turnRate(turn), "63 tok/s")
+check("old wall-span figure", `${Math.round(oldToks / oldSecs).toLocaleString("en-US")} tok/s`, "4,883 tok/s")
+check("empty", turnRate([]), "")
+check("no streamed", turnRate([{ role: "assistant", tokens: { output: 10 }, time: { created: C } }]), "")
+check("no output", turnRate([{ role: "assistant", tokens: { input: 5 }, time: { created: C, streamed: C + 1000 } }]), "")
+check("zero duration", turnRate([{ role: "assistant", tokens: { output: 10 }, time: { created: C, streamed: C } }]), "")
+console.log(JSON.stringify({ rate: turnRate(turn), oldStyle: `${Math.round(oldToks / oldSecs).toLocaleString("en-US")} tok/s` }))
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_tui_window_rate_matches_opencodes_definition(tmp_path):
+    """Executable proof that the Window rate is opencode's tok/s, not ours.
+
+    Fixture: two turn assistants carrying (120+12) and (108+12)
+    output+reasoning tokens over 2.0s + 2.0s of streamed−created generation
+    (252 tokens / 4s = 63 tok/s), alongside input/cache.read in the tens of
+    thousands and a 7s tool wait after the first stream. opencode's own
+    definition — the `$a` beside the assistant footer in the shipped
+    `~/.opencode/bin/opencode` binary (v2.0.24: T = sum of tokens.output +
+    tokens.reasoning over the assistant tail since the previous user message,
+    P = sum of time.streamed − time.created in ms, rate = T / (P / 1000),
+    undefined unless every tail message carries streamed with T > 0, P > 0;
+    ms units verified against ~/.local/share/opencode/opencode.db, where
+    time.created/streamed/completed read ~1.79e12) — gives "63 tok/s" for
+    this fixture, while the old wall-span figure (every token kind over
+    last−first) gives "4,883 tok/s". The test asserts both, plus the guards.
+    """
+    from harness.cli import _plugin_files
+    src = Path(_plugin_files()[1]).read_text()
+    start = src.index("type Rec = Record<string, any>")
+    end = src.index("const HarnessTui = {")
+    assert 0 <= start < end, "helper slice markers missing from tui.tsx"
+    script = tmp_path / "rate.ts"
+    script.write_text(src[start:end] + RATE_CHECK)
+    r = subprocess.run([NODE, str(script)],
+                       capture_output=True, text=True, timeout=60, cwd=str(REPO_ROOT))
+    assert r.returncode == 0, r.stderr[-2000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["rate"] == "63 tok/s", out
+    assert out["oldStyle"] == "4,883 tok/s" and out["oldStyle"] != out["rate"], out
+
+
+# Drives the real splitRow/wcut sliced out of tui.tsx (same helper-slice
+# technique as RATE_CHECK above: type Rec … HarnessTui, no imports, no JSX;
+# node strips the types natively), proving the stat side survives a long
+# model name that used to be cut before the split.
+SPLITROW_CHECK = r"""
+const check = (label, got, want) => {
+  const g = JSON.stringify(got)
+  const w = JSON.stringify(want)
+  if (g !== w) throw new Error(`${label}: got ${g}, want ${w}`)
+}
+// 43ch row: pre-split wcut(l, 40) mangled this into a `500…` stat
+const NAME = "muse-spark-1.3-contributor-free"
+const [k, v] = splitRow(`${NAME} · 500 steps`)
+check("stat intact", v, "500 steps")
+const bare = k.replace(/…$/, "")
+if (!bare.length || !NAME.startsWith(bare)) throw new Error(`left not a name prefix: ${JSON.stringify(k)}`)
+// short rows pass through untouched, on both separators
+check("short dot", splitRow("kilo · 3 steps"), ["kilo", "3 steps"])
+check("short colon", splitRow("prov: 3 used"), ["prov:", "3 used"])
+// no separator: current behavior (one left-aligned line, cut at 40)
+check("single short", splitRow("hello"), ["hello", ""])
+console.log(JSON.stringify({ k, v }))
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_tui_splitrow_never_clips_the_stat(tmp_path):
+    """splitRow() splits the RAW line first, then budgets truncation.
+
+    wcut(l, 40) ran BEFORE the split, so any `name · N steps` row over 40
+    cols (`muse-spark-1.3-contributor-free · 500 steps` = 43ch) was cut
+    before justification and the stat rendered `500…` no matter what the
+    flex cells did. Now the right side is never cut while the left name
+    yields with `max(10, 40 - v.length - 3)`.
+    """
+    tui = _tui_text()
+    assert "function splitRow(l: string): [string, string] {" in tui
+    assert "const cut40 = wcut(l, 40)" not in tui, "no pre-truncation before the split"
+    assert "Math.max(10, 40 - v.length - 3)" in tui
+    from harness.cli import _plugin_files
+    src = Path(_plugin_files()[1]).read_text()
+    start = src.index("type Rec = Record<string, any>")
+    end = src.index("const HarnessTui = {")
+    assert 0 <= start < end, "helper slice markers missing from tui.tsx"
+    script = tmp_path / "splitrow.ts"
+    script.write_text(src[start:end] + SPLITROW_CHECK)
+    r = subprocess.run([NODE, str(script)],
+                       capture_output=True, text=True, timeout=60, cwd=str(REPO_ROOT))
+    assert r.returncode == 0, r.stderr[-2000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["v"] == "500 steps", out
+    bare = out["k"].rstrip("…")
+    assert bare and "muse-spark-1.3-contributor-free".startswith(bare), out
 
 
 def test_tui_worker_names_are_width_capped():
@@ -1582,6 +1820,21 @@ def test_tui_window_bar_is_the_last_message_not_the_session_total():
     assert "Math.round((total() / data.contextLimit) * 100)" not in tui, (
         "the percentage must not divide the session total by the window"
     )
+
+
+def test_tui_window_model_and_agent_are_two_lines():
+    """The Window model/agent detail clipped both halves on narrow panels
+    (`muse-spark-1.3-contribu…agent…`): the full model id gets its own line
+    and `agent <name>` the next, both separator-free so Row() renders each
+    full-width instead of justifying them into one clipped line.
+    """
+    from harness.cli import _plugin_files
+    tui = Path(_plugin_files()[1]).read_text()
+    assert '`${data.model || "model —"}`' in tui
+    assert '`agent ${data.agent || "—"}`' in tui
+    assert "shortModel(data.model)" not in tui
+    assert "`${numfmt(used())} / ${numfmt(data.contextLimit)} in context`" in tui
+    assert "`brief: ${data.lastCompaction} retained`" in tui
 
 
 def test_tui_panel_shows_only_thoughtful_accurate_rows():
@@ -1622,8 +1875,19 @@ def test_tui_panel_shows_only_thoughtful_accurate_rows():
 
     # chip leads with context pressure; the lifetime total is demoted
     assert "`${p}% ctx · `" in tui
-    # header drops zero counts instead of printing "0 facts"
-    assert '(view.facts ?? 0) > 0 ? `${view.facts} facts` : ""' in tui
+    # panel header shows the FULL session id and nothing else:
+    # `harness · <full-ses-id>` (the <text> truncates at the
+    # panel edge, so no mid-string mangling is needed)
+    assert "d.sessionID = sessionID" in tui
+    assert "sessionID.slice(0, 12)" not in tui
+    header = tui[tui.index('append: "sidebar.content"'):tui.index('id="window"')]
+    assert 'view.sessionID || ""' in header
+    assert "view.note ? cut(view.note, 40) : view.sessionID" in header
+    assert "skills" not in header, "the panel header carries no skills element"
+    assert "facts" not in header, "the panel header carries no facts element"
+    # the footer chip still drops zero counts instead of printing "0 facts"
+    chip = tui[tui.index("const headline = () => {"):]
+    assert '(view.facts ?? 0) > 0 ? `${view.facts} facts` : ""' in chip
 
 
 def test_tui_usage_counts_subagent_sessions():
@@ -1672,7 +1936,7 @@ def test_tui_usage_counts_subagent_sessions():
     assert "for (const id of familyIds(data_, sessionID).slice(1))" in tui
     # the Tokens detail says what the workers contributed, so the total is
     # traceable instead of mysteriously bigger than the visible messages
-    assert "+ ${data.subCount} subagent" in tui
+    assert "+ ${subN} subagent" in tui
 
 
 # Runs the pure helpers sliced out of tui.tsx (asArray … stateDb, everything
