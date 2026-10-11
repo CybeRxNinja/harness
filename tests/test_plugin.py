@@ -676,6 +676,26 @@ def test_plugin_generic_lessons_stage_but_never_auto_promote():
     assert "memAddLesson(memoryPath, name, text, capLines)" in body
 
 
+def test_plugin_promoted_lesson_is_gist_only_not_excerpt_soup():
+    """A promoted lesson is ONE gist line, never gist + excerpts spliced in.
+
+    The plugin used to write `${gist} :: <excerpt> | <excerpt>` with each
+    excerpt cut mid-word, so every durable line was unreadable. memAutoRefine
+    now mirrors memory.py's headline(gist, limit=200): the gist alone, cut on
+    a word boundary. Excerpts stay in the DB as evidence and the >=2
+    distinct-evidence gate is unchanged.
+    """
+    srv = _srv_text()
+    body = srv[srv.index("async function memAutoRefine"):srv.index("async function captureLessons")]
+    assert '" :: "' not in body and 'join(" | ")' not in body
+    assert "const text = `${gist} ::" not in body
+    assert "const text = (sp > 100 ? head.slice(0, sp) : head).trimEnd() || gist" in body
+    assert "memHeadline(gist, 200)" in body
+    # gist alone, no excerpt splice: the gate still reads evidence
+    assert "if (ev.length < Math.max(2, minEvidence)) continue" in body
+    assert "const ev = memEvidence(db, name)" in body
+
+
 def test_plugin_condense_keeps_error_lines_and_budgets_by_command():
     """Oversized success output shrinks through filler-strip plus per-command
     head/tail budgets — but mid-window ERROR_LINEs are hoisted into the elided

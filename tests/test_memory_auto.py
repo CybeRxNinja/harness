@@ -74,6 +74,21 @@ def test_recall_promotes_done_over_generic_turns(con):
     assert hits[0]["source"] == "done"
 
 
+def test_recall_ranks_a_durable_turn_fact_above_progress_noise(con):
+    from harness import memory as M
+    # capture_turn() stores a turn's durable lines as `turn` facts, so a live
+    # recall for the same words used to answer with the routine
+    # "worker ... finished" progress note and bury the lesson.
+    M.save_fact(con, "worker pool mailbox ranks the durable line", "turn")
+    M.save_fact(con, "worker pool mailbox note", "progress")
+    M.save_fact(con, "worker pool mailbox verified", "lesson")
+    M.save_fact(con, "worker pool mailbox proved", "done")
+    order = [h["source"] for h in M.recall(con, "worker pool mailbox", 8)]
+    assert order.index("turn") < order.index("progress"), order
+    assert order.index("done") < order.index("turn"), order
+    assert order.index("lesson") < order.index("turn"), order
+
+
 def test_recall_uses_session_history_too(con):
     import time as _t
     from harness import memory as M
@@ -233,7 +248,9 @@ def test_one_excerpt_stays_staged_and_two_promote(con, root):
     M.stage_lesson(con, "mailbox-dedupe", "excerpt two about the same defect", "second excerpt")
     assert M.auto_refine(con, path) == ["mailbox-dedupe"]
     body = path.read_text()
-    assert "- [mailbox-dedupe]" in body and "delivered flag" in body
+    # the entry is the newest gist alone — excerpts stay in the DB, not the file
+    assert "- [mailbox-dedupe] second excerpt" in body
+    assert "excerpt one about the delivered flag" not in body
     # promoted rows are consumed; the lone one is still awaiting review
     assert M.list_pending(con) == []
 
@@ -254,6 +271,28 @@ def test_evidence_only_counts_a_lesson_once(con, root):
     # a second pass must not duplicate the entry
     assert M.auto_refine(con, M.memory_file(root)) == []
     assert M.memory_file(root).read_text().count("[a-lesson]") == 1
+
+
+def test_promoted_lesson_is_the_gist_alone_not_the_evidence(con, root):
+    """MEMORY.md holds lessons, not logs.
+
+    `auto_refine()` used to write `gist :: excerpt | excerpt`, cutting each
+    excerpt at 200 chars mid-word. Every durable line came out unreadable, so a
+    promoted lesson is now one gist line and nothing else.
+    """
+    from harness import memory as M
+    path = M.memory_file(root)
+    gist = "Worker timeout lagged behind the queue: raise the ceiling, not the retries."
+    M.stage_lesson(con, "worker-timeout", "alpha " + "a" * 240 + " ALPHATAIL", "a stale gist")
+    M.stage_lesson(con, "worker-timeout", "beta " + "b" * 240 + " BETATAIL", gist)
+    assert M.auto_refine(con, path) == ["worker-timeout"]
+    line = next(l for l in path.read_text().splitlines() if l.startswith("- [worker-timeout]"))
+    assert gist in line and "a stale gist" not in line
+    assert " :: " not in line and " | " not in line
+    # no evidence spliced in, and no mid-word tail from a cut excerpt
+    assert "alpha" not in line and "ALPHATAIL" not in line
+    assert "BETATAIL" not in line
+    assert line == f"- [worker-timeout] {gist}"
 
 
 def test_memory_file_lives_in_the_harness_state_dir_not_the_repo_root(root):

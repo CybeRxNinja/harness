@@ -363,7 +363,11 @@ def auto_refine(con, memory_path, min_evidence: int = 2, cap_lines: int = 200) -
         gist = con.execute(
             "SELECT gist FROM pending WHERE kind='lesson' AND name=? ORDER BY id DESC LIMIT 1",
             (name,)).fetchone()
-        text = f"{gist[0] if gist else name} :: " + " | ".join(e[:200] for e in ev[:2])
+        # The entry is the lesson, not the log: one gist line, no spliced-in
+        # excerpts (they stay in the DB for evidence()/list_pending()). An
+        # earlier version pasted two excerpts after a " :: " and cut them
+        # mid-word, which made every durable line unreadable.
+        text = headline(gist[0] if gist else name, limit=200) or name
         if add_lesson(memory_path, name, text, cap_lines):
             promoted.append(name)
         con.execute("DELETE FROM pending WHERE kind='lesson' AND name=?", (name,))
@@ -432,7 +436,9 @@ def _source_priority(source: str) -> int:
         "lesson": 2,
         "blocked": 3,
         "error": 4,
-        "progress": 5,
-        "turn": 6,
+        # a turn's durable lines ARE the facts; progress is a where-did-work-
+        # get-to note, so it never outranks them
+        "turn": 5,
+        "progress": 6,
         "agent": 7,
     }.get(str(source or ""), 99)

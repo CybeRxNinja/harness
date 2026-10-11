@@ -72,6 +72,13 @@ def test_orchestrator_plans_waves_and_sizes_verification():
     assert "never build a test framework" in orch
     assert "not the whole gate again" in orch
     assert "three-line edit gets a targeted check" in orch
+    assert all(term in orch for term in ("build worker passed", "targeted/canonical check",
+                                         "exact command", "do not spawn a second test-engineer",
+                                         "static review only for a named concrete risk"))
+    assert all(term in orch for term in ("plugin UI symptom", "source and installed bytes",
+                                         "doctor/diff", "running process", "matching files"))
+    assert all(term in orch for term in ("Source-string layout assertions", "structure only",
+                                         "concrete long row", "behavioral check", "visual check not performed"))
     review = data["agent"]["code-reviewer"]["prompt"]
     assert "DELTA ON RE-RUN" in review
     assert "one verdict each (fixed / still open / regressed)" in review

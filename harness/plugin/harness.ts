@@ -1241,7 +1241,13 @@ async function memAutoRefine(db: any, memoryPath: string, capLines: number, minE
     } catch {
       /* keep the name */
     }
-    const text = `${gist} :: ${ev.slice(0, 2).map((e) => e.slice(0, 200)).join(" | ")}`
+    // The durable line is the lesson, not the log: the gist alone, cut on a
+    // word boundary (parity with headline(..., limit=200) in memory.py). An
+    // earlier version pasted two excerpts after a separator and cut them
+    // mid-word; the excerpts stay in the DB as evidence.
+    const head = memHeadline(gist, 200)
+    const sp = head.lastIndexOf(" ")
+    const text = (sp > 100 ? head.slice(0, sp) : head).trimEnd() || gist
     if (await memAddLesson(memoryPath, name, text, capLines)) promoted.push(name)
     try {
       db.run("DELETE FROM pending WHERE kind='lesson' AND name=?", name)
