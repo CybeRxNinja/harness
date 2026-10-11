@@ -7,6 +7,14 @@ The base check, test_kilo_pins_hold_in_committed_head, holds the rework's
 pins against the committed `git show HEAD:harness/plugin/tui.tsx` — the
 rework landed in the base, so the new pins must be present and the removed
 ones absent, and a revert of those rows goes red.
+
+Nodes whose subject later landed as a commit keep their pins but hold them
+the other way round — present in HEAD, removed patterns absent — so they guard
+against a REGRESSION of that commit. That is the case for the perf work of
+63411e3 (test_probe_locality_comment_and_recoverable_latch's latch half and
+test_family_fanout_capped_and_short_model_gone). Code still uncommitted in the
+working tree (the Next-step row) keeps the honest failing-first direction:
+absent from HEAD, present in the live file.
 """
 
 import os
@@ -113,7 +121,7 @@ def test_probe_locality_comment_and_recoverable_latch():
     guard. The comment was wrong, not the guard — the guard is what keeps a
     cheap tick from opening a DB. The block now names the reader without the
     identifier, so the region stays free of every token a local probe must not
-    open. HEAD does not carry the doc block at all, so the teeth of this pin
+    open. Commit 63411e3 shipped the reworded block, so the teeth of this pin
     are proven in-memory below (restore the wording, watch it leak).
 
     (b) The latch closed on whatever the section read at the `slowUntil`
@@ -123,7 +131,10 @@ def test_probe_locality_comment_and_recoverable_latch():
     the window once: the same time-boxed slow half re-runs, no new host call,
     and LATE_REARMS is what keeps it from being a loop.
 
-    Failing-first for (b): every pin below is absent from HEAD.
+    (b) shipped in 63411e3, so its pins are in HEAD: the failing-first proof
+    ran while the re-arm was uncommitted (pins absent from HEAD) and inverted
+    when the perf commit landed, exactly as the Kilo rework's did — it now
+    guards the opposite way, against reverting the recoverable latch.
     """
     tui = _tui_text()
 
@@ -171,9 +182,16 @@ def test_probe_locality_comment_and_recoverable_latch():
     assert "if (slowUntil === 0) slowUntil = Date.now() + SLOW_WINDOW_MS" in gate
 
     # failing-first for (b): every pin is new
+    # Converted: 63411e3 "perf: ... make the scanned latch recoverable" shipped
+    # (b), so its pins are committed code — the edge is the one the Kilo rework
+    # took (see test_kilo_pins_hold_in_committed_head): every pin below must be
+    # PRESENT in HEAD. The latch fix only added a branch, so nothing was removed
+    # and there is no removed-side pin to mirror. Reverting the re-arm (`git
+    # revert 63411e3 -- harness/plugin/tui.tsx`) drops these from HEAD and this
+    # goes red before the live-file pins do.
     pristine = _pristine_text()
     for pin in ("stillEmpty", "LATE_REARMS", "slowReopens", "else if (scanned"):
-        assert pin not in pristine, f"not a new pin (already in HEAD): {pin}"
+        assert pin in pristine, f"latch fix regressed from HEAD: {pin}"
 
 
 def test_family_fanout_capped_and_short_model_gone():
@@ -187,8 +205,11 @@ def test_family_fanout_capped_and_short_model_gone():
     audit also removed the dead `shortModel` helper the full-name rework left
     behind — nothing references it any more.
 
-    Failing-first: every new pin is absent from HEAD, and the helper it
-    deletes is present there.
+    The perf commit 63411e3 shipped every half of this, so the committed side
+    now runs the way test_kilo_pins_hold_in_committed_head does: the pins
+    below must be PRESENT in HEAD, and the dead `shortModel` helper it deleted
+    must stay ABSENT from HEAD. The failing-first proof ran while the perf work
+    was still uncommitted; a revert of 63411e3 now goes red here.
     """
     tui = _tui_text()
     pristine = _pristine_text()
@@ -214,7 +235,84 @@ def test_family_fanout_capped_and_short_model_gone():
     # the dead helper is gone, doc reference included
     assert "shortModel" not in tui
 
-    # failing-first: the pins above run red on pristine HEAD
+    # Converted: 63411e3 "perf: index the two hot memory scans, cap family
+    # fan-out, cache counts, make the scanned latch recoverable" shipped the
+    # whole change, so the "uncommitted" premise inverted — same flip as
+    # test_kilo_pins_hold_in_committed_head. Every new pin must now be PRESENT
+    # in HEAD (a revert of the cap/caching goes red), and the one pattern the
+    # commit DELETED must stay ABSENT from HEAD (re-adding the dead helper goes
+    # red). Pin sets are unchanged; only the relation flipped.
+    pristine = _pristine_text()
     for pin in ("const FAM_CAP", "familyScan", "data.famHidden", "countsAt"):
+        assert pin in pristine, f"perf work regressed from HEAD: {pin}"
+    assert "function shortModel(rid: unknown): string {" not in pristine, (
+        "the dead shortModel helper is back in HEAD"
+    )
+
+
+def test_next_step_ladder_derived_ordered_and_hidden():
+    """Tier B: the read-only sidebar closes the loop with a derived, actionable
+    "Next" step — nothing but fields the panel ALREADY reads.
+
+    `nextStep()` is a deterministic priority ladder over pre-populated
+    `view.`/`data.` fields only (view.note / data.todos / contextLimit+pct /
+    view.waits / view.workersActive) and drives a single `<Row id="next">` in
+    the same repaint/rev system as its siblings. First match wins; it BUILDS an
+    action thunk without running it (side-effect free), and each action reuses
+    an existing mechanism — the `harness.refresh` keybind, an `open.add(...)`
+    expand, or a toast — never a new host call, query, import, or poll. With no
+    signal it returns null, so the row is hidden entirely (never an empty
+    placeholder).
+
+    Failing-first: none of this is in HEAD.
+    """
+    tui = _tui_text()
+    pristine = _pristine_text()
+
+    # the ladder: a real function, bracketed by a tracked read (see Row())
+    ladder = _region(
+        tui,
+        "const nextStep = (): null | { text: string; action: () => void } => {",
+        "const tokenValue = (): string => {",
+    )
+    assert "void view.rev" in ladder
+    assert ladder.index("void view.rev") < ladder.index("view.note"), (
+        "the ladder starts with a tracked read, before any signal"
+    )
+    # rule (2): the ladder introduces no new source — sync/fetch/import/sqlite
+    for banned in ("sync?.(", "fetch(", "import(", "sqlite", "db.query"):
+        assert banned not in ladder, f"nextStep must read only pre-populated fields: {banned!r}"
+    # every branch reads only fields the panel already populates
+    for field in ("view.note", "data.todos", "data.contextLimit", "pct()",
+                  "view.waits", "view.workersActive"):
+        assert field in ladder, f"ladder branch input missing: {field!r}"
+    # priority order (first match wins): one marker per branch, in sequence
+    markers = [
+        "retry the failed scan",   # 1. load error -> re-run refresh
+        "finish: ",                # 2. unfinished todo
+        "compact soon",            # 3. window pressure
+        'openRow("waits")',        # 4. pending waits
+        'openRow("workers")',      # 5. active workers
+    ]
+    for m in markers:
+        assert m in ladder, f"ladder branch marker missing: {m!r}"
+    pos = [ladder.index(m) for m in markers]
+    assert pos == sorted(pos), "the ladder's priority order is inverted"
+    # no signal at all -> null, so the row hides
+    assert "return null" in ladder
+
+    # the row lives in the same rev/repaint system: id next, derived, hidden on
+    # null, and its click runs the chosen action (not just a toggle)
+    row = _region(tui, 'id="next"', 'id="window"')
+    assert 'label="Next"' in row
+    assert tui.count('id="next"') == 1, "exactly one Next row"
+    assert row.count("void view.rev") >= 4, "every next-row closure starts with a tracked read"
+    assert "nextStep()" in row, "the row is derived from the ladder"
+    assert "return nextStep() === null" in row, "hidden entirely when the ladder is null"
+    assert "s?.action?.()" in row, "the next row runs the chosen action on click"
+    assert "props.onActivate" in tui, "rows gained an onActivate hook (reuses the click path)"
+
+    # failing-first: none of this is in HEAD
+    for pin in ("nextStep", 'id="next"', "onActivate", "retryScan",
+                "openRow", "suggestCompact", 'label="Next"'):
         assert pin not in pristine, f"not a new pin (already in HEAD): {pin}"
-    assert "function shortModel(rid: unknown): string {" in pristine

@@ -598,6 +598,36 @@ const HarnessTui = {
     /** Any number of rows can be open at once — `open` is a list of row ids. */
     const isOpen = (name: string) => (Array.isArray(view.open) ? view.open : []).includes(name)
 
+    // ---- the Next row's actions: reuse this panel's own mechanics, nothing new.
+    // They live at setup scope so nextStep() (in the sidebar render) can hand one
+    // to the row as a thunk; the ladder stays side-effect free — it BUILDS the
+    // action, the row runs it on click.
+    /** Open an existing section row by id (Next rules 2/4/5 expand it). */
+    const openRow = (name: string) =>
+      patch((d) => {
+        const open = new Set<string>(Array.isArray(d.open) ? d.open : [])
+        open.add(name)
+        d.open = [...open]
+      })
+    /** Rule 1: a load error surfaced in-panel -> re-run the panel's own refresh
+     *  command (the same one the `/harness-refresh` keybind already runs). */
+    const retryScan = () => {
+      try {
+        ctx.keymap?.dispatch?.("harness.refresh")
+      } catch (e) {
+        log(`next retry failed: ${short(e)}`)
+      }
+    }
+    /** Rule 3: window pressure. This plugin ships no compaction command, so name
+     *  opencode's own via a toast — a hint, never a new sync/api. */
+    const suggestCompact = () => {
+      try {
+        ctx.ui.toast?.show?.({ title: "harness", message: "run /compact to reclaim context", variant: "warning" })
+      } catch {
+        /* cosmetic */
+      }
+    }
+
     // Plain (non-reactive) detail rows: re-read on every load and shown as-is.
     const data: Rec = {
       tokens: null,
@@ -1684,6 +1714,13 @@ const HarnessTui = {
        * and `valueFg` is skipped. Strings unchanged — colour only.
        */
       valueParts?: () => Array<{ text: string; fg: string }>
+      /**
+       * Run this instead of the open-toggle when a row is not a plain
+       * expander: the actionable Next row fires its chosen step here (expand
+       * a sibling / re-run refresh / hint compaction). Same per-row click
+       * pattern, so it shares the patch/repaint path its siblings use.
+       */
+      onActivate?: () => void
     }) => {
       // A section with nothing in it is noise, not honesty: an empty Workers
       // row or "0 facts" Memory is exactly the clutter the panel must drop.
@@ -1695,12 +1732,14 @@ const HarnessTui = {
           gap={1}
           minWidth={0}
           onMouseDown={() =>
-            patch((d) => {
-              const open = new Set<string>(Array.isArray(d.open) ? d.open : [])
-              if (open.has(props.id)) open.delete(props.id)
-              else open.add(props.id)
-              d.open = [...open]
-            })
+            props.onActivate
+              ? props.onActivate()
+              : patch((d) => {
+                  const open = new Set<string>(Array.isArray(d.open) ? d.open : [])
+                  if (open.has(props.id)) open.delete(props.id)
+                  else open.add(props.id)
+                  d.open = [...open]
+                })
           }
         >
           <text fg={th.base} flexShrink={0} wrapMode="none">
@@ -1872,6 +1911,54 @@ const HarnessTui = {
               if (data.lastCompaction) out.push(`brief: ${data.lastCompaction} retained`)
               return out
             }
+            /**
+             * The ONE actionable thing to do next — derived ONLY from what this
+             * panel already reads (view.note / data.todos / contextLimit+pct /
+             * view.waits / view.workersActive), so it costs no new read, query,
+             * import, or poll. A deterministic priority ladder, first match wins;
+             * side-effect free — it BUILDS the action thunk, the Next row runs it
+             * on click. Returns null when no signal applies, so the row hides
+             * entirely (a section with nothing to say is not honesty). Starts
+             * with a tracked read like every row closure (see Row()).
+             */
+            const nextStep = (): null | { text: string; action: () => void } => {
+              void view.rev
+              // 1. a load failure already surfaced in-panel -> re-run the refresh.
+              if (view.note) return { text: "retry the failed scan", action: retryScan }
+              // 2. an unfinished todo (the in-progress/pending marks) -> finish it.
+              const todo = (data.todos as string[]).find((t) => {
+                const mark = String(t).slice(0, 1)
+                return mark === TODO_MARKS.in_progress || mark === TODO_MARKS.pending
+              })
+              if (todo) {
+                const sp = todo.indexOf(" ")
+                return {
+                  text: `finish: ${wcut(sp >= 0 ? todo.slice(sp + 1) : todo, 26)}`,
+                  action: () => openRow("todo"),
+                }
+              }
+              // 3. window filling up -> compact soon (opencode owns compaction).
+              if (data.contextLimit > 0 && pct() >= 80) {
+                return { text: `compact soon — ${pct()}% used`, action: suggestCompact }
+              }
+              // 4. pending waits -> open the Waits row.
+              const waits = Number(view.waits ?? 0) || 0
+              if (waits > 0) {
+                return {
+                  text: `${waits} wait${waits === 1 ? "" : "s"} pending`,
+                  action: () => openRow("waits"),
+                }
+              }
+              // 5. active workers -> open the Workers row.
+              const workers = Number(view.workersActive ?? 0) || 0
+              if (workers > 0) {
+                return {
+                  text: `${workers} worker${workers === 1 ? "" : "s"} running`,
+                  action: () => openRow("workers"),
+                }
+              }
+              return null
+            }
             const tokenValue = (): string => {
               void view.rev
               const t = data.tokens
@@ -1947,6 +2034,36 @@ const HarnessTui = {
                   ) : null}
                 </box>
 
+                <Row
+                  id="next"
+                  label="Next"
+                  value={() => {
+                    void view.rev
+                    return nextStep()?.text ?? ""
+                  }}
+                  valueParts={() => {
+                    void view.rev
+                    const s = nextStep()
+                    if (!s) return []
+                    // Only the action carries colour: warning for a problem to fix
+                    // (a load error, or window pressure), accent for the step.
+                    const fg = view.note || (data.contextLimit > 0 && pct() >= 80) ? warn : th.accent
+                    return segs([[s.text, fg]])
+                  }}
+                  hide={() => {
+                    void view.rev
+                    return nextStep() === null
+                  }}
+                  lines={() => {
+                    void view.rev
+                    return []
+                  }}
+                  empty="(no next step)"
+                  onActivate={() => {
+                    const s = nextStep()
+                    s?.action?.()
+                  }}
+                />
                 <Row
                   id="window"
                   label="Window"
