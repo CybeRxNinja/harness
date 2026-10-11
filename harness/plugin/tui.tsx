@@ -98,9 +98,27 @@ const SCAN_MS = 5000
 const SLOW_WINDOW_MS = 30_000
 /** Floor between two slow RETRIES, so the window above is not spent per tick. */
 const SLOW_RETRY_MS = 2000
+/**
+ * Times a SETTLED latch may be re-opened because the section it closed over
+ * was still empty when the window expired. Seeding lands lazily, so a late
+ * `populated` has to be reachable without a manual `/harness-refresh` — and
+ * the budget is what keeps that recovery from becoming a retry loop.
+ */
+const LATE_REARMS = 1
 const ROW_LIMIT = 6
 /** Detail rows per section when expanded (the sidebar viewport is short). */
 const DETAIL_LIMIT = 5
+
+/**
+ * Children a family read may fan out to. Every child costs the panel a
+ * `session.get` in the probe (the change signature) and in the token merge,
+ * plus a `message.list` per child in scanModels — an unbounded family made a
+ * 20-worker burst cost 20 message-store walks EVERY pass (8s). Past the cap
+ * the extra children are not walked and not counted: the Tokens detail says
+ * how many were left out (`+N more sessions`, see familyScan), so a capped
+ * total is never silently wrong — the rule DETAIL_LIMIT follows above.
+ */
+const FAM_CAP = 24
 
 /**
  * opencode's internal agents run its own plumbing (conversation compaction,
@@ -323,7 +341,7 @@ function waitTail(row: Rec): string {
 
 /**
  * A session/message `model` is `{id, providerID, variant}` or a bare string.
- * Returns "provider/id" — the shape `shortModel` and the context lookup expect.
+ * Returns "provider/id" — the shape the context lookup expects.
  */
 function modelId(value: unknown): string {
   if (!value) return ""
@@ -340,10 +358,6 @@ function splitModel(value: unknown): [string, string] {
   const id = String(value ?? "")
   const i = id.indexOf("/")
   return i < 0 ? ["", id] : [id.slice(0, i), id.slice(i + 1)]
-}
-
-function shortModel(rid: unknown): string {
-  return cut(splitModel(rid)[1], 24)
 }
 
 /** Total tokens the way opencode counts them (input+output+reasoning+cache). */
@@ -454,19 +468,26 @@ function settle(p: any, ms: number): Promise<boolean> {
 }
 
 /**
- * This session plus its DIRECT subagent sessions. The `task` tool's children
- * run as SEPARATE opencode sessions with their own `tokens`/`cost` rows, so a
- * readout built from `session.get(sid)` alone dropped everything the workers
- * spent — the "tokens do not account for the sub-agents" bug.
+ * This session plus its DIRECT subagent sessions, plus how many children were
+ * left out past FAM_CAP. The `task` tool's children run as SEPARATE opencode
+ * sessions with their own `tokens`/`cost` rows, so a readout built from
+ * `session.get(sid)` alone dropped everything the workers spent — the "tokens
+ * do not account for the sub-agents" bug.
  *
  * `session.family(sid)` is opencode's own accessor for this set (the one its
  * `session.cost` sums for a root row). It stays empty until a
  * `session.sync(sid, {children:true})` has discovered the children, so this
  * always includes the active session and degrades to "just me" while
  * discovery is in flight — never to zero.
+ *
+ * The children are CAPPED (FAM_CAP): this walk runs a `session.get` per
+ * family member on every pass, and callers fan a `message.list` out per
+ * child — an unbounded family turned a 20-worker burst into 20 store walks
+ * every 8s. The overflow count rides along so the Tokens detail can state
+ * the remainder: a capped family must never read as the whole one.
  */
-function familyIds(data_: Rec, sid: string): string[] {
-  if (!sid) return []
+function familyScan(data_: Rec, sid: string): { ids: string[]; hidden: number } {
+  if (!sid) return { ids: [], hidden: 0 }
   let fam: string[] = []
   try {
     fam = asArray(data_?.session?.family?.(sid)).map((r: Rec) => String(r ?? "")).filter(Boolean)
@@ -485,7 +506,12 @@ function familyIds(data_: Rec, sid: string): string[] {
       /* info row not loaded yet */
     }
   }
-  return [sid, ...kids]
+  return { ids: [sid, ...kids.slice(0, FAM_CAP)], hidden: Math.max(0, kids.length - FAM_CAP) }
+}
+
+/** The family ids alone; callers that must explain a cap use familyScan. */
+function familyIds(data_: Rec, sid: string): string[] {
+  return familyScan(data_, sid).ids
 }
 
 // Project-local only: a $HOME probe here recalled a different project's facts
@@ -611,6 +637,12 @@ const HarnessTui = {
       lastRisk: "",
       files: [] as Rec[],
       vcsKnown: false,
+      // Children left out past FAM_CAP (see familyIds): the Tokens detail
+      // states the remainder, so a capped family never reads as a total.
+      famHidden: 0,
+      // Timestamp of the last COUNT(*) refresh in readProjectState — the
+      // fast path holds the view's counts for POLL_MS (see load).
+      countsAt: 0,
     }
     let sqlite: any = null
     let fs: any = null
@@ -732,7 +764,25 @@ const HarnessTui = {
      *
      * Each query is guarded alone: a drifted schema costs that one section.
      */
+
+    /**
+     * Count values for the next state-DB open to reuse instead of scanning, or
+     * null when it must scan. The fast path's DB opens — a todo tick, a worker
+     * transition, a wait add each move the stamp — re-read the ROWS but not the
+     * two full-table COUNT(*) scans below: those are held for POLL_MS on the
+     * view (`countsAt`, written by load's patch), so one net pass pays for one
+     * pair of scans instead of one scan per open. Module scope because the
+     * project-state reader is module-level too; load is the only writer, and
+     * the value is consumed on the next open (never carried across two).
+     */
+    let heldCounts: { facts: number; workersActive: number } | null = null
+
     const readProjectState = async (directory: string, sid: string) => {
+      // Consumed once: load sets heldCounts right before the call when the
+      // COUNT scans should be held (see the DB block in load), and the value
+      // is read here before the first await.
+      const held = heldCounts
+      heldCounts = null
       const out = {
         todos: [] as string[],
         todosDone: 0,
@@ -781,10 +831,18 @@ const HarnessTui = {
             /* no todos table yet */
           }
           try {
-            // The active COUNT comes from SQL, not the window below: a long
-            // worker can sit outside the newest rows while short ones finish.
-            const active = db.query("SELECT count(*) AS n FROM workers WHERE status IN ('queued','running')").get() as Rec
-            out.workersActive = Number(active?.n ?? 0) || 0
+            if (held) {
+              // Fast-path DB open: the two COUNT scans below are held on the
+              // caller's view for POLL_MS (see load) — a DB stamp that moved
+              // re-reads the rows, not the table walks. Same values, one
+              // scan per net pass instead of one per open.
+              out.workersActive = Number(held.workersActive ?? 0) || 0
+            } else {
+              // The active COUNT comes from SQL, not the window below: a long
+              // worker can sit outside the newest rows while short ones finish.
+              const active = db.query("SELECT count(*) AS n FROM workers WHERE status IN ('queued','running')").get() as Rec
+              out.workersActive = Number(active?.n ?? 0) || 0
+            }
             const rows = db
               .query("SELECT name, status, updated FROM workers ORDER BY rowid DESC LIMIT ?")
               .all(ROW_LIMIT) as Rec[]
@@ -838,11 +896,17 @@ const HarnessTui = {
             /* no waits table yet */
           }
           try {
-            // The VALUE is a real count, not the displayed window: LIMIT 6
-            // rows capped it, and the view state never received it at all, so
-            // the header and Memory row printed "0 facts" with facts on disk.
-            const fc = db.query("SELECT count(*) AS n FROM facts").get() as Rec
-            out.factsCount = Number(fc?.n ?? 0) || 0
+            if (held) {
+              // Held counts (see the workers block above): same values,
+              // no full-table scan on a fast-path open.
+              out.factsCount = Number(held.facts ?? 0) || 0
+            } else {
+              // The VALUE is a real count, not the displayed window: LIMIT 6
+              // rows capped it, and the view state never received it at all, so
+              // the header and Memory row printed "0 facts" with facts on disk.
+              const fc = db.query("SELECT count(*) AS n FROM facts").get() as Rec
+              out.factsCount = Number(fc?.n ?? 0) || 0
+            }
             // Progress notes render as status + core message with runs
             // collapsed ("◐ echo: hello in mock ×6"), not raw mid-word cuts.
             out.facts = humanizeFacts(
@@ -877,6 +941,14 @@ const HarnessTui = {
      * skills on disk). 0 = no attempt yet: the window opens on the first one.
      */
     let slowUntil = 0
+    /**
+     * How many times a SETTLED latch has been re-opened because the section it
+     * closed over was still empty (see load). The window expired on a miss
+     * happens when seeding lands late, so one re-open must be possible — but
+     * only LATE_REARMS, so a genuinely empty setup settles instead of
+     * re-syncing on every pass. Reset with the latch on a session change.
+     */
+    let slowReopens = 0
     /**
      * Earliest time the next RETRY may run. A full pass (session change, first
      * load, `/harness-refresh`) ignores it — that is the caller's escape hatch.
@@ -1110,7 +1182,9 @@ const HarnessTui = {
         let subOutput = 0
         let subReasoning = 0
         let subCache = 0
-        for (const id of familyIds(data_, sessionID)) {
+        const fam = familyScan(data_, sessionID)
+        data.famHidden = fam.hidden
+        for (const id of fam.ids) {
           const s = id === sessionID ? session : data_?.session?.get?.(id) ?? null
           const t = s?.tokens ?? null
           if (!t) continue
@@ -1147,6 +1221,10 @@ const HarnessTui = {
           data.cost = Number(session?.cost ?? 0) + subCost
         }
 
+        // What the section reads BEFORE this pass decides anything: the latch
+        // must be judged against the section as it stands, not against what the
+        // window that set it happened to see.
+        const stillEmpty = data.skills.length === 0 && data.agents.length === 0
         // Slow sources only when they can have changed: session change, first
         // load, or an explicit refresh (see scanSlow). An unlatched panel
         // re-enters on a floor, so a cold first pass keeps getting chances —
@@ -1171,6 +1249,19 @@ const HarnessTui = {
           if (slowUntil === 0) slowUntil = Date.now() + SLOW_WINDOW_MS
           const populated = data.skills.length > 0 && data.agents.length > 0
           if ((slowOk && populated) || Date.now() >= slowUntil) scanned = true
+        } else if (scanned && stillEmpty && slowReopens < LATE_REARMS) {
+          // A settled latch is recoverable in-session. The window can expire on
+          // a section that was still seeding — the location stores fill lazily,
+          // so skills can land AFTER the deadline — and latching that emptiness
+          // left the section invisible until a manual `/harness-refresh`
+          // (live: "Skills 0 installed" with skills on disk). Re-open the
+          // window ONCE: the budget is LATE_REARMS per session change, never a
+          // loop, so a genuinely skill-free setup still settles. The pass this
+          // re-arms is the same time-boxed slow half — no extra host call.
+          slowReopens += 1
+          scanned = false
+          slowUntil = Date.now() + SLOW_WINDOW_MS
+          slowNext = 0
         }
         // Cheap, and only correct AFTER the message store has filled — so it
         // runs on every pass, not on the slow half.
@@ -1183,7 +1274,18 @@ const HarnessTui = {
         // the rows just read are still the truth, and the open is the single
         // most expensive step in a pass.
         if (opts.db !== false) {
+          // The two full-table COUNT(*) scans inside are the only O(rows)
+          // reads in the open, and the open can be triggered by ANY pass:
+          // every todo tick, worker transition or wait add moves the DB stamp
+          // and pulls the fast path into one. The values move slowly, so hold
+          // them on the view with a timestamp and refresh only when POLL_MS
+          // (the 8s net pass) has passed — same numbers, one scan per net
+          // pass instead of one per open. A `full` pass (session change,
+          // first load, refresh) always re-scans.
+          const hold = !full && Number(view.countsAt ?? 0) > 0 && Date.now() - Number(view.countsAt) < POLL_MS
+          heldCounts = hold ? { facts: data.factsCount, workersActive: data.workersActive } : null
           const state = await readProjectState(directory, sessionID)
+          data.countsAt = hold ? data.countsAt : Date.now()
           data.todos = state.todos
           data.todosDone = state.todosDone
           data.todosFromProject = state.todosFallback
@@ -1317,6 +1419,10 @@ const HarnessTui = {
           // facts never reached the view state before this — header and Memory
           // printed 0 even with facts on disk.
           d.facts = data.factsCount
+          // When the COUNT scans last ran (see the DB block above): the
+          // timestamp is the fast path's hold gate, so it travels with the
+          // values it guards.
+          d.countsAt = data.countsAt
           // Whether the slow location stores have settled: the Skills rows
           // read it to print "syncing…" while cold instead of the settled
           // "none seeded" line.
@@ -1375,6 +1481,8 @@ const HarnessTui = {
       scanned = false
       slowUntil = 0
       slowNext = 0
+      // the re-open budget belongs to the same session change as the latch
+      slowReopens = 0
       // The new session's numbers differ from the fingerprint by construction,
       // so the fast path must not treat its first pass as a repeat of the old
       // session's.
@@ -1788,6 +1896,13 @@ const HarnessTui = {
                 `reasoning · ${numfmt(t.reasoning)}`,
                 `cache · ${kfmt(cache.read)}`,
               ]
+              // A capped family is never silent: the rows above cover only
+              // the first FAM_CAP children, so the total is short of the
+              // whole family by exactly this many sessions — say so, the way
+              // DETAIL_LIMIT's "+N more" does, rather than let the number
+              // read as complete. Placed inside the detail window (before the
+              // optional lines) so it can never hide behind "… +N more".
+              if (data.famHidden > 0) out.push(`+${data.famHidden} more sessions · not in token totals`)
               if (Number(cache.write ?? 0) > 0) out.push(`cache write · ${numfmt(cache.write)}`)
               // The children-only split of the same totals, so the family
               // number above stays traceable — one line per field, never

@@ -5,7 +5,11 @@ facts straight from disk, so those tables are the contract. Session/message
 writers and the history reader were retired with the headless turn loop; the
 tables stay in SCHEMA so existing databases keep opening. `search` stays: kept
 memory.recall() reads the FTS index through it (degrading to empty when the
-retired writer never populated it).
+retired writer never populated it). `facts_fts` is the live FTS index: the
+recall path searches `facts` with `text LIKE '%term%'`, and a leading-wildcard
+LIKE cannot ride a btree — so facts are tokenized into an FTS5 table kept in
+sync by triggers (no UPDATE ever hits facts, so insert+delete is the whole
+contract).
 """
 from __future__ import annotations
 
@@ -30,6 +34,10 @@ CREATE TABLE IF NOT EXISTS workers(id TEXT PRIMARY KEY, session TEXT, name TEXT,
 CREATE TABLE IF NOT EXISTS mailbox(id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT, receiver TEXT, receiver_role TEXT, content TEXT, ts INTEGER, delivered INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, source TEXT, ts INTEGER);
 CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, name TEXT, diff TEXT, gist TEXT, ts INTEGER);
+CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(text, tokenize='porter');
+CREATE TRIGGER IF NOT EXISTS facts_fts_ai AFTER INSERT ON facts BEGIN INSERT INTO facts_fts(rowid, text) VALUES (new.id, new.text); END;
+CREATE TRIGGER IF NOT EXISTS facts_fts_ad AFTER DELETE ON facts BEGIN DELETE FROM facts_fts WHERE rowid = old.id; END;
+CREATE INDEX IF NOT EXISTS idx_pending_kind_name ON pending(kind, name);
 """
 
 
@@ -63,6 +71,20 @@ def ensure_column(con: sqlite3.Connection, table: str, column: str, decl: str) -
 def _migrate(con: sqlite3.Connection) -> None:
     """Forward-compatible additions to tables that already exist on disk."""
     ensure_column(con, "mailbox", "delivered", "INTEGER DEFAULT 0")
+    # Backfill facts_fts for databases written before the triggers above:
+    # their facts rows were never seen by facts_fts_ai. The count guard keeps
+    # a synced database from taking a write lock just to open, NOT EXISTS
+    # keeps the backfill itself idempotent, and the triggers keep the index
+    # current from here on.
+    try:
+        if (con.execute("SELECT COUNT(*) FROM facts_fts").fetchone()[0]
+                < con.execute("SELECT COUNT(*) FROM facts").fetchone()[0]):
+            con.execute(
+                "INSERT INTO facts_fts(rowid, text) SELECT id, text FROM facts f "
+                "WHERE NOT EXISTS (SELECT 1 FROM facts_fts WHERE rowid = f.id)")
+            con.commit()
+    except sqlite3.Error:
+        pass
 
 
 def search(con: sqlite3.Connection, q: str, limit: int = 8) -> list[dict]:
