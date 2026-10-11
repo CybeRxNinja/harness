@@ -17,6 +17,7 @@ working tree (the Next-step row) keeps the honest failing-first direction:
 absent from HEAD, present in the live file.
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -264,10 +265,10 @@ def test_next_step_ladder_derived_ordered_and_hidden():
     signal it returns null, so the row is hidden entirely (never an empty
     placeholder).
 
-    Failing-first: none of this is in HEAD.
+    Stale-code premise retired: the ladder now ships in HEAD, so the tail pins
+    the working tree instead of an "absent from HEAD" marker that has inverted.
     """
     tui = _tui_text()
-    pristine = _pristine_text()
 
     # the ladder: a real function, bracketed by a tracked read (see Row())
     ladder = _region(
@@ -312,7 +313,186 @@ def test_next_step_ladder_derived_ordered_and_hidden():
     assert "s?.action?.()" in row, "the next row runs the chosen action on click"
     assert "props.onActivate" in tui, "rows gained an onActivate hook (reuses the click path)"
 
-    # failing-first: none of this is in HEAD
+    # Working-tree pin (NOT a git-HEAD comparison): the ladder and its actions
+    # are all in the live file. The original tail asserted these were ABSENT
+    # from HEAD ("failing-first, uncommitted") — but the ladder ships in HEAD,
+    # so that premise inverted and went red for the wrong reason. Pin the truth
+    # that never flips: the machinery is present in the working tree, and the
+    # structural asserts above each carry their own teeth against the live file.
     for pin in ("nextStep", 'id="next"', "onActivate", "retryScan",
                 "openRow", "suggestCompact", 'label="Next"'):
-        assert pin not in pristine, f"not a new pin (already in HEAD): {pin}"
+        assert pin in tui, f"ladder machinery missing from the live file: {pin}"
+
+
+# ---------------------------------------------------------------------------
+# FEATURE 1+2: Next-step durable lesson + "running stale code" line.
+#
+# Working-tree + behavioral pins ONLY (no git-HEAD comparison: the
+# commit-then-inverted-premise flip bit this file twice). The two new helpers
+# are pure, so they are sliced out of the live tui.tsx and run under plain node
+# against a scratch MEMORY.md fixture and a fake mtime; the wiring pins read the
+# live file.
+SCRATCH = REPO_ROOT / ".opencode" / "harness" / "tmp"
+
+
+def _slice(tui, start, end):
+    """Source slice between two anchors (same idiom as _region, but index())."""
+    a, b = tui.index(start), tui.index(end)
+    assert 0 <= a < b, f"anchors missing or out of order: {start!r} -> {end!r}"
+    return tui[a:b]
+
+
+def test_lesson_path_mirrors_state_db():
+    """The lesson reader resolves MEMORY.md beside sessions.db — the SAME
+    <root>/.opencode/harness/ shape cli.py/doctor.py get from memory_file().
+    Pinned as a path shape + mirror of stateDb(), no new host API."""
+    tui = _tui_text()
+    sdb = _slice(tui, "function stateDb(directory: string): string {", "\n\nconst HarnessTui = {")
+    mem = _slice(tui, "function memoryPath(directory: string): string {",
+                 "/** Below this many shared terms")
+    assert "/.opencode/harness/sessions.db" in sdb
+    assert "`${directory}/.opencode/harness/MEMORY.md`" in mem, mem
+    # same directory segment: MEMORY.md sits where sessions.db does
+    assert ".opencode/harness/" in sdb and ".opencode/harness/" in mem
+
+
+def test_next_lesson_and_stale_wiring_working_tree():
+    """Wiring pins on the live file: the cached read rides the slow gate, reads
+    through the SAME dynamic node:fs import, the Next row surfaces one muted
+    line, and the stale line renders warn-only under the header."""
+    tui = _tui_text()
+
+    # cached lesson read: declared, refreshed on the slow gate, via node:fs
+    assert "let lessonsCache: string[] | null = null" in tui
+    assert "if (fs === null) fs = await import(\"node:fs\")" in tui
+    assert "lessonsCache = lessonLines(fs.readFileSync(path, \"utf8\"))" in tui
+    gate = _region(tui, "if (full || (!scanned && Date.now() >= slowNext)) {",
+                   "        scanModels(data_)")
+    assert "void refreshLessons(directory)" in gate, (
+        "the lesson refresh must ride the existing slow/window gate, not a new interval"
+    )
+    # the cache read is silent on a miss: no log, only comments in the catch
+    catch = _slice(tui, "const refreshLessons = async (directory: string): Promise<void> => {",
+                   "const readProjectState = async")
+    assert "catch {" in catch
+    assert "log(" not in catch, "a lesson cache-miss must be silent — no error spam"
+
+    # the Next row's detail line is derived and muted (no tone -> th.muted)
+    next_lines = _slice(tui, "lines={() => {\n                    void view.rev\n                    // FEATURE 1",
+                       "empty=\"(no next step)\"")
+    assert "pickLesson(lessonsCache ?? [], query)" in next_lines
+    assert "return lesson ? [lesson] : []" in next_lines, "empty match renders nothing"
+    assert "void view.rev" in next_lines
+    # nextStep()'s own ladder stays free of the new data source (unchanged scope)
+    ladder = _region(tui, "const nextStep = (): null | { text: string; action: () => void } => {",
+                     "const tokenValue = (): string => {")
+    assert "pickLesson" not in ladder and "import(" not in ladder, (
+        "the ladder itself must not gain a source; only its detail line does"
+    )
+
+    # staleness: computed once at setup, guarded, rendered under the header
+    assert "let panelStale = false" in tui
+    assert "panelStale = isStaleFile(Number(st?.mtimeMs ?? 0), startMs)" in tui
+    assert "isStaleFile(mtimeMs: number, startMs: number): boolean" in tui
+    assert '{"restart opencode — panel update pending"}' in tui
+    # the warn line is gated on panelStale alone (not view.note — that is the
+    # load-error channel) and colored th.warn, and sits before the Next row
+    stale_line = _region(tui, "{panelStale ? (", 'id="next"')
+    assert "fg={th.warn}" in stale_line
+    assert "view.note" not in stale_line, "the stale line must not hijack view.note"
+
+
+def _lesson_driver(tui):
+    """Slice wcut + the pure NEXT-LESSON helpers into one node-runnable .ts.
+
+    Node 24 strips TS types by default; the sliced block has no JSX, no Bun
+    global, no sqlite, so it runs under plain node exactly as written.
+    """
+    wcut = _slice(tui, "function wcut(value: unknown, max: number): string {",
+                  "/**\n * Split a detail line")
+    block = _slice(tui, "function memoryPath(directory: string): string {",
+                   "/**\n * A usage bar for the context window")
+    driver = r'''
+import { readFileSync } from "node:fs"
+const file = process.argv[2]
+const startMs = Number(process.argv[3])
+const mtimeMs = Number(process.argv[4])
+const lessons = lessonLines(readFileSync(file, "utf8"))
+const out = {
+  n: lessons.length,
+  memPath: memoryPath("/proj"),
+  relevantLong: pickLesson(lessons, "restart opencode — panel update pending"),
+  relevantShort: pickLesson(lessons, "finish: durable lessons shape next step"),
+  irrelevant: pickLesson(lessons, "quick zebra unrelated yak"),
+  oneTerm: pickLesson(lessons, "panel only now"),
+  dupe: pickLesson(lessons, "panel header"),
+  staleNewer: isStaleFile(mtimeMs, startMs),
+  staleOlder: isStaleFile(startMs - 1000, startMs),
+  staleEqual: isStaleFile(startMs, startMs),
+  staleNaN: isStaleFile(NaN, startMs),
+}
+console.log(JSON.stringify(out))
+'''
+    path = SCRATCH / "kilo_lessons.ts"
+    path.write_text(wcut + "\n" + block + driver)
+    return path
+
+
+MEM_FIXTURE = (
+    "# MEMORY.md header line\n"
+    "\n"
+    "- [panel] restart opencode when the panel update pending after editing the tui plugin file\n"
+    "- [brief] durable lessons shape the next step\n"
+    "- [zoo] the quick brown fox jumps over lazy dogs\n"
+    "- [tui] keep the window bar honest and never truncate the panel header mid word\n"
+    "- [tui] a repeated panel tag collapses into one lesson entry for you\n"
+)
+
+
+def test_lesson_selection_and_staleness_under_node():
+    """Behavioral: slice the two helpers, run under node with a scratch
+    MEMORY.md + a fake mtime/start. Asserts a relevant lesson is selected (cut
+    at a word boundary), an irrelevant one returns '', the >=2 term-overlap
+    threshold holds, a repeated [tag] collapses, and the stale/not-stale/
+    unavailable staleness branches."""
+    tui = _tui_text()
+    SCRATCH.mkdir(parents=True, exist_ok=True)
+    fixture = SCRATCH / "MEMORY.md"
+    fixture.write_text(MEM_FIXTURE)
+    script = _lesson_driver(tui)
+    start = 1_000_000_000_000
+    mtime = start + 5_000  # file edited 5s after process start -> stale
+    r = subprocess.run(["node", str(script), str(fixture), str(start), str(mtime)],
+                       capture_output=True, text=True, timeout=60, cwd=str(REPO_ROOT))
+    assert r.returncode == 0, r.stderr[-800:]
+    out = json.loads(r.stdout)
+
+    # path resolution + parse (header + blank excluded, five `- ` entries)
+    assert out["memPath"] == "/proj/.opencode/harness/MEMORY.md"
+    assert out["n"] == 5, out["n"]
+
+    # relevant long line: selected, cut at a word boundary (never mid-word).
+    # The entry KEEPS its [tag] prefix — the line shown is the whole entry.
+    long_a = MEM_FIXTURE.splitlines()[2][2:]  # strip leading "- "
+    rl = out["relevantLong"]
+    assert rl and rl.endswith("…"), rl
+    assert len(rl) <= 61, rl
+    assert long_a.startswith(rl[:-1]), rl
+    assert long_a[len(rl) - 1:len(rl)] == " ", "the cut must land on a word boundary"
+
+    # relevant short line (under the 60-col budget): returned whole, uncut
+    assert out["relevantShort"] == MEM_FIXTURE.splitlines()[3][2:]
+
+    # irrelevant: shares <2 terms -> nothing
+    assert out["irrelevant"] == ""
+    # exactly one shared term is below the bar -> nothing (threshold = 2)
+    assert out["oneTerm"] == ""
+    # repeated [tui] tag collapses to the FIRST entry, never the second
+    assert out["dupe"].startswith("[tui] keep the window bar honest"), out["dupe"]
+    assert "collapses" not in out["dupe"], "the duplicate-tagged line must not be chosen"
+
+    # staleness: newer mtime -> stale; older -> not; equal -> not; NaN -> skip
+    assert out["staleNewer"] is True
+    assert out["staleOlder"] is False
+    assert out["staleEqual"] is False
+    assert out["staleNaN"] is False

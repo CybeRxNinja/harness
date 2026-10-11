@@ -111,6 +111,47 @@ def test_recall_survives_fts_syntax_in_the_query(con):
     assert isinstance(M.recall(con, '"unbalanced OR (weird'), list)
 
 
+def test_recall_serves_a_stem_through_the_facts_fts_index(con):
+    from harness import memory as M
+    M.save_fact(con, "the build kept a single compile step", "turn")
+    # porter stems both words to "compil", so only the index can answer this;
+    # the substring scan found nothing, because "compiling" is not in the text
+    hits = M.recall(con, "compiling", 3)
+    assert hits == [{"text": "the build kept a single compile step",
+                     "source": "turn", "score": 0}], hits
+    # the 0 score IS that check: it counts the query term in the RAW text,
+    # so a stemmed hit is never credited with a word the fact does not spell
+
+
+def test_recall_falls_back_to_the_substring_scan_when_the_index_is_gone(con):
+    from harness import memory as M
+    M.save_fact(con, "rlm spawns workers through the pool", "turn")
+    M.save_fact(con, "rlm workers report status through the mailbox", "turn")
+    with_index = M.recall(con, "rlm workers mailbox", 5)
+    assert [h["text"] for h in with_index] == [
+        "rlm workers report status through the mailbox",
+        "rlm spawns workers through the pool"]
+    con.execute("DROP TABLE facts_fts")
+    con.commit()
+    # a database that predates the index must answer exactly as well as one
+    # that has it: the LIKE scan is the floor, not a different path
+    assert M.recall(con, "rlm workers mailbox", 5) == with_index
+
+
+def test_recall_keeps_ranking_source_priority_then_overlap_then_newest(con):
+    from harness import memory as M
+    M.save_fact(con, "alpha beta gamma older", "turn")
+    M.save_fact(con, "alpha beta gamma newer", "turn")
+    M.save_fact(con, "alpha beta gamma proved", "done")
+    M.save_fact(con, "alpha beta fewer", "turn")
+    M.save_fact(con, "alpha single", "turn")
+    texts = [h["text"] for h in M.recall(con, "alpha beta gamma", 8)]
+    assert texts[0] == "alpha beta gamma proved", texts  # done outranks turn
+    assert texts.index("alpha beta gamma newer") < texts.index("alpha beta gamma older")
+    assert texts.index("alpha beta gamma older") < texts.index("alpha beta fewer")
+    assert texts.index("alpha beta fewer") < texts.index("alpha single")
+
+
 # --- capture ----------------------------------------------------------------
 
 def test_save_fact_dedupes_and_refuses_secrets(con):

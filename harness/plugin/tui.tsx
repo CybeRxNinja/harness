@@ -304,6 +304,99 @@ function humanizeFacts(rows: Rec[]): string[] {
 }
 
 /**
+ * NEXT-LESSON HELPERS — pure and self-contained (no fs, no sqlite, no Bun
+ * global) so tests/test_tui_kilo.py can slice this block out and run it under
+ * plain node with a scratch MEMORY.md fixture. They make the Next step speak
+ * with the project's durable experience, and answer "is the loaded panel older
+ * than the file on disk".
+ */
+
+/**
+ * Where the lessons file lives: MEMORY.md BESIDE the state DB the panel
+ * already opens — the same <root>/.opencode/harness/ shape cli.py:114 and
+ * doctor.py:102 resolve through memory_file()/state_file(). Deliberately the
+ * sibling of stateDb(directory) below, never a second guess at the location.
+ */
+function memoryPath(directory: string): string {
+  return `${directory}/.opencode/harness/MEMORY.md`
+}
+
+/** Below this many shared terms a lesson is unrelated — never surface it. */
+const LESSON_MIN_OVERLAP = 2
+/** Column budget for the one lesson line (word-boundary cut, via wcut). */
+const LESSON_MAX_COLS = 60
+/** Parse at most this many entries, so a bloated MEMORY.md costs one cap. */
+const LESSON_SCAN_LINES = 60
+
+/** Lowercased, punctuation-split terms worth matching (>2 chars, deduped). */
+function lessonTerms(s: unknown): string[] {
+  const out: string[] = []
+  for (const w of String(s ?? "").toLowerCase().split(/[^a-z0-9]+/)) {
+    if (w.length > 2 && !out.includes(w)) out.push(w)
+  }
+  return out
+}
+
+/** The leading `[tag]` of a lesson entry (MEMORY.md writes `- [name] body`). */
+function lessonTag(line: string): string {
+  const m = /^\s*\[([^\]]+)\]/.exec(String(line ?? ""))
+  return m ? m[1].toLowerCase() : ""
+}
+
+/** Lesson ENTRY lines from MEMORY.md text: `- ` markers only, newest capped. */
+function lessonLines(text: unknown): string[] {
+  const out: string[] = []
+  for (const raw of String(text ?? "").split("\n")) {
+    if (!raw.startsWith("- ")) continue
+    const line = raw.slice(2).trim()
+    if (line) out.push(line)
+  }
+  return out.slice(-LESSON_SCAN_LINES)
+}
+
+/**
+ * The single most relevant durable lesson to the work at hand, or "" when
+ * none qualifies. Scores every entry by term overlap against `query` (the
+ * Next-step text joined with the first active todo) and returns the best ONLY
+ * when at least LESSON_MIN_OVERLAP terms are shared — an unrelated lesson is
+ * never dressed up as relevant. An obvious duplicate marker (a repeated
+ * leading [tag]) collapses to one entry. The winner is cut at a word boundary
+ * via wcut, never a truncated-mid-word line.
+ */
+function pickLesson(lessons: string[], query: string): string {
+  const q = lessonTerms(query)
+  if (!q.length) return ""
+  const seenTag = new Set<string>()
+  let best = ""
+  let bestScore = 0
+  for (const line of lessons) {
+    const tag = lessonTag(line)
+    if (tag && seenTag.has(tag)) continue // a repeated tag is one lesson
+    if (tag) seenTag.add(tag)
+    const score = lessonTerms(line).reduce((n, t) => (q.includes(t) ? n + 1 : n), 0)
+    if (score > bestScore) {
+      bestScore = score
+      best = line
+    }
+  }
+  if (bestScore < LESSON_MIN_OVERLAP) return ""
+  return wcut(best, LESSON_MAX_COLS)
+}
+
+/**
+ * Is the loaded panel older than the file on disk? True when the plugin
+ * file's mtime is NEWER than this process started — i.e. opencode's
+ * long-lived server/TUI is running pre-restart code while the files on disk
+ * are already newer (the "correct on disk, stale in memory" trap). mtime/start
+ * are injected (ms) so this is a pure, testable expression; the caller supplies
+ * fs.stat + process uptime. A non-finite mtime (stat unavailable) is the
+ * silent-skip branch — false, never a crash the setup has to catch.
+ */
+function isStaleFile(mtimeMs: number, startMs: number): boolean {
+  return Number.isFinite(mtimeMs) && Number.isFinite(startMs) && mtimeMs > startMs
+}
+
+/**
  * A usage bar for the context window. Always shows at least one cell for any
  * non-zero usage: rounding 1% of eight cells to zero would read as "unused".
  */
@@ -695,6 +788,34 @@ const HarnessTui = {
     // churn, so the poll below stands down when nothing has been drawn.
     let lastRender = 0
 
+    // FEATURE 2 — "running stale code", computed ONCE at setup. opencode's
+    // long-lived server/TUI can hold pre-restart code in memory while the
+    // files on disk are already newer (doctor warns about file differences in
+    // its OWN command; the panel never did). Compare this plugin file's mtime
+    // to how long this process has been running: mtime newer than process
+    // start means the loaded panel is older than disk. Guarded end to end — no
+    // import.meta, a stat that throws, or a missing uptime all skip SILENTLY
+    // (never a crash, never a repeated error), leaving the line unshown.
+    let panelStale = false
+    void (async () => {
+      try {
+        let self = ""
+        try {
+          const meta: any = import.meta
+          self = String(meta?.path ?? (meta?.dir ? `${meta.dir}/tui.tsx` : ""))
+        } catch {
+          return // no import.meta on this host: silently skip
+        }
+        if (!self) return
+        if (fs === null) fs = await import("node:fs") // the SAME dynamic import
+        const st = fs.statSync(self)
+        const startMs = Date.now() - (Number(process.uptime?.() ?? 0)) * 1000
+        panelStale = isStaleFile(Number(st?.mtimeMs ?? 0), startMs)
+      } catch {
+        // stat throws / no uptime: silently skip — no line, no error spam
+      }
+    })()
+
     const location = () => {
       try {
         return ctx.location ?? ctx.data?.location?.default?.()
@@ -806,6 +927,28 @@ const HarnessTui = {
      * the value is consumed on the next open (never carried across two).
      */
     let heldCounts: { facts: number; workersActive: number } | null = null
+
+    // FEATURE 1 — cached MEMORY.md lesson lines that shape the Next detail.
+    // Read at most once per SLOW pass (see the slow gate in load), through the
+    // SAME dynamic node:fs import the reader uses; null = never read, so the
+    // render simply has no lesson. A miss (absent/unreadable file) is silent:
+    // the catch keeps the cache as-is — no log, no thrown error, and because
+    // the refresh rides the existing slow-window cadence (no new interval),
+    // there is no tight retry loop either.
+    let lessonsCache: string[] | null = null
+    const refreshLessons = async (directory: string): Promise<void> => {
+      try {
+        if (fs === null) fs = await import("node:fs")
+        const path = memoryPath(directory)
+        if (!fs.existsSync(path)) {
+          lessonsCache = [] // absent -> no lesson; the slow gate won't hammer it
+          return
+        }
+        lessonsCache = lessonLines(fs.readFileSync(path, "utf8"))
+      } catch {
+        /* unreadable MEMORY.md: silently keep whatever the cache already held */
+      }
+    }
 
     const readProjectState = async (directory: string, sid: string) => {
       // Consumed once: load sets heldCounts right before the call when the
@@ -1261,6 +1404,10 @@ const HarnessTui = {
         // a `full` pass never waits for the floor.
         if (full || (!scanned && Date.now() >= slowNext)) {
           slowNext = Date.now() + SLOW_RETRY_MS
+          // FEATURE 1: refresh the Next-step lesson cache on the SAME slow
+          // gate — at most once per slow pass, riding the window above, so it
+          // needs no new interval and cannot become a retry loop.
+          void refreshLessons(directory)
           // The outer time-box is a hang-guard only — its answer is ignored
           // on purpose (see slowOk): it reports true for any settlement,
           // including a pass that timed out exactly on the edge.
@@ -2033,6 +2180,15 @@ const HarnessTui = {
                     </text>
                   ) : null}
                 </box>
+                {/* FEATURE 2: one warn line directly under the header, only
+                    while the loaded panel is older than the file on disk (see
+                    panelStale). No placeholder when fresh; never view.note —
+                    that stays the load-error channel. */}
+                {panelStale ? (
+                  <text fg={th.warn} wrapMode="none" truncate flexShrink={0}>
+                    {"restart opencode — panel update pending"}
+                  </text>
+                ) : null}
 
                 <Row
                   id="next"
@@ -2056,7 +2212,18 @@ const HarnessTui = {
                   }}
                   lines={() => {
                     void view.rev
-                    return []
+                    // FEATURE 1: one muted detail line — the most relevant
+                    // durable LESSON to the Next step (and the active todo),
+                    // or nothing. Reads only the cached MEMORY.md entries and
+                    // fields the panel already populated; empty match renders
+                    // nothing, and DETAIL_LIMIT already carries "+N more".
+                    const activeTodo = (data.todos as string[]).find((t) => {
+                      const mark = String(t).slice(0, 1)
+                      return mark === TODO_MARKS.in_progress || mark === TODO_MARKS.pending
+                    })
+                    const query = `${nextStep()?.text ?? ""} ${activeTodo ?? ""}`
+                    const lesson = pickLesson(lessonsCache ?? [], query)
+                    return lesson ? [lesson] : []
                   }}
                   empty="(no next step)"
                   onActivate={() => {

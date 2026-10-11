@@ -220,6 +220,36 @@ def progress(con, session: str, text: str, status: str = "note") -> int:
     return save_fact(con, f"{tag} [{session[:24]}]: {line}"[:MAX_FACT_LEN], tag)
 
 
+def _fact_hits(con, ws: list[str], cap: int) -> list[tuple]:
+    """Fact rows (text, source, id) worth scoring for `ws`, newest first.
+
+    `facts_fts` is queried first: the index is maintained by the insert/delete
+    triggers, so it is always current. It is only a fast path though — when the
+    database predates the table (or FTS5 refuses the query, or the index comes
+    back empty), the `text LIKE` scan below is the floor and must not lose a
+    row the caller would have gotten without it.
+    """
+    fq = _fts_query(ws)
+    if fq:
+        try:
+            rows = con.execute(
+                "SELECT f.text, f.source, f.id FROM facts f "
+                "JOIN facts_fts ON facts_fts.rowid = f.id "
+                "WHERE facts_fts MATCH ? ORDER BY f.id DESC LIMIT ?",
+                (fq, cap)).fetchall()
+            if rows:
+                return rows
+        except Exception:
+            pass
+    try:
+        where = " OR ".join("text LIKE ?" for _ in ws)
+        return con.execute(
+            f"SELECT text,source,id FROM facts WHERE {where} ORDER BY id DESC LIMIT ?",
+            (*[f"%{w}%" for w in ws], cap)).fetchall()
+    except Exception:
+        return []
+
+
 def recall(con, query: str, limit: int = 3) -> list[dict]:
     """Facts + session snippets relevant to `query`.
 
@@ -227,6 +257,11 @@ def recall(con, query: str, limit: int = 3) -> list[dict]:
     unrelated question with the newest handful of facts reads as recall but is
     only noise the caller would cite. Facts matching more of the query's terms
     come first, then newest.
+
+    Facts come from the `facts_fts` index — recall runs on every compaction,
+    and a `LIKE '%term%'` scan gets no help from a btree. The index is a fast
+    path, not a required one: when it is missing or answers nothing, the same
+    substring scan that used to be the only path still finds the rows.
     """
     ws = terms(query)
     if not ws:
@@ -235,20 +270,16 @@ def recall(con, query: str, limit: int = 3) -> list[dict]:
             return []
         ws = [whole[:40]]
     hits: list[dict] = []
-    try:
-        where = " OR ".join("text LIKE ?" for _ in ws)
-        rows = con.execute(
-            f"SELECT text,source,id FROM facts WHERE {where} ORDER BY id DESC LIMIT ?",
-            (*[f"%{w}%" for w in ws], max(limit * 4, 8))).fetchall()
-        scored = []
-        for text, source, fid in rows:
-            low = text.lower()
-            score = sum(1 for w in ws if w.lower() in low)
-            scored.append((_source_priority(source), -score, -fid, text, source))
-        scored.sort()
-        hits += [{"text": t, "source": s, "score": -neg_score} for _, neg_score, _, t, s in scored]
-    except Exception:
-        pass
+    scored = []
+    for text, source, fid in _fact_hits(con, ws, max(limit * 4, 8)):
+        # the score counts the query's terms in the RAW text, never in the
+        # stemmed index: FTS5's porter tokenizer would hand "running" credit
+        # for "run" that the stored fact does not spell out
+        low = text.lower()
+        score = sum(1 for w in ws if w.lower() in low)
+        scored.append((_source_priority(source), -score, -fid, text, source))
+    scored.sort()
+    hits += [{"text": t, "source": s, "score": -neg_score} for _, neg_score, _, t, s in scored]
     try:
         from .store import search
         fq = _fts_query(ws)
