@@ -1480,8 +1480,11 @@ const HarnessTui = {
         if (typeof ctx?.vcs?.status === "function") {
           data.vcsKnown = true
           try {
-            const rows = await settle(ctx.vcs.status(), SCAN_MS)
-            data.files = Array.isArray(rows)
+            let rows: Rec[] | null = null
+            const done = await settle((async () => {
+              rows = await ctx.vcs.status()
+            })(), SCAN_MS)
+            data.files = done && Array.isArray(rows)
               ? rows.map((r: Rec) => ({
                   file: String(r?.file ?? ""),
                   status: String(r?.status ?? "?"),
