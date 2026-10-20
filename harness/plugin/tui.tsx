@@ -204,6 +204,8 @@ const shortSkill = (id: unknown) => String(id ?? "").replace(/^harness-/, "")
 
 const log = (m: string) => console.error(`[harness tui] ${m}`)
 const short = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 140)
+/** One log line per failing thunk: a repaint must not spam the host log. */
+const loggedFailures = new Set<string>()
 
 /** 12345 -> "12,345" (opencode's own readout uses toLocaleString) */
 function fmt(n: unknown): string {
@@ -1826,6 +1828,21 @@ const HarnessTui = {
       log(`app slot failed: ${short(e)}`)
     }
 
+    // A plugin slot must never take down the host sidebar: log the failing
+    // thunk once (the key names it, so the underlying read still gets fixed)
+    // and hand the host the fallback — never undefined, even on repaint.
+    const safeCall = <T,>(where: string, fn: () => T, fallback: T): T => {
+      try {
+        return fn()
+      } catch (e) {
+        if (!loggedFailures.has(where)) {
+          loggedFailures.add(where)
+          log(`${where} failed: ${short(e)}`)
+        }
+        return fallback
+      }
+    }
+
     /**
      * One stat row in the Kilo section grammar: a header of chevron + bold
      * title (text colour) + spacer pinning the muted value right, and
@@ -1874,7 +1891,7 @@ const HarnessTui = {
     }) => {
       // A section with nothing in it is noise, not honesty: an empty Workers
       // row or "0 facts" Memory is exactly the clutter the panel must drop.
-      if (props.hide?.()) return null
+      if (safeCall(`row:${props.id}.hide`, () => props.hide?.() ?? false, false)) return null
       return (
       <box flexDirection="column">
         <box
@@ -1882,14 +1899,17 @@ const HarnessTui = {
           gap={1}
           minWidth={0}
           onMouseDown={() =>
-            props.onActivate
-              ? props.onActivate()
-              : patch((d) => {
+            safeCall(`row:${props.id}.click`, () => {
+              if (props.onActivate) props.onActivate()
+              else
+                patch((d) => {
                   const open = new Set<string>(Array.isArray(d.open) ? d.open : [])
                   if (open.has(props.id)) open.delete(props.id)
                   else open.add(props.id)
                   d.open = [...open]
                 })
+              return true
+            }, false)
           }
         >
           <text fg={th.base} flexShrink={0} wrapMode="none">
@@ -1901,31 +1921,44 @@ const HarnessTui = {
           <text flexGrow={1} wrapMode="none" truncate>
             {" "}
           </text>
-          {props.valueParts
-            ? props.valueParts().map((p) => (
-                <text fg={p.fg} flexShrink={0} wrapMode="none">
-                  {p.text}
+          {(() => {
+            const parts = props.valueParts
+              ? safeCall(`row:${props.id}.valueParts`, () => props.valueParts?.() ?? null, null)
+              : null
+            if (Array.isArray(parts)) {
+              return parts.map((p) => (
+                <text fg={p.fg ?? th.muted} flexShrink={0} wrapMode="none">
+                  {String(p.text ?? "")}
                 </text>
               ))
-            : <text fg={props.valueFg ? props.valueFg() : th.muted} flexShrink={0} wrapMode="none">
-                {props.value()}
-              </text>}
+            }
+            const vfg = safeCall(`row:${props.id}.valueFg`, () => props.valueFg?.() ?? th.muted, th.muted)
+            return (
+              <text fg={vfg} flexShrink={0} wrapMode="none">
+                {String(safeCall(`row:${props.id}.value`, props.value, "") ?? "")}
+              </text>
+            )
+          })()}
         </box>
         {isOpen(props.id) ? (
           <box flexDirection="column" paddingLeft={0}>
             {(() => {
-              const all = props.lines()
+              const got = safeCall(`row:${props.id}.lines`, props.lines, [] as string[])
+              const all = Array.isArray(got) ? got.map((l) => String(l ?? "")) : []
               const rows: string[] = all.length ? all.slice(0, DETAIL_LIMIT) : [props.empty]
               // A count that outgrows its list ("11 available", 5 shown) is
               // the dishonesty users notice — always say how many more exist.
               if (all.length > DETAIL_LIMIT) rows.push(`… +${all.length - DETAIL_LIMIT} more`)
-              return rows.map((l) =>
-                props.lineParts ? (() => {
+              return rows.map((l) => {
+                const raw = props.lineParts
+                  ? safeCall(`row:${props.id}.lineParts`, () => props.lineParts?.(l) ?? null, null)
+                  : null
+                const parts = Array.isArray(raw) ? raw.map((p) => ({ text: String(p?.text ?? ""), fg: p?.fg ?? th.muted })) : null
+                return Array.isArray(parts) ? (() => {
                   // Justified dot/status rows: label left, value right,
                   // full-bleed from column 0. The dot keeps its colour left;
                   // the trailing value (after " · ") pins right. No " · " —
                   // full-width left line, the justified-with-no-value form.
-                  const parts = props.lineParts(l)
                   const joined = parts.map((p) => p.text).join("")
                   const sep = joined.indexOf(" · ")
                   if (sep < 0) {
@@ -1934,7 +1967,7 @@ const HarnessTui = {
                         <box flexDirection="row" flexGrow={1} minWidth={0}>
                           {parts.map((p, idx) => (
                             <text fg={p.fg} wrapMode="none" truncate={idx === parts.length - 1}>
-                              {p.text}
+                              {String(p.text ?? "")}
                             </text>
                           ))}
                         </box>
@@ -1949,7 +1982,7 @@ const HarnessTui = {
                         <box flexDirection="row" flexGrow={1} minWidth={0}>
                           {parts.map((p, idx) => (
                             <text fg={p.fg} wrapMode="none" truncate={idx === parts.length - 1}>
-                              {p.text}
+                              {String(p.text ?? "")}
                             </text>
                           ))}
                         </box>
@@ -1973,7 +2006,7 @@ const HarnessTui = {
                       <box flexDirection="row" flexGrow={1} minWidth={0}>
                         {leftParts.map((p, idx) => (
                           <text fg={p.fg} wrapMode="none" truncate={idx === leftParts.length - 1}>
-                            {p.text}
+                            {String(p.text ?? "")}
                           </text>
                         ))}
                       </box>
@@ -1986,7 +2019,7 @@ const HarnessTui = {
                   // Metric rows: label left, value right on the same line,
                   // both muted unless tone says otherwise (todo dots).
                   const [k, v] = splitRow(l)
-                  const fg = props.tone ? props.tone(l) : th.muted
+                  const fg = safeCall(`row:${props.id}.tone`, () => props.tone?.(l) ?? th.muted, th.muted)
                   return v ? (
                     <box flexDirection="row" justifyContent="space-between" minWidth={0}>
                       <text fg={fg} flexGrow={1} minWidth={0} wrapMode="none" truncate>
@@ -2001,8 +2034,8 @@ const HarnessTui = {
                       {k}
                     </text>
                   )
-                })(),
-              )
+                })()
+              })
             })()}
           </box>
         ) : null}
