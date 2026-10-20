@@ -288,8 +288,10 @@ def test_tui_value_emphasis_wiring():
     # the props exist and the Row falls back to muted without them.
     assert "valueFg?: () => string" in tui
     assert "tone?: (line: string) => string" in tui
-    assert "props.valueFg ? props.valueFg() : th.muted" in tui
-    assert "props.tone ? props.tone(l) : th.muted" in tui
+    # the fallback lives inside safeCall (0e4f5ee: a throwing row read must not
+    # take down the sidebar), so the thunk is `?.()`-guarded, never a bare call
+    assert "props.valueFg?.() ?? th.muted" in tui
+    assert "props.tone?.(l) ?? th.muted" in tui
     # only the Window row wires a value tint (pressure); every other value is
     # muted by default — no per-row valueFg, no accent right-values.
     assert "valueFg={windowFg}" in tui

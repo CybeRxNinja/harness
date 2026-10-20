@@ -204,6 +204,44 @@ const shortSkill = (id: unknown) => String(id ?? "").replace(/^harness-/, "")
 
 const log = (m: string) => console.error(`[harness tui] ${m}`)
 const short = (e: unknown) => (e instanceof Error ? e.message : String(e)).slice(0, 140)
+
+/**
+ * One colour grammar for every `fg`: HEX, never a colour NAME.
+ *
+ * A plugin slot is a live subtree, so a colour that changes after mount is a
+ * property UPDATE on an existing text node — and opencode 2.1.1's update path
+ * rejects colour names that its create path accepted: the Window row's tint
+ * (`th.muted` -> `ok`, whose floor was the literal "green") took the whole
+ * sidebar down with `harness crashed in slot sidebar.content: undefined is not
+ * an object (evaluating 'e.length')`. Measured on 2.1.1: `th.muted` -> a theme
+ * hex and hex -> hex both update fine, `th.muted` -> "green" crashes, and
+ * pinning the colour so it never updates makes the panel render again. So a
+ * theme colour passes through only when it is already a colour literal, a
+ * well-known name is mapped to its hex, and anything else lands on the floor.
+ */
+const NAMED_HEX: Record<string, string> = {
+  black: "#000000",
+  white: "#ffffff",
+  gray: "#808080",
+  grey: "#808080",
+  silver: "#c0c0c0",
+  red: "#ff5f5f",
+  green: "#5fd75f",
+  yellow: "#ffd75f",
+  blue: "#5f87ff",
+  magenta: "#ff5fd7",
+  cyan: "#5fd7d7",
+}
+const col = (v: unknown, floor: string): string => {
+  if (typeof v === "string") {
+    const s = v.trim()
+    if (/^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(s)) return s
+    if (/^rgba?\(/i.test(s)) return s
+    const named = NAMED_HEX[s.toLowerCase()]
+    if (named) return named
+  }
+  return floor
+}
 /** One log line per failing thunk: a repaint must not spam the host log. */
 const loggedFailures = new Set<string>()
 
@@ -629,16 +667,17 @@ const HarnessTui = {
     // opencode's own sidebar palette. `base` is the label colour and `muted`
     // the value colour in its rows; `action` marks an interactive row.
     const th = {
-      base: ctx?.theme?.text?.base ?? "white",
-      muted: ctx?.theme?.text?.muted ?? "gray",
-      accent: ctx?.theme?.text?.action ?? ctx?.theme?.text?.accent ?? ctx?.theme?.categorical?.[0] ?? "magenta",
-      warn: ctx?.theme?.text?.feedback?.warning ?? ctx?.theme?.text?.warning ?? "yellow",
+      base: col(ctx?.theme?.text?.base, "#ffffff"),
+      muted: col(ctx?.theme?.text?.muted, "#808080"),
+      accent: col(ctx?.theme?.text?.action ?? ctx?.theme?.text?.accent ?? ctx?.theme?.categorical?.[0], "#ff5fd7"),
+      warn: col(ctx?.theme?.text?.feedback?.warning ?? ctx?.theme?.text?.warning, "#ffd75f"),
     }
-    // Per-token accents for the segmented rows. The literal tails are the
-    // floor: not every theme ships feedback.success/error.
-    const ok = ctx?.theme?.text?.feedback?.success ?? "green"
-    const bad = ctx?.theme?.text?.feedback?.error ?? "red"
-    const warn = ctx?.theme?.text?.feedback?.warning ?? th.warn
+    // Per-token accents for the segmented rows. The hex floors are the real
+    // value here: not every theme ships feedback.success/error, and a colour
+    // NAME in a dynamic `fg` is what crashed the host (see `col`).
+    const ok = col(ctx?.theme?.text?.feedback?.success, "#5fd75f")
+    const bad = col(ctx?.theme?.text?.feedback?.error, "#ff5f5f")
+    const warn = col(ctx?.theme?.text?.feedback?.warning, th.warn)
 
     // Reactive view state. storage.memory is a reactive [store, update] pair:
     // clicking a row writes to it and the sidebar repaints. Without it the panel
