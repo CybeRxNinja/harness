@@ -1160,8 +1160,10 @@ def test_tui_workers_row_shows_the_rlm_pool():
     assert "STALE_MS" not in tui and '= "stale"' not in tui, "the stale rule stays doctor's"
 
     # the value is the live occupancy of a pool that EXISTS; an empty pool
-    # hides the row (a permanent "Workers none" was panel clutter, not state)
-    assert 'view.workersActive ? `${view.workersActive} active` : "idle"' in tui
+    # hides the row (a permanent "Workers none" was panel clutter, not state).
+    # The value is segmented now so the live dot can breathe (valueParts); the
+    # words are unchanged: "N active" / "idle".
+    assert 'n ? `${n} active` : "idle"' in tui
     assert "return !view.workers" in tui
     assert '(no workers in this project)' in tui
 

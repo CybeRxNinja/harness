@@ -251,9 +251,13 @@ def test_tui_header_separator_is_a_literal_middot_not_the_box_gap():
     tui = _tui_text()
     header = _region(tui, 'append: "sidebar.content"', 'id="window"')
     assert "gap=" not in header, "the panel header still spaces itself with characters"
-    assert '{"harness "}' in header, "the brand carries the space"
-    assert 'return tail ? `· ${tail}` : ""' in header, "the tail carries the `·`"
-    assert '{" ⋯"}' in header, "the in-flight glyph carries its own space"
+    # The wordmark is one text node PER CHARACTER (the animated hue wheel does
+    # not retint its neighbours), and the separator is its own literal node, so
+    # a host that drops box `gap` still reads `harness · ses_x`.
+    assert 'gradient("harness", Number(view.frame ?? 0)).map((p) => (' in header
+    assert '{" · "}' in header, "the separator is a literal cell, not the box gap"
+    assert 'view.note ? cut(view.note, 40) : view.sessionID || ""' in header
+    assert "spin(Number(view.frame ?? 0))" in header, "the in-flight glyph carries its own space"
     assert "\n                    harness\n" not in header, (
         "a bare brand text node renders unspaced"
     )
@@ -277,37 +281,45 @@ def test_tui_waits_rows_carry_live_icon():
 
 
 def test_tui_value_emphasis_wiring():
-    """Kilo value hierarchy: titles pop in base, values recede to muted.
+    """Per-row accents: colour carries the section, strings stay unchanged.
 
-    The Row owns the hierarchy (`valueFg`/`tone` props, colour only —
-    strings unchanged); only the Window row tints its value (pressure), every
-    other value renders muted, and detail colour lives only in status dots
-    and +/- diffs — metric lines are plain muted justified pairs.
+    The Kilo rework kept every value muted so only the Window pressure tint
+    spoke. The panel now owns a fixed HEX palette (ACCENT) — one accent per
+    row — because eleven equally grey numbers are not scannable. The contract
+    that matters is unchanged: the Row owns the hierarchy through props
+    (`valueFg`/`tone`/`lineParts`), every value falls back to its OWN accent,
+    the Window row still overrides that with the pressure ramp, and no colour
+    NAME ever reaches a live `fg` (see test_tui_colors.py).
     """
+    import re
+
     tui = _tui_text()
-    # the props exist and the Row falls back to muted without them.
+    # the props exist; the fallback lives inside safeCall (0e4f5ee: a throwing
+    # row read must not take down the sidebar) and lands on the row accent.
     assert "valueFg?: () => string" in tui
     assert "tone?: (line: string) => string" in tui
-    # the fallback lives inside safeCall (0e4f5ee: a throwing row read must not
-    # take down the sidebar), so the thunk is `?.()`-guarded, never a bare call
-    assert "props.valueFg?.() ?? th.muted" in tui
+    assert "icon: string" in tui and "accent: string" in tui
+    assert "props.valueFg?.() ?? props.accent" in tui
     assert "props.tone?.(l) ?? th.muted" in tui
-    # only the Window row wires a value tint (pressure); every other value is
-    # muted by default — no per-row valueFg, no accent right-values.
     assert "valueFg={windowFg}" in tui
-    assert "valueFg={()" not in tui, "calm values must not re-tint to base"
-    assert "return data.tokens ? th.base : th.muted" not in tui
-    assert "return view.workersActive ? th.base : th.muted" not in tui
-    assert "return (view.skills ?? 0) > 0 ? th.base : th.muted" not in tui
     assert "return pct() >= 80 ? th.warn : pct() >= 60 ? th.base : ok" in tui
-    # dots/diffs carry the only detail colour (todo tone, worker/agent/memory
-    # marks, file +/- counts); metric rows have no tone at all.
+    # The palette is literal hex (never a theme name, never a named colour) and
+    # every section names its accent at the call site.
+    start = tui.index("const ACCENT: Record<string, string> = {")
+    block = tui[start:tui.index("\n}", start)]
+    pairs = re.findall(r'(\w+): "(#[0-9a-fA-F]{6})"', block)
+    assert len(pairs) >= 11, pairs
+    names = {k for k, _ in pairs}
+    for row in ("next", "window", "tokens", "models", "todo", "workers", "waits", "files", "skills", "agents", "memory"):
+        assert row in names, f"no accent for the {row} row"
+        assert f"accent={{ACCENT.{row}}}" in tui, f"{row} row does not use its accent"
+    # dots/diffs still carry their own state colour (todo tone, worker/agent/
+    # memory marks, file +/- counts) — the accent is an identity, not a
+    # replacement for state.
     assert "tone={(l)" in tui
     assert "tone={() => th.base}" not in tui
     assert "lineParts={(l)" in tui
     assert 'l.startsWith("◐") ? warn' in tui
-    # worker/memory marks: the dot carries the state colour (◐/! warn, never
-    # the accent) while the name and the status read muted.
     assert 'mark === "◐" || mark === "!" ? warn' in tui
     assert "[rest.slice(0, j), th.muted]" in tui
     assert ': mark === "◐" ? warn' in tui
@@ -656,17 +668,27 @@ def test_tui_dispose_releases_every_timer_it_started():
 def test_tui_fast_path_ride_the_existing_poll_timer():
     """The refresh added no timer: the probe rides the poll that already ran.
 
-    Two intervals total, before and after: the refresh poll (now re-ticked at
-    FAST_MS) and the Waits countdown tick. A third `setInterval` would mean the
-    fast path bought its own timer instead of reusing the one in place.
+    The refresh poll (re-ticked at FAST_MS) and the Waits countdown tick carry
+    all DATA refreshes. The one extra interval is the visual frame clock, and
+    it is deliberately a separate thing: it reads no store, and its callback
+    returns immediately unless `animating()` says something on screen is
+    moving — so it is a repaint clock, not a second poll.
     """
     tui = _tui_text()
-    assert tui.count("setInterval(") == 2, (
-        f"expected exactly 2 intervals (poll + waits tick), found {tui.count('setInterval(')}"
+    assert tui.count("setInterval(") == 3, (
+        f"expected 3 intervals (poll + waits tick + frame clock), found {tui.count('setInterval(')}"
     )
     assert "timer = setInterval(() => {" in tui
     assert "tickTimer = setInterval(() => {" in tui
-    assert "}, FAST_MS)" in tui and "}, 1000)" in tui
+    assert "animTimer = setInterval(() => {" in tui
+    assert "}, FAST_MS)" in tui and "}, 1000)" in tui and "}, ANIM_MS)" in tui
+    # the frame clock never reads data: it only bumps the store counter, and
+    # only while animating() holds.
+    anim = tui[tui.index("animTimer = setInterval(() => {"):tui.index("// The Waits countdown ticks")]
+    assert "if (!animating()) return" in anim
+    assert "d.frame = Number(d.frame ?? 0) + 1" in anim
+    for banned in ("load(", "probe()", "readProjectState", "db.query"):
+        assert banned not in anim, f"the frame clock must not read data: {banned}"
     # both the probe and the fast pass live inside that one poll callback
     assert tui.index("p = probe()") < tui.index("}, FAST_MS)") < tui.index(
         "tickTimer = setInterval(() => {"

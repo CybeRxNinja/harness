@@ -108,6 +108,14 @@ const LATE_REARMS = 1
 const ROW_LIMIT = 6
 /** Detail rows per section when expanded (the sidebar viewport is short). */
 const DETAIL_LIMIT = 5
+/**
+ * Animation frame period. Deliberately slow: this is a stats panel, so one
+ * moving cell should read as "live", not as a loading spinner. The tick only
+ * runs while something is worth watching (a row is open, a worker/wait is
+ * active or a read is in flight) and stands down entirely off-screen — an
+ * idle, collapsed panel never repaints for the animation's sake.
+ */
+const ANIM_MS = 420
 
 /**
  * Children a family read may fan out to. Every child costs the panel a
@@ -448,6 +456,123 @@ function bar(pct: number, cells = 8): string {
 }
 
 /**
+ * ANIMATION KIT — pure, dependency-free, hex-only.
+ *
+ * The panel is a readout, not a wall of text: a colour that SHIFTS with the
+ * number (pressure, progress) is read faster than a word, and one moving cell
+ * is the difference between "a screenshot" and "a live thing". Everything
+ * here is a pure function of the caller's frame counter and values — no timer,
+ * no state, no host call — so the helpers can be sliced out and exercised in a
+ * plain JS runtime, and a repaint can never leave one behind.
+ *
+ * HEX ONLY, for the reason `col` documents: a colour NAME on a live `fg`
+ * unmounted the whole sidebar on opencode 2.1.1. `mixHex`/`heat`/`gradient`
+ * always answer a `#rrggbb` string, and `bar`-style glyph strings keep their
+ * exact cell width so a right-pinned value never shifts the row.
+ */
+
+/** "#abc" | "#aabbcc" -> [r,g,b]; null for anything else (never throws). */
+function hexRgb(hex: string): [number, number, number] | null {
+  const s = String(hex ?? "").trim().replace(/^#/, "")
+  if (!/^([0-9a-f]{3}|[0-9a-f]{6})$/i.test(s)) return null
+  const full = s.length === 3 ? s.split("").map((c) => c + c).join("") : s
+  return [parseInt(full.slice(0, 2), 16), parseInt(full.slice(2, 4), 16), parseInt(full.slice(4, 6), 16)]
+}
+
+const byteHex = (n: number) =>
+  Math.max(0, Math.min(255, Math.round(Number(n) || 0))).toString(16).padStart(2, "0")
+
+/** Linear blend between two hex colours; `t` is clamped to 0..1. */
+function mixHex(a: string, b: string, t: number): string {
+  const x = hexRgb(a)
+  const y = hexRgb(b)
+  if (!x || !y) return x ? a : "#ffffff"
+  const k = Math.max(0, Math.min(1, Number.isFinite(t) ? t : 0))
+  return "#" + x.map((v, i) => byteHex(v + (y[i] - v) * k)).join("")
+}
+
+/**
+ * Green -> amber -> red for a 0..100 pressure reading. The number is the truth;
+ * the tint only makes it legible from across the room, so a low value never
+ * gets a warning colour and 100% is unmistakably red.
+ */
+function heat(pct: number): string {
+  const p = Math.max(0, Math.min(100, Number(pct) || 0))
+  return p <= 50 ? mixHex("#5fd75f", "#ffd75f", p / 50) : mixHex("#ffd75f", "#ff5f5f", (p - 50) / 50)
+}
+
+/**
+ * Animated progress bar: same cells and width as bar(), plus one head cell
+ * ("▓") that travels across the filled run. At the panel's animation rate
+ * (ANIM_MS) this reads as a slow scan; the width never changes (a right-pinned
+ * value must not shift), 0% is still all "░", and the head is simply absent
+ * whenever it lands past the filled run — so a full bar is still unmistakable.
+ */
+function abar(pct: number, cells = 8, frame = 0): string {
+  const clamped = Math.max(0, Math.min(100, Number(pct) || 0))
+  const n = Math.max(1, Math.round(Number(cells) || 8))
+  let filled = Math.round((clamped / 100) * n)
+  if (clamped > 0 && filled < 1) filled = 1
+  if (clamped >= 100) return "█".repeat(n)
+  const head = filled > 0 ? Math.abs(Math.floor(Number(frame) || 0)) % (filled + 2) : -1
+  let out = ""
+  for (let i = 0; i < n; i++) out += i >= filled ? "░" : i === head ? "▓" : "█"
+  return out
+}
+
+/** Sparkline glyphs, quietest to tallest. */
+const SPARK = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+
+/**
+ * A sparkline over the last N readings, normalised to its own maximum (a tiny
+ * turn still shows a shape instead of a flat row of dots). Zero readings keep
+ * the quietest cell, and an empty series renders nothing at all.
+ */
+function spark(values: number[]): string {
+  const rows = (Array.isArray(values) ? values : []).map((v) => Math.max(0, Number(v) || 0))
+  if (!rows.length) return ""
+  const max = Math.max(...rows)
+  return rows
+    .map((v) => SPARK[max > 0 ? Math.min(SPARK.length - 1, Math.round((v / max) * (SPARK.length - 1))) : 0])
+    .join("")
+}
+
+/** Braille spinner frames for an in-flight read. */
+const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+const spin = (frame: number) => SPIN[Math.abs(Math.floor(Number(frame) || 0)) % SPIN.length]
+
+/**
+ * One hex accent per section: colour carries identity (which row am I looking
+ * at) before it carries decoration, so the panel is scannable at a glance.
+ * Fixed hex rather than theme picks on purpose — the theme only ships a
+ * handful of text colours, and a readout that borrows them all ends up one
+ * flat grey. Every value here is a literal `#rrggbb`.
+ */
+const ACCENT: Record<string, string> = {
+  next: "#ff5fd7",
+  window: "#5fd7ff",
+  tokens: "#5f87ff",
+  models: "#c77dff",
+  todo: "#5fd75f",
+  workers: "#ffd75f",
+  waits: "#ff9f5f",
+  files: "#5fd7a7",
+  skills: "#5fd7ff",
+  agents: "#7dd3fc",
+  memory: "#c77dff",
+}
+
+/** Brand wordmark: a hue wheel walked one cell per animation frame. */
+const BRAND = ["#ff5fd7", "#c77dff", "#8b7dff", "#5f87ff", "#5fd7ff", "#5fd7a7", "#5fd75f", "#ffd75f"]
+function gradient(text: string, frame = 0): Array<{ text: string; fg: string }> {
+  const k = Math.floor(Number(frame) || 0)
+  return Array.from(String(text ?? "")).map((ch, i) => ({
+    text: ch,
+    fg: BRAND[(((i + k) % BRAND.length) + BRAND.length) % BRAND.length],
+  }))
+}
+
+/**
  * Elapsed/total share of a wait row for its progress bar, reusing bar() (the
  * Window usage-bar precedent): 0% at record time, 100% at deadline. Returns
  * -1 when the row carries no usable total — pre-migration rows or a drifted
@@ -731,6 +856,27 @@ const HarnessTui = {
     }
     /** Any number of rows can be open at once — `open` is a list of row ids. */
     const isOpen = (name: string) => (Array.isArray(view.open) ? view.open : []).includes(name)
+    /**
+     * Keep the animation running for a moment after an interaction. A click or
+     * a fresh load wakes the frame tick for a few seconds, so the pulse is a
+     * reaction the owner can see — not a permanent 2.4 fps repaint bill for a
+     * panel nobody is looking at.
+     */
+    let animUntil = 0
+    const wake = (ms = 4000) => {
+      animUntil = Math.max(animUntil, Date.now() + Math.max(0, Number(ms) || 0))
+    }
+    /**
+     * A row's icon colour: its accent, breathing to a dim blend while the row
+     * is open. Read inside JSX (never the component body) so the frame counter
+     * is a tracked dependency and the pulse actually repaints; a closed row
+     * stays a steady accent.
+     */
+    const rowIconFg = (id: string, accent: string): string => {
+      void view.frame
+      if (!isOpen(id)) return accent
+      return Number(view.frame ?? 0) % 2 ? mixHex(accent, "#000000", 0.5) : accent
+    }
 
     // ---- the Next row's actions: reuse this panel's own mechanics, nothing new.
     // They live at setup scope so nextStep() (in the sidebar render) can hand one
@@ -784,6 +930,13 @@ const HarnessTui = {
       // scanModels): "" when unmeasurable, so the header renders exactly as
       // before instead of noise.
       currentRate: "",
+      // Output tokens of the last few assistant steps, oldest first: the
+      // Tokens row draws one sparkline from it (see scanModels), so the shape
+      // of the session is visible without a second read.
+      spark: [] as number[],
+      // When the last load landed. The header keeps a live dot for a couple
+      // of seconds after it, so "the numbers just refreshed" is visible.
+      loadedAt: 0,
       agents: [] as string[],
       skills: [] as string[],
       facts: [] as string[],
@@ -1299,6 +1452,18 @@ const HarnessTui = {
       const measured = turnRate(lastTurn(mine))
       data.currentRate = /^\d[\d,]* tok\/s$/.test(measured) ? measured : ""
 
+      // Sparkline series: this session's output tokens per assistant step,
+      // oldest first, capped at the row's width. Already-walked messages, so
+      // no extra read; a session with no steps yields an empty series and the
+      // Tokens row simply omits the line.
+      const series: number[] = []
+      for (const m of mine) {
+        if (String(m?.role ?? m?.type) !== "assistant") continue
+        const out = Number(m?.tokens?.output ?? 0)
+        if (out > 0) series.push(out)
+      }
+      data.spark = series.slice(-10)
+
       const steps: Rec[] = []
       for (const [prov, used] of byProv) {
         // A provider line WITHOUT catalog counts: "kilo · 392 models" is
@@ -1623,6 +1788,9 @@ const HarnessTui = {
       } catch (e) {
         notes.push(short(e))
       } finally {
+        // A load just landed: the header's live dot and the icon pulse should
+        // show it for a moment instead of the numbers mutating silently.
+        data.loadedAt = Date.now()
         patch((d) => {
           d.sessionID = sessionID
           d.skills = data.skills.length
@@ -1684,6 +1852,7 @@ const HarnessTui = {
         // a wait is pending and stops (with one cheap reconciling pass) when
         // none is — never a dangling timer past the last deadline.
         ensureWaitTick()
+        wake(2400)
         loading = false
         if (pendingFull) {
           pendingFull = false
@@ -1753,6 +1922,37 @@ const HarnessTui = {
       }, FAST_MS)
     } catch (e) {
       log(`poll unavailable: ${short(e)}`)
+    }
+
+    /**
+     * Is a frame worth drawing right now? Only while someone is looking at
+     * something that moves: a row is open, a read is in flight, a worker or a
+     * wait is live, or a click/load just woke the panel. A collapsed idle
+     * panel stays byte-identical between polls — the animation is a reaction,
+     * never a background bill. Same off-screen stand-down as the poll.
+     */
+    const animating = (): boolean => {
+      if (lastRender === 0 || Date.now() - lastRender > POLL_MS * 4) return false
+      if (Array.isArray(view.open) && view.open.length) return true
+      if (view.scanning) return true
+      if (Date.now() < animUntil) return true
+      if (Number(view.workersActive ?? 0) > 0) return true
+      if (Number(view.waits ?? 0) > 0) return true
+      return false
+    }
+    let animTimer: any = null
+    try {
+      // The frame is a store counter, so the same reactive path that already
+      // repaints the panel carries the animation — no direct render call, no
+      // second renderer hook.
+      animTimer = setInterval(() => {
+        if (!animating()) return
+        patch((d) => {
+          d.frame = Number(d.frame ?? 0) + 1
+        })
+      }, ANIM_MS)
+    } catch (e) {
+      log(`animation tick unavailable: ${short(e)}`)
     }
 
     // The Waits countdown ticks between host repaints: the poll above is what
@@ -1897,6 +2097,10 @@ const HarnessTui = {
      */
     const Row = (props: {
       id: string
+      /** One-cell glyph: colour carries the section, the glyph carries its kind. */
+      icon: string
+      /** Hex accent for the icon, the chevron and the default value. */
+      accent: string
       label: string
       value: () => string
       lines: () => string[]
@@ -1939,6 +2143,7 @@ const HarnessTui = {
           minWidth={0}
           onMouseDown={() =>
             safeCall(`row:${props.id}.click`, () => {
+              wake(4000)
               if (props.onActivate) props.onActivate()
               else
                 patch((d) => {
@@ -1951,8 +2156,11 @@ const HarnessTui = {
             }, false)
           }
         >
-          <text fg={th.base} flexShrink={0} wrapMode="none">
+          <text fg={isOpen(props.id) ? props.accent : th.muted} flexShrink={0} wrapMode="none">
             {isOpen(props.id) ? "▾" : "▸"}
+          </text>
+          <text fg={rowIconFg(props.id, props.accent)} flexShrink={0} wrapMode="none">
+            {props.icon}
           </text>
           <text fg={th.base} bold flexShrink={0} wrapMode="none" truncate>
             {props.label}
@@ -1971,7 +2179,7 @@ const HarnessTui = {
                 </text>
               ))
             }
-            const vfg = safeCall(`row:${props.id}.valueFg`, () => props.valueFg?.() ?? th.muted, th.muted)
+            const vfg = safeCall(`row:${props.id}.valueFg`, () => props.valueFg?.() ?? props.accent, props.accent)
             return (
               <text fg={vfg} flexShrink={0} wrapMode="none">
                 {String(safeCall(`row:${props.id}.value`, props.value, "") ?? "")}
@@ -2185,7 +2393,10 @@ const HarnessTui = {
               void view.rev
               const t = data.tokens
               if (!t) return "—"
-              return `${kfmt(total())} · $${Number(data.cost ?? 0).toFixed(4)}`
+              const cost = Number(data.cost ?? 0)
+              // A zero spend is not a price: show the tokens alone (the old
+              // "$0.0000" read as broken currency, not as free).
+              return cost > 0 ? `${kfmt(total())} · $${cost.toFixed(4)}` : `${kfmt(total())} tok`
             }
             const tokenLines = (): string[] => {
               void view.rev
@@ -2213,6 +2424,13 @@ const HarnessTui = {
               // optional lines) so it can never hide behind "… +N more".
               if (data.famHidden > 0) out.push(`+${data.famHidden} more sessions · not in token totals`)
               if (Number(cache.write ?? 0) > 0) out.push(`cache write · ${numfmt(cache.write)}`)
+              // The session's shape, not just its total: output tokens per
+              // assistant step, oldest first. Drawn from the messages this
+              // pass already walked, and omitted until there are two points
+              // (a one-cell sparkline is noise).
+              if (Array.isArray(data.spark) && data.spark.length >= 2) {
+                out.push(`recent · ${spark(data.spark)}`)
+              }
               // The children-only split of the same totals, so the family
               // number above stays traceable — one line per field, never
               // packed mid-line. subSplit is absent on hosts without family
@@ -2240,18 +2458,40 @@ const HarnessTui = {
                     as literals — the line then reads the same on a host that
                     honours `gap` and one that drops it. */}
                 <box flexDirection="row" minWidth={0}>
-                  <text fg={view.note ? th.warn : th.base} bold flexShrink={0}>
-                    {"harness "}
+                  {/* The wordmark is a hue wheel: one cell per character, walked
+                      one step per animation frame. It is the panel's "alive"
+                      tell that costs no width — the session id follows it. */}
+                  {gradient("harness", Number(view.frame ?? 0)).map((p) => (
+                    <text fg={p.fg} bold flexShrink={0} wrapMode="none">
+                      {p.text}
+                    </text>
+                  ))}
+                  <text fg={th.muted} flexShrink={0} wrapMode="none">
+                    {" · "}
                   </text>
-                  <text fg={th.muted} flexGrow={1} wrapMode="none" truncate>
+                  <text fg={view.note ? th.warn : th.muted} flexGrow={1} wrapMode="none" truncate>
                     {(() => {
                       const tail = view.note ? cut(view.note, 40) : view.sessionID || ""
-                      return tail ? `· ${tail}` : ""
+                      return tail
                     })()}
                   </text>
                   {view.scanning ? (
-                    <text fg={th.muted} flexShrink={0}>
-                      {" ⋯"}
+                    <text fg={ACCENT.window} flexShrink={0} wrapMode="none">
+                      {` ${spin(Number(view.frame ?? 0))}`}
+                    </text>
+                  ) : null}
+                  {(() => {
+                    // A dot that lingers a couple of seconds after a load: the
+                    // numbers visibly refreshed instead of silently mutating.
+                    void view.frame
+                    return Date.now() - Number(data.loadedAt ?? 0) < 2600
+                  })() ? (
+                    <text
+                      fg={mixHex(ACCENT.next, "#ffffff", Number(view.frame ?? 0) % 2 ? 0.15 : 0.55)}
+                      flexShrink={0}
+                      wrapMode="none"
+                    >
+                      {" ●"}
                     </text>
                   ) : null}
                 </box>
@@ -2267,6 +2507,8 @@ const HarnessTui = {
 
                 <Row
                   id="next"
+                  icon="◆"
+                  accent={ACCENT.next}
                   label="Next"
                   value={() => {
                     void view.rev
@@ -2278,7 +2520,7 @@ const HarnessTui = {
                     if (!s) return []
                     // Only the action carries colour: warning for a problem to fix
                     // (a load error, or window pressure), accent for the step.
-                    const fg = view.note || (data.contextLimit > 0 && pct() >= 80) ? warn : th.accent
+                    const fg = view.note || (data.contextLimit > 0 && pct() >= 80) ? warn : ACCENT.next
                     return segs([[s.text, fg]])
                   }}
                   hide={() => {
@@ -2308,25 +2550,49 @@ const HarnessTui = {
                 />
                 <Row
                   id="window"
+                  icon="▣"
+                  accent={ACCENT.window}
                   label="Window"
                   value={windowValue}
                   valueFg={windowFg}
                   lines={windowLines}
+                  hide={() => {
+                    void view.rev
+                    // Tokens can exist while the LAST assistant step measured
+                    // no context (an old/compacted session): "0 tok" is not a
+                    // stat, so the row leaves instead of printing it.
+                    return !data.tokens || used() <= 0
+                  }}
                   empty="(no context data yet)"
                 />
                 <Row
                   id="tokens"
+                  icon="◈"
+                  accent={ACCENT.tokens}
                   label="Tokens"
                   value={tokenValue}
                   lines={tokenLines}
+                  hide={() => {
+                    void view.rev
+                    return !data.tokens
+                  }}
+                  lineParts={(l) => {
+                    // Metrics read muted on the left, accent on the right — the
+                    // same justified grammar, one colour per half.
+                    const i = l.indexOf(" · ")
+                    return i < 0
+                      ? segs([[l, th.muted]])
+                      : segs([[l.slice(0, i), th.muted], [l.slice(i, i + 3), ACCENT.tokens], [l.slice(i + 3), ACCENT.tokens]])
+                  }}
                   empty="(no usage yet)"
                 />
                 <Row
                   id="models"
+                  icon="✦"
+                  accent={ACCENT.models}
                   label="Models"
                   value={() => {
                     void view.rev
-                    if (!view.models) return "not used"
                     const p = view.providers ?? 0
                     return `${view.models} model${view.models === 1 ? "" : "s"} · ${p} provider${p === 1 ? "" : "s"}`
                   }}
@@ -2334,16 +2600,30 @@ const HarnessTui = {
                     void view.rev
                     return data.steps.map((s: Rec) => String(s.row))
                   }}
+                  hide={() => {
+                    void view.rev
+                    return !(view.models ?? 0)
+                  }}
+                  lineParts={(l) => {
+                    const i = l.indexOf(" · ")
+                    return i < 0
+                      ? segs([[l, th.muted]])
+                      : segs([[l.slice(0, i), th.muted], [l.slice(i, i + 3), ACCENT.models], [l.slice(i + 3), ACCENT.models]])
+                  }}
                   empty="(none used in this session)"
                 />
                 <Row
                   id="todo"
+                  icon="◧"
+                  accent={ACCENT.todo}
                   label="Todo"
                   value={() => {
                     void view.rev
+                    void view.frame
                     const n = view.todos ?? 0
-                    if (!n) return "—"
-                    return `${view.todosDone ?? 0}/${n} done${view.todosProject ? " · project" : ""}`
+                    const done = view.todosDone ?? 0
+                    const pc = n ? Math.round((done / n) * 100) : 0
+                    return `${done}/${n} ${abar(pc, 5, Number(view.frame ?? 0))}${view.todosProject ? " · project" : ""}`
                   }}
                   hide={() => {
                     void view.rev
@@ -2361,8 +2641,20 @@ const HarnessTui = {
                     the project, not to this session. */}
                 <Row
                   id="workers"
+                  icon="✱"
+                  accent={ACCENT.workers}
                   label="Workers"
-                  value={() => (view.workersActive ? `${view.workersActive} active` : "idle")}
+                  // A live worker is the one thing on this panel that is really
+                  // moving, so its dot breathes: bright on even frames, dimmed
+                  // on odd ones. Idle stays a steady hollow dot.
+                  valueParts={() => {
+                    void view.rev
+                    void view.frame
+                    const n = Number(view.workersActive ?? 0) || 0
+                    const dim = mixHex(ACCENT.workers, "#000000", 0.55)
+                    const dot = n ? (Number(view.frame ?? 0) % 2 ? ACCENT.workers : dim) : th.muted
+                    return segs([[n ? "●" : "○", dot], [` ${n ? `${n} active` : "idle"}`, n ? ACCENT.workers : th.muted]])
+                  }}
                   hide={() => {
                     void view.rev
                     return !view.workers
@@ -2393,11 +2685,18 @@ const HarnessTui = {
                     empty, auto-expanded while anything is pending (see load). */}
                 <Row
                   id="waits"
+                  icon="◔"
+                  accent={ACCENT.waits}
                   label="Waits"
                   value={() => {
                     void view.rev
                     const n = view.waits ?? 0
                     return n === 1 ? "1 waiting" : `${n} waiting`
+                  }}
+                  valueFg={() => {
+                    void view.rev
+                    void view.frame
+                    return Number(view.frame ?? 0) % 2 ? ACCENT.waits : mixHex(ACCENT.waits, "#000000", 0.45)
                   }}
                   hide={() => {
                     void view.rev
@@ -2407,25 +2706,69 @@ const HarnessTui = {
                     void view.rev
                     return liveWaits()
                   }}
+                  // The live mark and the countdown carry the accent; the label
+                  // stays quiet so a long name cannot outshine its deadline.
+                  lineParts={(l) => {
+                    const head = l.slice(0, 2)
+                    const rest = l.slice(2)
+                    const i = rest.indexOf(" · ")
+                    if (head !== "◐ ") return segs([[l, th.muted]])
+                    return i < 0
+                      ? segs([[head, ACCENT.waits], [rest, th.muted]])
+                      : segs([
+                          [head, ACCENT.waits],
+                          [rest.slice(0, i), th.muted],
+                          [rest.slice(i), ACCENT.waits],
+                        ])
+                  }}
                   empty="(no waits pending)"
                 />
                 <Row
                   id="files"
+                  icon="⎇"
+                  accent={ACCENT.files}
                   label="Files"
                   value={() => {
                     void view.rev
-                    if (!data.vcsKnown) return "unavailable"
                     const changed = data.files.length
                     if (!changed) return "clean"
                     const add = data.files.reduce((sum, r) => sum + Number(r.additions ?? 0), 0)
                     const del = data.files.reduce((sum, r) => sum + Number(r.deletions ?? 0), 0)
                     return `${changed} changed · +${add} -${del}`
                   }}
+                  // A repository the host cannot read is not a stat: it says
+                  // nothing about the work, so the row disappears instead of
+                  // spending a line on "unavailable". A known-clean tree is
+                  // still a real signal and stays (a calm green check).
+                  valueParts={() => {
+                    void view.rev
+                    if (!data.files.length) return segs([["✓ clean", ok]])
+                    const changed = data.files.length
+                    const add = data.files.reduce((sum, r) => sum + Number(r.additions ?? 0), 0)
+                    const del = data.files.reduce((sum, r) => sum + Number(r.deletions ?? 0), 0)
+                    return segs([
+                      [`${changed} changed`, ACCENT.files],
+                      [" · ", th.muted],
+                      [`+${add}`, ok],
+                      [" ", th.muted],
+                      [`-${del}`, bad],
+                    ])
+                  }}
+                  hide={() => {
+                    void view.rev
+                    return !data.vcsKnown
+                  }}
                   lines={() => {
                     void view.rev
-                    if (!data.vcsKnown) return ["(repository state unavailable)"]
                     if (!data.files.length) return ["(no working-copy changes)"]
-                    return data.files.slice(0, 5).map((r) =>
+                    // Churn first: the file that moved the most is the one you
+                    // want above the fold, not whichever git listed first.
+                    const rows = [...data.files].sort(
+                      (a, b) =>
+                        Number(b.additions ?? 0) + Number(b.deletions ?? 0) -
+                        (Number(a.additions ?? 0) + Number(a.deletions ?? 0)),
+                    )
+                    return rows.slice(0, 5).map((r) =>
                       `${String(r.status ?? "?")[0].toUpperCase()} ${wcut(String(r.file ?? ""), 22).padEnd(22)} +${String(Number(r.additions ?? 0)).padStart(4)} -${String(Number(r.deletions ?? 0)).padStart(4)}`,
                     )
                   }}
@@ -2447,6 +2790,8 @@ const HarnessTui = {
                 />
                 <Row
                   id="skills"
+                  icon="✧"
+                  accent={ACCENT.skills}
                   label="Skills"
                   value={() => `${view.skills ?? 0} installed`}
                   lines={() => {
@@ -2460,9 +2805,19 @@ const HarnessTui = {
                     return [...out, ...data.skills.map((s) => `▪ ${shortSkill(s)}`)]
                   }}
                   empty="(none seeded at this location)"
+                  // The mark carries the accent, the name stays quiet: a long
+                  // list of skills should not read as a wall of colour.
+                  lineParts={(l) => {
+                    const head = l.slice(0, 2)
+                    return head === "● " || head === "▪ "
+                      ? segs([[head, ACCENT.skills], [l.slice(2), th.muted]])
+                      : segs([[l, th.muted]])
+                  }}
                 />
                 <Row
                   id="agents"
+                  icon="◉"
+                  accent={ACCENT.agents}
                   label="Agents"
                   value={() => `${view.agents ?? 0} available`}
                   lines={() => {
@@ -2484,6 +2839,8 @@ const HarnessTui = {
                 />
                 <Row
                   id="memory"
+                  icon="❖"
+                  accent={ACCENT.memory}
                   label="Memory"
                   value={() => `${view.facts ?? 0} fact${(view.facts ?? 0) === 1 ? "" : "s"}`}
                   hide={() => {
@@ -2545,7 +2902,9 @@ const HarnessTui = {
             ? Math.min(100, Math.round((Number(data.contextUsed ?? 0) / data.contextLimit) * 100))
             : 0
         const ctx = data.contextLimit > 0 ? `${p}% ctx · ` : ""
-        return `harness · ${ctx}$${Number(data.cost ?? 0).toFixed(2)} · ${kfmt(totalTok)} tok`
+        // Spend only when there is one: a free model should not read as $0.00.
+        const spend = Number(data.cost ?? 0) > 0 ? `$${Number(data.cost ?? 0).toFixed(2)} · ` : ""
+        return `harness · ${ctx}${spend}${kfmt(totalTok)} tok`
       }
       // No session yet: the skill/fact stores are location-scoped and empty at
       // the default location, so counting them here would print a misleading
@@ -2556,6 +2915,17 @@ const HarnessTui = {
         (view.facts ?? 0) > 0 ? `${view.facts} facts` : "",
       ].filter((s) => s)
       return bits.length ? `harness · ${bits.join(" · ")}` : "harness · click for stats"
+    }
+    /**
+     * Chip tint: the same pressure ramp the Window row uses, so the footer is
+     * a second, one-glance copy of the thing that actually needs attention.
+     * Calm (muted) until the window is half full, then amber, then red.
+     */
+    const chipFg = (): string => {
+      void view.rev
+      if (!data.tokens || !(data.contextLimit > 0)) return th.muted
+      const p = Math.min(100, Math.round((Number(data.contextUsed ?? 0) / data.contextLimit) * 100))
+      return p >= 80 ? th.warn : p >= 50 ? ACCENT.workers : th.muted
     }
 
     // ---- footer chip: headline stats, click toggles the sidebar ----------
@@ -2571,7 +2941,7 @@ const HarnessTui = {
             // off the right edge — the app stops showing its own version.
             // The chip yields instead: it truncates, the version stays.
             <box flexGrow={1} flexShrink={1} minWidth={0} onMouseDown={toggleSidebar}>
-              <text fg={th.muted} wrapMode="none" truncate>
+              <text fg={chipFg()} wrapMode="none" truncate>
                 {headline()}
               </text>
             </box>
@@ -2587,6 +2957,14 @@ const HarnessTui = {
         if (timer) clearInterval(timer)
       } catch {
         /* nothing to release */
+      }
+      try {
+        // The frame tick is a timer like the rest: releasing it with the
+        // plugin is what keeps a torn-down panel from repainting a store
+        // nobody is showing.
+        if (animTimer !== null) clearInterval(animTimer)
+      } catch {
+        /* already released */
       }
       try {
         // The one-shot nudges (message-store warm, family growth) are timers
@@ -2612,7 +2990,9 @@ const HarnessTui = {
  * `waitSig` the wait set it last reacted to.
  */
 function defaultSections(): Rec {
-  return { open: [] as string[], rev: 0, scanning: false }
+  // `frame` is the animation clock the rows read (see ANIM_MS): a plain
+  // store counter, bumped only while something is worth animating.
+  return { open: [] as string[], rev: 0, frame: 0, scanning: false }
 }
 
 export default HarnessTui
