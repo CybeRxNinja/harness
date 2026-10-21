@@ -98,3 +98,21 @@ def test_bundled_json_has_no_model_pins_or_deprecated_tools():
         assert isinstance(perms, dict), name
         bash = perms.get("bash")
         assert bash != "deny", name
+
+
+def test_agent_files_carry_the_v2_identity_colour(tmp_path, monkeypatch):
+    """opencode v2's `color:` agent option is emitted for all 12 agents.
+
+    v2 accepts a six-digit hex on an agent (frontmatter or `agents.<id>.color`)
+    and uses it to colour the agent in the UI. The bundled JSON is the source
+    of truth; render_agent validates the value before writing, so a bad palette
+    entry is dropped rather than installed as unusable frontmatter.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    install_managed_agents()
+    files = sorted(agents_dir().glob("harness-*.md"))
+    assert len(files) == 12
+    for path in files:
+        head = path.read_text().split("---", 2)[1]
+        assert re.search(r'^color: "#[0-9a-f]{6}"$', head, re.M), f"{path.name} has no v2 colour"
+        assert "permissions:" in head

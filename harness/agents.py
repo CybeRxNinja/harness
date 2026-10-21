@@ -76,6 +76,12 @@ def render_agent(name: str, spec: dict) -> str:
     mode = spec.get("mode")
     if mode:
         lines.append(f"mode: {json.dumps(str(mode))}")
+    # opencode v2 agent option: a six-digit hex the UI uses to colour the
+    # agent. Validated here so a bad palette entry is dropped, not installed
+    # as an unusable frontmatter value.
+    color = str(spec.get("color", "") or "")
+    if len(color) == 7 and color.startswith("#") and all(c in "0123456789abcdefABCDEF" for c in color[1:]):
+        lines.append(f"color: {json.dumps(color)}")
     lines.extend(_render_perms(spec.get("permission")))
     lines.extend(["---", ""])
     prompt = str(spec.get("prompt", "") or "").rstrip()

@@ -14,7 +14,7 @@ Starting a task whose playbook is unclear, or when the user wants capability bey
 3. UI routes are not a second guess: a new or changed UI surface is `build/frontend-craft-floor` (modes, refuse list, pre-ship checks); a design/UX/a11y question — palette, type, layout, "does this look right" — is `build/ui-ux-craft` (rules by priority: a11y, color, type, layout, motion, forms, charts). Both apply to new UI work, so take `frontend-craft-floor` and let it pull `ui-ux-craft` for the design calls.
 4. Follow it, and name in the reply which skill was loaded and what it covers.
 5. Nothing matches → do the work directly. No match is a normal outcome, not a blocker.
-6. External discovery is the last resort, and only when the user asks to extend capabilities: search the ecosystem (`npx skills search <query>`, or browse the source repo) and PROPOSE what turned up. Installing is a user-run action — the agent never installs.
+6. External discovery is the last resort, and only when the user asks to extend capabilities: search the ecosystem (`npx skills find <query>`; preview with `npx skills add <owner/repo> --list`) and PROPOSE what turned up. Installing is a user-run action — the agent never installs.
 ## Pitfalls
 - Loading every skill, or a second one "to be safe": context bloat, and overlapping playbooks blur each other.
 - Reading a new UI surface as a design problem, or "does this look right" as a pre-ship check — pick the routing skill that owns the question, not the nearest-sounding one.
