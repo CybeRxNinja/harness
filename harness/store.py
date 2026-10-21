@@ -34,10 +34,12 @@ CREATE TABLE IF NOT EXISTS workers(id TEXT PRIMARY KEY, session TEXT, name TEXT,
 CREATE TABLE IF NOT EXISTS mailbox(id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT, receiver TEXT, receiver_role TEXT, content TEXT, ts INTEGER, delivered INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, source TEXT, ts INTEGER);
 CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, name TEXT, diff TEXT, gist TEXT, ts INTEGER);
+CREATE TABLE IF NOT EXISTS skill_uses(id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT, name TEXT, ts INTEGER);
 CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(text, tokenize='porter');
 CREATE TRIGGER IF NOT EXISTS facts_fts_ai AFTER INSERT ON facts BEGIN INSERT INTO facts_fts(rowid, text) VALUES (new.id, new.text); END;
 CREATE TRIGGER IF NOT EXISTS facts_fts_ad AFTER DELETE ON facts BEGIN DELETE FROM facts_fts WHERE rowid = old.id; END;
 CREATE INDEX IF NOT EXISTS idx_pending_kind_name ON pending(kind, name);
+CREATE INDEX IF NOT EXISTS idx_skill_uses_session ON skill_uses(session, ts);
 """
 
 

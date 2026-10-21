@@ -979,6 +979,12 @@ try {
     db.run(
       "CREATE TABLE IF NOT EXISTS workers(id TEXT PRIMARY KEY, session TEXT, name TEXT, category TEXT, model TEXT, status TEXT, cost REAL, updated INTEGER)",
     )
+    // Which skills this session actually loaded. One row per skill per session
+    // (a repeat load refreshes `ts`), so the panel can show usage instead of
+    // dumping the whole installed catalogue.
+    db.run(
+      "CREATE TABLE IF NOT EXISTS skill_uses(id INTEGER PRIMARY KEY AUTOINCREMENT, session TEXT, name TEXT, ts INTEGER)",
+    )
     return db
   } catch {
     return null
@@ -1467,6 +1473,33 @@ function condenseToolResult(event: Rec): void {
 const WORKER_TOOLS = new Set(["subagent", "task"])
 
 /**
+ * Record one skill load for this session. The panel reads this table to show
+ * "used in this session" instead of the installed catalogue; a repeat load
+ * moves the row to the top rather than adding a duplicate. Both the harness
+ * `skill_view` tool and opencode's native `skill` tool route through here
+ * (see the tool handler and the execute.before hook), and the harness prefix is
+ * stripped so the name matches what the panel lists.
+ */
+async function recordSkillUse(projectDir: string, sessionID: string, name: unknown): Promise<void> {
+  const id = String(name ?? "").trim().replace(/^harness-/, "").slice(0, 120)
+  if (!id || !sessionID) return
+  const db = await memDb(projectDir)
+  if (!db) return
+  try {
+    db.run("DELETE FROM skill_uses WHERE session = ? AND name = ?", sessionID, id)
+    db.run("INSERT INTO skill_uses(session, name, ts) VALUES(?,?,?)", sessionID, id, Math.floor(Date.now() / 1000))
+  } catch {
+    /* table missing or busy: skill loading must never fail over bookkeeping */
+  } finally {
+    try {
+      db.close()
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
+/**
  * Retire worker rows an aborted call left behind. execute.after (which flips
  * queued→done/error) never fires on abort/server-restart, so without this a
  * `queued` row — and the TUI's `N active` count over it — lingers forever.
@@ -1715,7 +1748,7 @@ const HarnessPlugin = {
             additionalProperties: false,
           },
           options: direct,
-          execute: async (input: Rec) => {
+          execute: async (input: Rec, context: Rec) => {
             const want = String(input?.id ?? "").trim()
             if (!want) return { content: "skill_view needs an id — call skills_list first and pass one of the listed ids" }
             let items: Rec[] = []
@@ -1728,6 +1761,9 @@ const HarnessPlugin = {
             const skill = items.find((s: Rec) => String(s.id) === want || String(s.name) === want)
             if (!skill) return { content: `skill not found: ${want}` }
             const out = await readSkill(skill, input?.path ? String(input.path) : undefined)
+            // Per-session usage: the sidebar shows what was actually loaded,
+            // not the whole installed catalogue (see recordSkillUse).
+            await recordSkillUse(directory, String(context?.sessionID ?? ""), skill.name ?? skill.id ?? want)
             try {
               await writeUiState(directory, {
                 last_skill: { id: String(skill.id ?? want), path: String(skill.path ?? ""), ts: Date.now() / 1000 },
@@ -1993,6 +2029,18 @@ const HarnessPlugin = {
       await ctx.tool.hook("execute.before", async (event: Rec) => {
         try {
           await workerStarted(directory, event)
+        } catch {
+          /* never break tool execution */
+        }
+        // The native `skill` tool (and any path that bypasses the handler
+        // above) still counts as usage — the panel's Skills row is per session.
+        try {
+          const tool = String(event?.tool ?? "")
+          if (tool === "skill" || tool === "skill_view") {
+            const input = (event?.input ?? {}) as Rec
+            const id = input.id ?? input.name ?? input.skill ?? ""
+            await recordSkillUse(directory, String(event?.sessionID ?? ""), id)
+          }
         } catch {
           /* never break tool execution */
         }

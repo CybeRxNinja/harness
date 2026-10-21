@@ -107,18 +107,18 @@ def test_tui_cold_scan_timeout_does_not_latch():
 def test_tui_skills_show_syncing_while_unlatched():
     """While the slow half has not latched, Skills says `syncing…`.
 
-    Before the latch, an empty skill list printed the settled
-    "(none seeded at this location)" line — the panel presented a cold store
-    as a settled empty one. The settled text is kept for a genuinely empty
-    store; it is just deferred until the latch proves the stores settled.
+    Before the latch, an empty skill list printed a settled empty line — the
+    panel presented a cold store as a settled one. The cold text is still
+    deferred until the latch proves the stores settled; now the settled case
+    is "none used this session" (the row lists usage, not the catalogue).
     """
     tui = _tui_text()
     # the latch verdict reaches the view state every load.
     assert "d.scanned = scanned" in tui
     # cold + empty reads as in-flight, not as settled-empty.
-    assert 'if (!data.skills.length && !view.scanned) return ["syncing…"]' in tui
-    # ...while the settled empty text still exists for a store that proved empty.
-    assert 'empty="(none seeded at this location)"' in tui
+    assert 'if (!data.skillsUsed.length && !data.skills.length && !view.scanned) return ["syncing…"]' in tui
+    # ...while the settled empty text exists for a store that proved empty.
+    assert 'empty="(none used this session)"' in tui
 
 
 def test_tui_empty_store_settles_after_bounded_retries():

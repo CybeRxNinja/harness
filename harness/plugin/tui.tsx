@@ -573,6 +573,20 @@ function gradient(text: string, frame = 0): Array<{ text: string; fg: string }> 
 }
 
 /**
+ * The platform's "show me this folder" command. The panel is a terminal app,
+ * so opening a directory means handing it to the desktop: `open` on macOS,
+ * `explorer.exe` on Windows, `xdg-open` everywhere else. Pure and injected so
+ * the mapping is testable without spawning anything.
+ */
+function explorerCmd(path: string, platform?: string): string[] {
+  const dir = String(path ?? "")
+  const os = String(platform ?? (typeof process !== "undefined" ? process.platform : "linux"))
+  if (os === "darwin") return ["open", dir]
+  if (os === "win32") return ["explorer.exe", dir]
+  return ["xdg-open", dir]
+}
+
+/**
  * Elapsed/total share of a wait row for its progress bar, reusing bar() (the
  * Window usage-bar precedent): 0% at record time, 100% at deadline. Returns
  * -1 when the row carries no usable total — pre-migration rows or a drifted
@@ -772,6 +786,33 @@ function familyIds(data_: Rec, sid: string): string[] {
   return familyScan(data_, sid).ids
 }
 
+/**
+ * Agents this session actually ran: the session's selected agent plus the
+ * agent of every direct subagent session in the family. Read from rows the
+ * panel already loads (`session.get` per family id), so "used" costs no extra
+ * sync — and it never dresses the whole installed roster up as activity.
+ */
+function usedAgents(data_: Rec, sid: string): string[] {
+  const out: string[] = []
+  const add = (v: unknown) => {
+    const s = String(v ?? "").trim()
+    if (s && !out.includes(s)) out.push(s)
+  }
+  try {
+    add(data_?.session?.get?.(sid)?.agent)
+  } catch {
+    /* info row not loaded yet */
+  }
+  for (const id of familyIds(data_, sid).slice(1)) {
+    try {
+      add(data_?.session?.get?.(id)?.agent)
+    } catch {
+      /* child info not loaded yet */
+    }
+  }
+  return out
+}
+
 // Project-local only: a $HOME probe here recalled a different project's facts
 // (state_dir() in harness/paths.py is always <root>/.opencode/harness).
 // One file holds both the fact store and the todo space — it is the DB the
@@ -938,7 +979,11 @@ const HarnessTui = {
       // of seconds after it, so "the numbers just refreshed" is visible.
       loadedAt: 0,
       agents: [] as string[],
+      // Agents that actually ran this session (selected + family children).
+      agentsUsed: [] as string[],
       skills: [] as string[],
+      // Skills this session loaded (see skill_uses in the server half).
+      skillsUsed: [] as string[],
       facts: [] as string[],
       factsCount: 0,
       todos: [] as string[],
@@ -1016,6 +1061,47 @@ const HarnessTui = {
       } catch {
         return null
       }
+    }
+    /** The project root the panel reads; falls back to the process cwd. */
+    const projectDir = (): string => {
+      try {
+        return String(location()?.directory ?? process.cwd?.() ?? ".")
+      } catch {
+        return "."
+      }
+    }
+    /**
+     * Open the folder where this section can be extended by hand. Skills live
+     * in the project overlay the server half seeds from
+     * (`.opencode/harness/skills`); agents live in opencode v2's project
+     * agents dir (`.opencode/agents`). Both are created on demand, then handed
+     * to the desktop opener — a terminal TUI cannot show a file manager
+     * itself, and the toast always names the path when the opener is missing.
+     */
+    const openFolder = (kind: "skills" | "agents") => {
+      const dir =
+        kind === "skills"
+          ? `${projectDir()}/.opencode/harness/skills`
+          : `${projectDir()}/.opencode/agents`
+      void (async () => {
+        try {
+          if (fs === null) fs = await import("node:fs")
+          fs.mkdirSync(dir, { recursive: true })
+          if (typeof Bun === "undefined" || typeof Bun.spawn !== "function") {
+            throw new Error("no process spawner on this host")
+          }
+          const proc = Bun.spawn(explorerCmd(dir), { stdout: "ignore", stderr: "ignore" })
+          const code = await proc.exited
+          if (Number(code ?? 0) !== 0) throw new Error(`opener exited ${code}`)
+          ctx.ui.toast?.show?.({ title: "harness", message: `opened ${dir}`, variant: "info" })
+        } catch (e) {
+          try {
+            ctx.ui.toast?.show?.({ title: "harness", message: `folder: ${dir} (${short(e)})`, variant: "warning" })
+          } catch {
+            /* cosmetic */
+          }
+        }
+      })()
     }
 
     /** mtime+size of a state-DB file, "-" when it cannot be stat'ed. */
@@ -1164,6 +1250,7 @@ const HarnessTui = {
         lastSkill: "",
         lastCompaction: "",
         lastRisk: "",
+        skillsUsed: [] as string[],
         files: [] as Rec[],
         vcsKnown: false,
       }
@@ -1281,6 +1368,18 @@ const HarnessTui = {
             )
           } catch {
             /* no facts table yet */
+          }
+          try {
+            // This session's loaded skills, newest first (written by the
+            // server half's recordSkillUse). A DB from before usage tracking
+            // simply has no table: that is "none used", not an error.
+            out.skillsUsed = (
+              db.query("SELECT name FROM skill_uses WHERE session = ? ORDER BY ts DESC LIMIT 20").all(sid) as Rec[]
+            )
+              .map((r) => String(r?.name ?? ""))
+              .filter(Boolean)
+          } catch {
+            /* no skill_uses table yet */
           }
         } finally {
           db.close()
@@ -1451,6 +1550,7 @@ const HarnessTui = {
       // collapses to no prefix at all.
       const measured = turnRate(lastTurn(mine))
       data.currentRate = /^\d[\d,]* tok\/s$/.test(measured) ? measured : ""
+      data.agentsUsed = usedAgents(data_, sessionID)
 
       // Sparkline series: this session's output tokens per assistant step,
       // oldest first, capped at the row's width. Already-walked messages, so
@@ -1682,6 +1782,7 @@ const HarnessTui = {
           data.lastSkill = state.lastSkill
           data.lastCompaction = state.lastCompaction
           data.lastRisk = state.lastRisk
+          data.skillsUsed = state.skillsUsed
         }
         if (typeof ctx?.vcs?.status === "function") {
           data.vcsKnown = true
@@ -2131,14 +2232,23 @@ const HarnessTui = {
        * pattern, so it shares the patch/repaint path its siblings use.
        */
       onActivate?: () => void
+      /**
+       * Optional "open the source folder" chip at the end of the header. It
+       * sits OUTSIDE the clickable header box, so pressing it never toggles
+       * the row — a separate hit target, same reason the sidebar is clickable
+       * at all.
+       */
+      action?: () => void
     }) => {
       // A section with nothing in it is noise, not honesty: an empty Workers
       // row or "0 facts" Memory is exactly the clutter the panel must drop.
       if (safeCall(`row:${props.id}.hide`, () => props.hide?.() ?? false, false)) return null
       return (
       <box flexDirection="column">
+        <box flexDirection="row" minWidth={0}>
         <box
           flexDirection="row"
+          flexGrow={1}
           gap={1}
           minWidth={0}
           onMouseDown={() =>
@@ -2186,6 +2296,23 @@ const HarnessTui = {
               </text>
             )
           })()}
+        </box>
+        {props.action ? (
+          <text
+            fg={props.accent}
+            flexShrink={0}
+            wrapMode="none"
+            onMouseDown={() =>
+              safeCall(`row:${props.id}.action`, () => {
+                wake(2000)
+                props.action?.()
+                return true
+              }, false)
+            }
+          >
+            {" ↗"}
+          </text>
+        ) : null}
         </box>
         {isOpen(props.id) ? (
           <box flexDirection="column" paddingLeft={0}>
@@ -2793,18 +2920,26 @@ const HarnessTui = {
                   icon="✧"
                   accent={ACCENT.skills}
                   label="Skills"
-                  value={() => `${view.skills ?? 0} installed`}
+                  // The value keeps the installed count (it is the inventory);
+                  // the EXPANDED list is the session's actual usage, because
+                  // the catalogue is not what you came here to read.
+                  value={() => {
+                    void view.rev
+                    const used = data.skillsUsed.length
+                    const installed = view.skills ?? 0
+                    return used ? `${used} used · ${installed} installed` : `${installed} installed`
+                  }}
                   lines={() => {
                     void view.rev
                     // Cold stores answer empty on the first pass: while the
-                    // slow half has not latched, say syncing instead of the
-                    // settled "none seeded" line below.
-                    if (!data.skills.length && !view.scanned) return ["syncing…"]
-                    const out = [] as string[]
-                    if (data.lastSkill) out.push(`● last used ${data.lastSkill}`)
-                    return [...out, ...data.skills.map((s) => `▪ ${shortSkill(s)}`)]
+                    // slow half has not latched, say syncing rather than
+                    // claiming nothing was used.
+                    if (!data.skillsUsed.length && !data.skills.length && !view.scanned) return ["syncing…"]
+                    // Newest load first, `●` on the one most recently opened.
+                    return data.skillsUsed.map((s, i) => `${i === 0 ? "●" : "▪"} ${s}`)
                   }}
-                  empty="(none seeded at this location)"
+                  empty="(none used this session)"
+                  action={() => openFolder("skills")}
                   // The mark carries the accent, the name stays quiet: a long
                   // list of skills should not read as a wall of colour.
                   lineParts={(l) => {
@@ -2819,22 +2954,30 @@ const HarnessTui = {
                   icon="◉"
                   accent={ACCENT.agents}
                   label="Agents"
-                  value={() => `${view.agents ?? 0} available`}
+                  // Same split as Skills: inventory in the value, the agents
+                  // this session actually ran in the detail list.
+                  value={() => {
+                    void view.rev
+                    const used = data.agentsUsed.length
+                    const avail = view.agents ?? 0
+                    return used ? `${used} used · ${avail} available` : `${avail} available`
+                  }}
                   lines={() => {
                     void view.rev
-                    // Active agent first and marked; internals were filtered
-                    // at load, so the count and this list always agree (the
-                    // Row prints "+N more" when they outgrow the budget).
+                    // Active agent first and marked; subagents it spawned in
+                    // the family follow with the used mark.
                     const cur = data.agent
-                    return [...data.agents]
+                    return [...data.agentsUsed]
                       .sort((a, b) => Number(b === cur) - Number(a === cur))
-                      .map((a) => `${a === cur ? "●" : "◦"} ${a}`)
+                      .map((a) => `${a === cur ? "●" : "◆"} ${a}`)
                   }}
-                  empty="(none registered)"
-                  // The active dot carries the colour; names read muted.
+                  empty="(none used in this session)"
+                  action={() => openFolder("agents")}
+                  // The active dot carries the success colour; a used subagent
+                  // keeps the row accent; names read muted.
                   lineParts={(l) => {
                     const dot = l.slice(0, 1)
-                    return segs([[dot + " ", dot === "●" ? ok : th.muted], [l.slice(2), th.muted]])
+                    return segs([[dot + " ", dot === "●" ? ok : ACCENT.agents], [l.slice(2), th.muted]])
                   }}
                 />
                 <Row

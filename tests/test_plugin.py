@@ -1008,7 +1008,10 @@ def test_tui_panel_counts_and_repaints():
     # skill rows drop the shared namespace — the sidebar is 46 columns wide and
     # "harness-" repeats on every one of the 11 rows
     assert 'replace(/^harness-/, "")' in tui
-    assert "▪ ${shortSkill(s)}" in tui
+    # ...and the detail list is the session's USAGE, not the installed catalogue
+    # (the inventory lives in the value: `3 used · 19 installed`).
+    assert "data.skillsUsed.map((s, i) =>" in tui
+    assert "data.skills.map((s) =>" not in tui
     # Solid re-runs tracked JSX expressions, not the render body: detail rows must
     # be built inside the JSX expression, or they freeze at the first paint
     # a truncated list always says how many more exist: "11 available" over
@@ -1881,9 +1884,12 @@ def test_tui_panel_shows_only_thoughtful_accurate_rows():
     # internal plumbing agents are never advertised as available work roles
     assert 'INTERNAL_AGENTS = new Set(["compaction", "title"' in tui
     assert "!INTERNAL_AGENTS.has(a.toLowerCase())" in tui
-    # the active agent leads the list and is marked
+    # the active agent leads the list and is marked; only the agents this
+    # session actually ran are listed (the roster count stays in the value)
     assert "sort((a, b) => Number(b === cur) - Number(a === cur))" in tui
-    assert '${a === cur ? "●" : "◦"} ${a}' in tui
+    assert '${a === cur ? "●" : "◆"} ${a}' in tui
+    assert "[...data.agentsUsed]" in tui
+    assert "[...data.agents]" not in tui, "the full roster is not the session's usage"
 
     # empty sections disappear instead of narrating their emptiness
     for needle in ("return !(view.todos ?? 0)", "return !view.workers", "return !(view.facts ?? 0)"):
