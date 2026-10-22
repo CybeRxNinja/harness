@@ -1,0 +1,53 @@
+{
+  "sources": [
+    {
+      "alias": "superpowers",
+      "repo": "obra/superpowers",
+      "path": "skills",
+      "license": "MIT",
+      "note": "Software-development methodology pack (brainstorming, plans, debugging, code review)."
+    },
+    {
+      "alias": "agent-skills",
+      "repo": "addyosmani/agent-skills",
+      "path": "skills",
+      "license": "MIT",
+      "note": "Production engineering skills: API design, browser testing, CI, review, performance."
+    },
+    {
+      "alias": "anthropic-skills",
+      "repo": "anthropics/skills",
+      "path": "skills",
+      "license": "NOASSERTION",
+      "note": "Reference Agent Skills from Anthropic (documents, canvases, Claude API, artefacts)."
+    },
+    {
+      "alias": "scientific-skills",
+      "repo": "K-Dense-AI/scientific-agent-skills",
+      "path": "skills",
+      "license": "MIT",
+      "note": "Large science pack (bioinformatics, omics, lab workflows). Import selectively with --only."
+    },
+    {
+      "alias": "awesome-llm-apps",
+      "repo": "Shubhamsaboo/awesome-llm-apps",
+      "path": "agent_skills",
+      "license": "Apache-2.0",
+      "note": "Agent skills from the awesome-llm-apps collection (scope guard, dependency doctor, …)."
+    },
+    {
+      "alias": "rea",
+      "repo": "morluto/rea",
+      "path": ".agents/skills",
+      "license": "MIT",
+      "note": "Reverse-engineering skills. Lawful-use only; review before enabling."
+    },
+    {
+      "alias": "vercel-skills",
+      "repo": "vercel-labs/skills",
+      "path": "skills",
+      "license": "MIT",
+      "note": "The `npx skills` tooling and its find-skills helper."
+    }
+  ]
+}

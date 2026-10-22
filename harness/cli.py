@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 
@@ -37,6 +38,76 @@ def cmd_skills(args) -> int:
     from . import skills as S
     root = _root(args)
     cfg, _ = load_config(root)
+    if args.skills_action == "sources":
+        from .skillpack import sources
+        rows = sources(args.search)
+        if not rows:
+            print("(no curated source matches)")
+        for r in rows:
+            print(f"{r['alias']:18s} {r['repo']:38s} {r['license']:12s} {r['note']}")
+        return 0
+    if args.skills_action == "add":
+        from .skillpack import SkillPackError, install_pack
+        try:
+            rep = install_pack(
+                args.name, root, path=args.path, ref=args.ref, global_=args.global_,
+                only=args.only, force=args.force, update=args.update,
+                refresh=args.refresh, dry_run=args.dry_run,
+            )
+        except SkillPackError as e:
+            print(f"skills add: {e}", file=sys.stderr)
+            return 2
+        src = rep["source"]
+        commit = f" @ {src['commit'][:12]}" if src.get("commit") else ""
+        where = f" ({src['path']})" if src.get("path") else ""
+        lic = f" · {src['license']}" if src.get("license") else ""
+        print(f"{'would install' if rep['dry_run'] else 'installed'} → {rep['target']}")
+        print(f"source: {src['repo']}{commit}{where}{lic}")
+        for s in rep["skills"]:
+            detail = s.get("reason") or s.get("description", "")
+            print(f"  {s['action']:13s} {s['id']:32s} {detail[:70]}")
+        verb = "would be available" if rep["dry_run"] else "available on the next turn"
+        print(f"{rep['installed']} skill(s) {verb} — opencode advertises them from .opencode/skills")
+        return 0
+    if args.skills_action == "update":
+        from .skillpack import SkillPackError, update_installed
+        try:
+            rep = update_installed(root, global_=args.global_, dry_run=args.dry_run, refresh=args.refresh)
+        except SkillPackError as e:
+            print(f"skills update: {e}", file=sys.stderr)
+            return 2
+        verb = "checked" if rep["dry_run"] else "updated"
+        print(f"{verb} → {rep['target']}")
+        for s in rep["skills"]:
+            if s["action"] == "unchanged":
+                continue
+            print(f"  {s['action']:13s} {s['id']:32s} {s.get('reason', '')[:70]}")
+        print(f"{rep['updated']} changed, {rep['unchanged']} unchanged, "
+              f"{rep['skipped']} skipped, {rep['failed']} failed")
+        return 0 if not rep["failed"] else 1
+    if args.skills_action == "match":
+        for s in S.match(S.scan(root, cfg), args.name):
+            print(f"{s['name']:28s} score={s['score']} why={','.join(s['why'])}  {s['description'][:70]}")
+        return 0
+    if args.skills_action == "draft":
+        from .skillpack import SkillPackError, draft_skill
+        con = connect(root)
+        try:
+            out = draft_skill(con, root, args.name, query=args.query, dry_run=args.dry_run)
+        except SkillPackError as e:
+            print(f"skills draft: {e}", file=sys.stderr)
+            con.close()
+            return 2
+        con.close()
+        if out.get("text") and args.dry_run:
+            print(out["text"])
+            return 0
+        if not out.get("staged"):
+            print(out.get("reason") or "draft produced nothing")
+            return 1
+        print(f"staged skill {out['staged']} ({out['id']}, {out['lines']} line(s))")
+        print(f"review: harness skills pending    approve: harness skills approve --ids {out['staged']}")
+        return 0
     con = connect(root)
     if args.skills_action == "list":
         for s in S.scan(root, cfg):
@@ -54,17 +125,31 @@ def cmd_skills(args) -> int:
         for pid in ids:
             if args.skills_action == "approve":
                 from .memory import approve
-                from .config import user_dir
                 # skill approvals apply file writes
                 row = con.execute("SELECT kind,name,diff FROM pending WHERE id=?", (pid,)).fetchone()
                 if row and row[0].startswith("skill-"):
-                    base = user_dir() / "skills" / "general" / row[1]
-                    base.mkdir(parents=True, exist_ok=True)
+                    # A skill is only real where the host advertises it.
+                    # This used to write to ~/.harness/skills/general/, which
+                    # opencode never reads — an approved draft was invisible to
+                    # the model. It now lands in the project's .opencode/skills,
+                    # the same directory `skills add` installs packs into and
+                    # the TUI's Skills row opens.
+                    from .skillpack import SOURCE_FILE, install_root
+                    base = install_root(root) / row[1]
                     if row[0] == "skill-create":
+                        base.mkdir(parents=True, exist_ok=True)
                         (base / "SKILL.md").write_text(row[2])
+                        (base / SOURCE_FILE).write_text(json.dumps({
+                            "repo": "harness-memory",
+                            "ref": "", "commit": "", "path": "",
+                            "license": "MIT", "installed_at": int(time.time()),
+                            "files": ["SKILL.md"],
+                        }, indent=2) + "\n")
+                        print(f"approved {pid} → {base / 'SKILL.md'} (advertised on the next turn)")
                     con.execute("DELETE FROM pending WHERE id=?", (pid,))
                     con.commit()
-                    print(f"approved {pid}")
+                    if row[0] != "skill-create":
+                        print(f"approved {pid}")
                 else:
                     # Approvals land in memory_file()'s path,
                     # <project>/.opencode/harness/MEMORY.md: project state, not a
@@ -487,10 +572,25 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--scope", default="user", choices=["user", "project"])
     g.set_defaults(fn=cmd_config)
     k = sub.add_parser("skills")
-    k.add_argument("skills_action", choices=["list", "view", "pending", "approve", "reject"])
-    k.add_argument("name", nargs="?", default="")
+    k.add_argument("skills_action",
+                   choices=["list", "view", "pending", "approve", "reject",
+                            "add", "sources", "draft", "match", "update"])
+    k.add_argument("name", nargs="?", default="",
+                   help="skill id/name; for `add`: owner/repo, a GitHub URL, or a local directory")
     k.add_argument("--subpath", default="")
     k.add_argument("--ids", nargs="*", default=[])
+    k.add_argument("--path", default="",
+                   help="subdirectory inside a pack that holds the skills (default: the pack root)")
+    k.add_argument("--ref", default="", help="git branch/tag to fetch")
+    k.add_argument("--global", dest="global_", action="store_true",
+                   help="install into ~/.config/opencode/skills instead of the project")
+    k.add_argument("--only", default="", help="comma-separated skill ids to import")
+    k.add_argument("--force", action="store_true", help="overwrite existing skills")
+    k.add_argument("--update", action="store_true", help="refresh an already-imported skill")
+    k.add_argument("--refresh", action="store_true", help="re-clone the pack cache first")
+    k.add_argument("--dry-run", action="store_true", help="show the plan without writing")
+    k.add_argument("--query", default="", help="topic for `skills draft`")
+    k.add_argument("--search", default="", help="filter `skills sources`")
     k.set_defaults(fn=cmd_skills)
     m = sub.add_parser("memory")
     m.add_argument("memory_action", choices=["search", "save", "refine", "show", "prune"])

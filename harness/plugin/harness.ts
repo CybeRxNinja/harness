@@ -92,17 +92,151 @@ function frontmatter(text: string): Rec {
 /** Directories that may hold bundled harness skills, best first: explicit
  * override, then the project overlay, then package data, then global. */
 async function skillRoots(projectDir?: string): Promise<string[]> {
+  // The host's own directories (`<project>/.opencode/skills`, imported packs)
+  // are included so the fallback list sees exactly what opencode advertises.
+  // Harness' private overlay stays first: a project can shadow one skill
+  // without forking the pack.
   const roots: string[] = []
   const home = process.env.HOME ?? ""
+  const cfg = process.env.XDG_CONFIG_HOME || (home ? `${home}/.config` : "")
   if (process.env.HARNESS_SKILLS_DIR) roots.push(process.env.HARNESS_SKILLS_DIR)
-  if (projectDir) roots.push(`${projectDir}/.opencode/harness/skills`)
+  if (projectDir) {
+    roots.push(`${projectDir}/.opencode/harness/skills`)
+    roots.push(`${projectDir}/.opencode/skills`)
+  }
   const py = await run([
     "python3", "-c",
     "import harness,os; print(os.path.join(os.path.dirname(harness.__file__),'data','skills'))",
   ])
   if (py.ok && py.text.trim()) roots.push(py.text.trim())
+  if (cfg) roots.push(`${cfg}/opencode/skills`)
   if (home) roots.push(`${home}/.harness/skills`)
   return [...new Set(roots.filter((r) => r && r.length > 1))]
+}
+
+/**
+ * Rank skills for a task by name/description overlap (parity with
+ * skills.match() in harness/skills.py). The host already advertises every
+ * description, so this is for the moment the list is long enough to skim
+ * badly: a name hit is worth more than a description hit, and a skill below
+ * `minScore` is never dressed up as relevant.
+ */
+const SKILL_STOP = new Set([
+  "the", "and", "for", "with", "use", "when", "this", "that", "from", "into",
+  "your", "you", "our", "are", "was", "were", "has", "have", "had", "not",
+  "but", "can", "will", "would", "should", "could", "any", "all", "out",
+  "its", "it", "is", "of", "to", "in", "on", "at", "as", "by", "or", "an",
+  "a", "be", "do", "does", "did", "how", "what", "which", "who", "why",
+])
+/** Crude suffix fold so "failing tests" can hit "fix"/"test" (parity with
+ * _stem() in harness/skills.py — the same four rules and length floor). */
+function skillStem(w: string): string {
+  if (w.endsWith("ing") && w.length > 5) return w.slice(0, -3)
+  if (w.endsWith("ed") && w.length > 4) return w.slice(0, -2)
+  if (w.endsWith("s") && !w.endsWith("ss") && w.length > 3) return w.slice(0, -1)
+  return w
+}
+function skillTerms(text: unknown): Set<string> {
+  const out = new Set<string>()
+  for (const w of String(text ?? "").toLowerCase().split(/[^a-z0-9]+/)) {
+    if (w.length > 2 && !SKILL_STOP.has(w)) out.add(skillStem(w))
+  }
+  return out
+}
+function matchSkills(items: Rec[], query: string, limit = 3, minScore = 2): Rec[] {
+  const q = skillTerms(query)
+  if (!q.size) return []
+  const scored: Rec[] = []
+  for (const s of items) {
+    const name = skillTerms(s?.name ?? s?.id ?? "")
+    const desc = skillTerms(s?.description ?? "")
+    const hits = [...q].filter((w) => name.has(w) || desc.has(w)).sort()
+    const named = [...q].some((w) => name.has(w))
+    const score = hits.length + (named ? 2 : 0)
+    if (score >= minScore) scored.push({ ...s, score, why: hits.slice(0, 4) })
+  }
+  scored.sort((a, b) => Number(b.score) - Number(a.score) || String(a.name ?? "").localeCompare(String(b.name ?? "")))
+  return scored.slice(0, limit)
+}
+
+/**
+ * The automatic half of skill routing. The host advertises every skill's
+ * description at every model step, but a few pack imports push that list past
+ * the point where a model skims it — and a skill that is never loaded may as
+ * well be absent. This is the lightest lever a plugin gets: one system line
+ * naming the skills whose name/description overlap the user's own message.
+ *
+ * Deliberate limits: nothing is force-loaded (the line says to load at most
+ * one, and only if it fits), a message that already names one of the matches
+ * is left alone, the same message is never nudged twice, and
+ * `skills.nudge: false` in <project>/.opencode/harness.jsonc turns the whole
+ * thing off. It can only fire from the session "context" hook — the only
+ * plugin-visible point that both sees the user's text and can still add a
+ * system line before generation.
+ */
+const NUDGE_MARK = "Harness skills"
+const NUDGE_LIMIT = 2
+const NUDGE_MIN_LEN = 12
+const SKILL_NUDGE_KEEP = 50
+/** sessionID -> normalized text of the last message nudged for. */
+const skillNudged = new Map<string, string>()
+
+/** Newest user message text, tolerating both message shapes. */
+function lastUserText(messages: any): string {
+  if (!Array.isArray(messages)) return ""
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m: Rec = messages[i]
+    const role = String(m?.role ?? m?.info?.role ?? "")
+    if (role !== "user") continue
+    const t = memMessageText(m).trim()
+    if (t) return t
+  }
+  return ""
+}
+
+/** The nudge line for `text`, or "" when nothing scores. Pure: tested under node. */
+function skillNudgeLine(items: Rec[], text: string): string {
+  const msg = String(text ?? "").trim()
+  if (msg.length < NUDGE_MIN_LEN) return ""
+  const ranked = matchSkills(items, msg, NUDGE_LIMIT)
+  if (!ranked.length) return ""
+  const ids = ranked.map((s: Rec) => String(s.id ?? s.name ?? ""))
+  // The user/model already chose a match ("@test-driven-development", or an
+  // id in the sentence): naming it back is noise, not help.
+  const low = msg.toLowerCase()
+  if (ids.some((id) => id && low.includes(id.toLowerCase()))) return ""
+  const why = Array.isArray(ranked[0]?.why) ? ranked[0].why.slice(0, 3).join(", ") : ""
+  return `${NUDGE_MARK}: likely for this task — ${ids.join(", ")}${why ? ` (${why})` : ""}. ` +
+    "Load at most one with skill_view if it fits the task; skip it if it does not."
+}
+
+/** Push the nudge line for this generation's user message. Best-effort, never throws. */
+async function nudgeSkills(ctx: Rec, directory: string, sessionID: string, messages: any, event: Rec): Promise<void> {
+  if (!sessionID || !Array.isArray(event?.system)) return
+  const cfg = await memoryConfig(directory)
+  if (!cfg.skillNudge) return
+  const text = lastUserText(messages)
+  if (text.length < NUDGE_MIN_LEN) return
+  const key = memNormalize(text).slice(0, 600)
+  // Remember even when nothing matched: a mid-turn step must not re-score the
+  // same message (context fires before every generation, tool calls included).
+  if (!key || skillNudged.get(sessionID) === key) return
+  skillNudged.set(sessionID, key)
+  if (skillNudged.size > SKILL_NUDGE_KEEP) skillNudged.delete(String(skillNudged.keys().next().value))
+  let items: Rec[] = []
+  try {
+    items = asSkills(await ctx?.skill?.list?.())
+  } catch {
+    items = []
+  }
+  if (!items.length) items = await seedSkills(directory)
+  const line = skillNudgeLine(items, text)
+  if (!line) return
+  event.system.push({ type: "text", text: line })
+  // Same logging rule as every other hook here: a silent nudge would be
+  // unverifiable in a live session (the line itself never appears in the
+  // transcript), so one line goes to the host log.
+  console.error(`[harness] ${NUDGE_MARK.toLowerCase()} nudge: ${line}`)
 }
 
 /**
@@ -899,11 +1033,13 @@ function memAssistantTexts(messages: any): string[] {
  * uses; only enabled/max_facts are picked out, so a half-written file cannot
  * break anything. Fail-open: unreadable means enabled with defaults.
  */
-async function memoryConfig(projectDir: string): Promise<{ enabled: boolean; maxFacts: number; capLines: number; workerTimeoutS: number }> {
+async function memoryConfig(projectDir: string): Promise<{ enabled: boolean; maxFacts: number; capLines: number; workerTimeoutS: number; skillNudge: boolean }> {
   let enabled = true
   let maxFacts = MEM_DEFAULT_MAX_FACTS
   let capLines = MEM_DEFAULT_CAP_LINES
   let workerTimeoutS = WORKER_TIMEOUT_DEFAULT_S
+  // Skill routing hint follows the same chain (nearest wins, fail-open).
+  let skillNudge = true
   // Project candidates, farthest-first so the nearest wins — user file first
   // as the base, mirroring load_config's defaults < user < ancestor… < nearest.
   const projectFiles: string[] = []
@@ -960,8 +1096,13 @@ async function memoryConfig(projectDir: string): Promise<{ enabled: boolean; max
       // A non-positive timeout would retire even a just-inserted row.
       if (Number.isFinite(n) && n > 0) workerTimeoutS = n
     }
+    // "skills": { "nudge": false } — off by default means nothing; true/absent
+    // keeps the per-turn skill hint (see nudgeSkills).
+    const skillsBlk = code.match(/"skills"\s*:\s*\{([^}]*)\}/)?.[1] ?? ""
+    if (/"nudge"\s*:\s*false/.test(skillsBlk)) skillNudge = false
+    else if (/"nudge"\s*:\s*true/.test(skillsBlk)) skillNudge = true
   }
-  return { enabled, maxFacts, capLines, workerTimeoutS }
+  return { enabled, maxFacts, capLines, workerTimeoutS, skillNudge }
 }
 
 /** Read-write open of the project state DB, creating the live tables in the
@@ -1726,10 +1867,18 @@ const HarnessPlugin = {
         }
         add({
           name: "skills_list",
-          description: "List the skills available in this session (id + when-to-use). Call before skill_view.",
-          input: { type: "object", properties: {}, additionalProperties: false },
+          description:
+            "List the skills available in this session (id + when-to-use). Call before skill_view. " +
+            "Pass `query` with the task text to rank the list: likely skills come first.",
+          input: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "Optional task text; ranks the likely skills first." },
+            },
+            additionalProperties: false,
+          },
           options: direct,
-          execute: async () => {
+          execute: async (input: Rec) => {
             let listed: any = null
             let items: Rec[] = []
             try {
@@ -1739,10 +1888,20 @@ const HarnessPlugin = {
               items = []
             }
             if (!items.length) items = await seedSkills(directory)
-            const text = items
-              .map((s: Rec) => `- ${s.id ?? s.name}: ${shortenDesc(s.description)}`)
+            const query = String(input?.query ?? "").trim()
+            const ranked = query ? matchSkills(items, query) : []
+            const order = ranked.length
+              ? [...ranked, ...items.filter((s: Rec) => !ranked.includes(s))]
+              : items
+            const likely = ranked.length
+              ? `likely for this task: ${ranked.map((s: Rec) => s.id ?? s.name).join(", ")}\n`
+              : ""
+            const text = order
+              .map((s: Rec) => `${ranked.includes(s) ? "◆" : "-"} ${s.id ?? s.name}: ${shortenDesc(s.description)}`)
               .join("\n")
-            if (text) return { content: `${text}\n(${items.length} skills — call skill_view with an id to load one)` }
+            if (text) {
+              return { content: `${likely}${text}\n(${items.length} skills — call skill_view with an id to load one)` }
+            }
             const shape = listed === null ? "unavailable" : `${typeof listed} keys=${Object.keys(listed ?? {}).join(",") || "none"}`
             return { content: `(no skills installed; skill.list returned ${shape})` }
           },
@@ -2022,6 +2181,12 @@ const HarnessPlugin = {
       // guarded: a host without session hooks just loses auto-memory, not activation
       if (typeof ctx?.session?.hook !== "function") throw new Error("ctx.session.hook unavailable")
       await ctx.session.hook("context", async (event: Rec) => {
+        try {
+          await nudgeSkills(ctx, directory, String(event?.sessionID ?? ""), event?.messages, event)
+        } catch (e) {
+          // never break generation, but never fail silently either
+          log(`skill nudge failed: ${short(e)}`)
+        }
         try {
           await captureMemory(directory, String(event?.sessionID ?? ""), event?.agent, event?.messages)
         } catch (e) {

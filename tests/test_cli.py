@@ -65,6 +65,74 @@ def test_skills_list_view_and_approval_flow(env, capsys):
     assert "lesson-one" not in capsys.readouterr().out
 
 
+def test_skills_sources_and_match(env, capsys):
+    assert cli(env, "skills", "sources", "--search", "superpowers") == 0
+    listed = capsys.readouterr().out
+    assert "obra/superpowers" in listed
+
+    from harness.skills import ensure_seed_skills
+    ensure_seed_skills()
+    assert cli(env, "skills", "match", "test driven development for a bug") == 0
+    first = capsys.readouterr().out.splitlines()[0]
+    assert first.startswith("test-driven-development"), first
+
+
+def test_skills_add_installs_into_the_host_directory(env, capsys):
+    """Placement is the point: the host advertises what it can discover."""
+    skill = env / "pack" / "skills" / "alpha"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: Alpha\ndescription: Alpha route, use when alpha\n---\n# Alpha\nbody\n"
+    )
+    assert cli(env, "skills", "add", str(env / "pack"), "--dry-run") == 0
+    assert "would install" in capsys.readouterr().out
+    assert not (env / ".opencode" / "skills").exists()
+
+    assert cli(env, "skills", "add", str(env / "pack")) == 0
+    out = capsys.readouterr().out
+    assert "installed" in out and "alpha" in out
+    assert (env / ".opencode" / "skills" / "alpha" / "SKILL.md").exists()
+
+    # and the CLI's own listing sees it (host roots joined skill_roots)
+    assert cli(env, "skills", "list") == 0
+    assert "Alpha" in capsys.readouterr().out
+
+
+def test_skills_draft_is_staged_then_approved(env, capsys):
+    import re
+
+    from harness.memory import save_fact
+    from harness.store import connect
+
+    mem = env / ".opencode" / "harness" / "MEMORY.md"
+    mem.parent.mkdir(parents=True, exist_ok=True)
+    mem.write_text(
+        "# MEMORY.md\n"
+        "- [cache] keep the facts index as a fast path\n"
+        "- [cache] a missing index falls back to the LIKE scan\n"
+    )
+    con = connect(env)
+    save_fact(con, "Fixed: the facts index is optional, never required", "turn")
+    save_fact(con, "Blocker: a stale facts index hides a row until the next write", "turn")
+    con.close()
+
+    assert cli(env, "skills", "draft", "facts-index", "--query", "facts index") == 0
+    out = capsys.readouterr().out
+    pid = re.search(r"staged skill (\d+)", out).group(1)
+    assert "review: harness skills pending" in out
+
+    assert cli(env, "skills", "approve", "--ids", pid) == 0
+    assert "approved" in capsys.readouterr().out
+    # The approved skill must land where the HOST advertises it
+    # (.opencode/skills, opencode's project discovery) — not harness' private
+    # overlay, which the model never sees.
+    base = env / ".opencode" / "skills" / "facts-index"
+    body = (base / "SKILL.md").read_text()
+    assert "## Procedure" in body and "## Pitfalls" in body
+    prov = json.loads((base / ".harness-source.json").read_text())
+    assert prov["repo"] == "harness-memory" and prov["files"] == ["SKILL.md"]
+
+
 def test_skills_approve_writes_a_staged_skill_file(env, capsys):
     from harness.store import connect
     con = connect(env)
@@ -78,7 +146,7 @@ def test_skills_approve_writes_a_staged_skill_file(env, capsys):
 
     assert cli(env, "skills", "approve", "--ids", str(pid)) == 0
     assert "approved" in capsys.readouterr().out
-    written = env / "home" / "skills" / "general" / "my-skill" / "SKILL.md"
+    written = env / ".opencode" / "skills" / "my-skill" / "SKILL.md"
     assert written.read_text().endswith("body")
 
     # a second staged change, this time rejected in bulk
@@ -91,7 +159,7 @@ def test_skills_approve_writes_a_staged_skill_file(env, capsys):
         con.close()
     assert cli(env, "skills", "reject", "--ids", "all") == 0
     assert "rejected" in capsys.readouterr().out
-    assert not (env / "home" / "skills" / "general" / "other-skill").exists()
+    assert not (env / ".opencode" / "skills" / "other-skill").exists()
 
 
 def test_memory_save_search_and_refine(env, capsys):

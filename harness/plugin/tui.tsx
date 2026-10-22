@@ -1154,17 +1154,21 @@ const HarnessTui = {
       }
     }
     /**
-     * Open the folder where this section can be extended by hand. Skills live
-     * in the project overlay the server half seeds from
-     * (`.opencode/harness/skills`); agents live in opencode v2's project
-     * agents dir (`.opencode/agents`). Both are created on demand, then handed
-     * to the desktop opener — a terminal TUI cannot show a file manager
+     * Open the folder where this section can be extended by hand. Skills open
+     * the HOST's project dir (`.opencode/skills`): opencode discovers it on
+     * its own and advertises every skill there, which is also where
+     * `harness skills add` installs packs. The harness overlay
+     * (`.opencode/harness/skills`) is still read first for a same-named skill,
+     * but only this plugin registers it — a hand-added skill belongs where the
+     * host itself looks. Agents live in `.opencode/agents`. Both are created on
+     * demand, then
+     * handed to the desktop opener — a terminal TUI cannot show a file manager
      * itself, and the toast always names the path when the opener is missing.
      */
     const openFolder = (kind: "skills" | "agents") => {
       const dir =
         kind === "skills"
-          ? `${projectDir()}/.opencode/harness/skills`
+          ? `${projectDir()}/.opencode/skills`
           : `${projectDir()}/.opencode/agents`
       void (async () => {
         try {

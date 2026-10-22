@@ -8,24 +8,37 @@ live review subagents.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-from .paths import state_file
+from .paths import opencode_config_dir, state_file
 
 
 def skill_roots(project_root: Path, cfg: dict) -> list[tuple[str, Path, int]]:
-    """(tier, path, precedence). project > local > external."""
+    """(tier, path, precedence). project > local > external.
+
+    The host's own directories are included so `skills list`, `skill_view` and
+    the panel agree with what opencode actually advertises: imported packs land
+    in `<project>/.opencode/skills` (host-discovered), and a user's global
+    `~/.config/opencode/skills` is visible too. Harness' private overlay stays
+    first, so a project can shadow one skill without forking the pack.
+    """
     from .config import user_dir
     roots: list[tuple[str, Path, int]] = []
     # project tiers
     # state_file, not state_dir: discovery only probes candidates with
     # .exists(), so resolving a path must not create .opencode/ as a side effect.
-    for cand in (state_file(project_root, "skills"), project_root / ".agents" / "skills"):
+    for cand in (state_file(project_root, "skills"),
+                 project_root / ".opencode" / "skills",
+                 project_root / ".agents" / "skills"):
         if cand.exists():
             roots.append(("project", cand, 0))
     local = user_dir() / "skills"
     if local.exists():
         roots.append(("local", local, 1))
+    host = opencode_config_dir() / "skills"
+    if host.exists():
+        roots.append(("local", host, 1))
     for d in ((cfg.get("skills", {}) or {}).get("external_dirs", []) or []):
         p = Path(str(d).replace("~", str(Path.home()))).expanduser()
         if p.exists():
@@ -112,6 +125,71 @@ def _frontmatter(p: Path) -> dict:
         quote = v[:1] if v[:1] in _QUOTED else ""
     flush()
     return out
+
+
+# Words that describe the shape of a request, not its subject. Without this,
+# "use when the tests fail" matches every skill that mentions tests.
+_STOP = {
+    "the", "and", "for", "with", "use", "when", "this", "that", "from", "into",
+    "your", "you", "our", "are", "was", "were", "has", "have", "had", "not",
+    "but", "can", "will", "would", "should", "could", "any", "all", "out",
+    "its", "it", "is", "of", "to", "in", "on", "at", "as", "by", "or", "an",
+    "a", "be", "do", "does", "did", "how", "what", "which", "who", "why",
+}
+
+
+def _stem(w: str) -> str:
+    """A crude suffix fold so "failing tests" can hit "fix" and "test".
+
+    Exact-word matching misses the single most common case in this domain —
+    a user's request names the noun while a skill's description names the
+    verb ("failing tests" vs "fixing bugs"). Four suffixes and a length floor
+    are enough for that; anything smarter would need a real stemmer dependency.
+    """
+    if w.endswith("ing") and len(w) > 5:
+        return w[:-3]
+    if w.endswith("ed") and len(w) > 4:
+        return w[:-2]
+    if w.endswith("s") and not w.endswith("ss") and len(w) > 3:
+        return w[:-1]
+    return w
+
+
+def _terms(text: str) -> set[str]:
+    """Lowercase subject terms: words of 3+ chars, minus the request stoplist.
+
+    Terms are stemmed (`_stem`) so a request and a description agree on the
+    same word family; only the query side needs it to be enough, but both
+    sides use it so the comparison stays symmetric.
+    """
+    return {
+        _stem(w) for w in re.split(r"[^a-z0-9]+", str(text or "").lower())
+        if len(w) > 2 and w not in _STOP
+    }
+
+
+def match(items: list[dict], query: str, limit: int = 3, min_score: int = 2) -> list[dict]:
+    """Rank skills for a task by description/name overlap.
+
+    The host already advertises every skill's description, so this is for the
+    moment the list is long enough to skim badly. A name hit is worth more than
+    a description hit (the name is the subject), and a skill below `min_score`
+    is never dressed up as relevant — the same rule as lesson matching.
+    """
+    q = _terms(query)
+    if not q:
+        return []
+    scored: list[dict] = []
+    for s in items or []:
+        name_terms = _terms(s.get("name", ""))
+        desc_terms = _terms(s.get("description", ""))
+        hits = sorted(q & (name_terms | desc_terms))
+        score = len(hits) + (2 if q & name_terms else 0)
+        if score < min_score:
+            continue
+        scored.append({**s, "score": score, "why": hits[:4]})
+    scored.sort(key=lambda d: (-d["score"], d.get("name", "")))
+    return scored[:limit]
 
 
 def view(project_root: Path, cfg: dict, name: str, subpath: str = "") -> str:

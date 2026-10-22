@@ -115,7 +115,9 @@ def test_folder_chip_is_outside_the_row_toggle():
     assert "props.action?.()" in chip
     assert "const openFolder = (kind: \"skills\" | \"agents\")" in tui
     open_fn = _slice(tui, "const openFolder = (kind:", "const dbStamp")
-    assert "/.opencode/harness/skills" in open_fn and "/.opencode/agents" in open_fn
+    # skills open the HOST's project dir: it is auto-discovered and advertised,
+    # and it is where `harness skills add` installs packs.
+    assert "/.opencode/skills" in open_fn and "/.opencode/agents" in open_fn
     assert "mkdirSync(dir, { recursive: true })" in open_fn
     assert "Bun.spawn(explorerCmd(dir)" in open_fn
     assert "opened ${dir}" in open_fn, "the toast confirms what opened"

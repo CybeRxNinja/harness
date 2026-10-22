@@ -41,9 +41,70 @@ second skill at match time — the router picks one of the two (see
 Resolution order (first root wins on a same-named skill): `HARNESS_SKILLS_DIR`
 (if set) → `<project>/.opencode/harness/skills` → package data
 (`harness/data/skills`) → `~/.harness/skills`. Missing/unreadable roots are
-skipped. Opencode's own paths stay global by host design
-(`~/.config/opencode/opencode.json`, `~/.config/opencode/plugins/harness`) —
-only harness skills overlay per project.
+skipped. The host's own directories are read too, so `skills list`, the
+`skill_view` tool and the panel agree with what opencode actually advertises:
+`<project>/.opencode/skills` and `~/.config/opencode/skills`. Opencode's own
+config stays global by host design (`~/.config/opencode/opencode.json`,
+`~/.config/opencode/plugins/harness`) — only harness skills overlay per
+project.
+
+## Routing (automatic use)
+
+opencode advertises every skill's id + description at every model step, so a
+skill is used automatically the moment it is *placed where the host looks*
+(`.opencode/skills`) and has a description. Harness adds the two things that
+wear out at scale:
+
+* `skills_list {query}` ranks the list: likely skills first, marked `◆`, named
+  up front — the output shape is unchanged, `query` is optional.
+* The session `context` hook adds one system line before a generation when a
+  skill's name/description overlaps the user's own message (stemmed word
+  overlap, same matcher as the CLI). It names at most two, says to load one
+  only if it fits, never repeats itself for the same message, and stays silent
+  when the message already names the match. Off with `"skills": {"nudge":
+  false}` in `.opencode/harness.jsonc` (nearest file wins).
+* `harness skills match <task text>` prints the same ranking from the CLI.
+
+Nothing is force-loaded: opencode's `skill` tool decides, and an id the model
+picks is honoured either way.
+
+## Getting more skills (`harness skills add`)
+
+Curated sources: `harness skills sources`. Each entry names the repo, the
+subdirectory its skills live in and its licence; the five packs named as
+starting points are all there (obra/superpowers, addyosmani/agent-skills,
+morluto/rea, Shubhamsaboo/awesome-llm-apps, K-Dense-AI/scientific-agent-skills).
+
+```
+harness skills sources                      # what is curated, with licences
+harness skills add agent-skills             # alias, owner/repo, URL, or a local dir
+harness skills add obra/superpowers --only code-review   # a few, not the pack
+harness skills add scientific-skills --dry-run           # plan, write nothing
+harness skills update                       # re-fetch every imported pack, apply drift
+```
+
+Imported packs land in `<project>/.opencode/skills` (host-discovered) or
+`~/.config/opencode/skills` with `--global`, each skill carrying
+`.harness-source.json` (repo, ref, commit, licence, files). Untrusted text:
+only files are copied (never symlinks), credentials/binaries/oversized files
+are refused, and `skills update` touches nothing that has no provenance — a
+hand-written skill or an approved memory draft is left alone.
+
+## Learning a skill from the work (`harness skills draft`)
+
+```
+harness skills draft <id> --query "<topic>"   # compose from durable memory
+harness skills draft <id> --dry-run           # read the SKILL.md before staging
+harness skills pending                        # review
+harness skills approve --ids <n>              # -> .opencode/skills/<id>/SKILL.md
+```
+
+The draft pulls this project's durable facts and MEMORY.md lessons into
+When/Procedure/Pitfalls/Verification, refuses to draft without at least three
+evidence-backed lines, and stages as `skill-create` — the same queue lessons
+use. Approval writes to the host's project dir (it used to write harness'
+private overlay, where nothing could see it) plus its provenance, so
+`skills update` knows it came from memory and never looks for it upstream.
 
 ## ponytail (MIT, attributed — see `harness/data/skills/NOTICE.md`)
 

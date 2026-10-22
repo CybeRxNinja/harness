@@ -768,7 +768,9 @@ def test_plugin_worker_sweep_retires_stale_rows():
     # wins): a non-positive value would retire even a just-inserted row.
     assert "workerTimeoutS: number" in srv and "let workerTimeoutS = WORKER_TIMEOUT_DEFAULT_S" in srv
     assert '"worker_timeout_s"' in srv and "if (Number.isFinite(n) && n > 0) workerTimeoutS = n" in srv
-    assert "return { enabled, maxFacts, capLines, workerTimeoutS }" in srv
+    # the config layer is shared with the skill-nudge flag, so the return
+    # shape carries one extra field — the worker fields themselves are pinned above.
+    assert "return { enabled, maxFacts, capLines, workerTimeoutS, skillNudge }" in srv
     # both touches reconcile, and the fresh row lands first so it is never swept.
     assert srv.count("sweepStaleWorkers(db, (await memoryConfig(projectDir)).workerTimeoutS)") == 2
     started = srv[srv.index("async function workerStarted"):srv.index("async function workerFinished")]
@@ -2201,10 +2203,13 @@ def test_plugin_skill_roots_project_overlay():
 
     skillRoots(projectDir) inserts `<project>/.opencode/harness/skills` after
     the HARNESS_SKILLS_DIR env override and before package data, so a project
-    overrides one skill by dropping a same-named SKILL.md in the overlay;
-    every seedSkills call site passes the project directory (setup seeding +
-    both skills_list/skill_view fallbacks); first-root-wins dedupe is what
-    makes the earlier overlay entry stick.
+    overrides one skill by dropping a same-named SKILL.md in the overlay; the
+    HOST's `<project>/.opencode/skills` (where `harness skills add` installs
+    and opencode discovers packs by itself) joins the same project tier right
+    after it, and the host's global skills dir joins the global tier. Every
+    seedSkills call site passes the project directory (setup seeding + both
+    skills_list/skill_view fallbacks); first-root-wins dedupe is what makes
+    the earlier overlay entry stick.
     """
     srv = _srv_text()
     assert "async function skillRoots(projectDir?: string)" in srv
@@ -2213,12 +2218,16 @@ def test_plugin_skill_roots_project_overlay():
     roots = srv[srv.index("async function skillRoots"):srv.index("async function seedSkills")]
     order = [
         roots.index("process.env.HARNESS_SKILLS_DIR"),
-        roots.index("/.opencode/harness/skills"),
+        roots.index("${projectDir}/.opencode/harness/skills"),
+        roots.index("${projectDir}/.opencode/skills"),
         roots.index("harness.__file__"),
-        roots.index("/.harness/skills"),
+        roots.index("${cfg}/opencode/skills"),
+        roots.index("${home}/.harness/skills"),
     ]
-    assert order == sorted(order), f"roots must order env → project overlay → package data → global: {order}"
-    assert srv.count("seedSkills(directory)") == 3, "setup + skills_list fallback + skill_view fallback"
+    assert order == sorted(order), f"roots must order env → project → package data → global: {order}"
+    # the nudge joins the two tool fallbacks and the seeding call, so four
+    # call sites now resolve through the project-aware roots.
+    assert srv.count("seedSkills(directory)") == 4, "setup + skills_list + skill_view + nudgeSkills fallback"
     assert "seedSkills()" not in srv, "no call site may seed without the project directory"
     seeds = srv[srv.index("async function seedSkills"):srv.index("async function readSkill")]
     assert "const seen = new Set<string>()" in seeds
