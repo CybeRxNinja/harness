@@ -152,12 +152,31 @@ const workerMark = (status: unknown) => WORKER_MARKS[String(status)] ?? "·"
 const WORKER_LIVE = new Set(["queued", "running"])
 
 /**
- * Memory-note glyphs, like TODO_MARKS/WORKER_MARKS above: a progress note
- * reads as its status, not as the "✎" every fact used to get.
+ * The Memory row's vocabulary: one KIND per stored fact, each with the human
+ * label and glyph it renders as. Ordered by what a reader needs first — what
+ * is stuck, why it is this way, what landed, where the work got to, then the
+ * loose notes — so four lines are a briefing, not the newest four rows.
+ *
+ * Kinds are derived from the fact's own text (factKind below) because the
+ * store keeps `facts(text,source,ts)` exactly as harness/memory.py writes it:
+ * no schema change, and a row written by either side classifies the same.
  */
-const MEMORY_MARKS: Rec = { progress: "◐", done: "●", blocked: "✕", error: "⚠" }
-/** "progress [s_123]: did the thing" -> status, session, core message. */
-const MEMORY_RE = /^(progress|done|blocked|error) \[(.+?)\]: (.*)$/
+const FACT_KINDS: Array<{ kind: string; label: string; mark: string }> = [
+  { kind: "blocker", label: "Blocked", mark: "✕" },
+  { kind: "decision", label: "Why", mark: "⚑" },
+  { kind: "fix", label: "Fixed", mark: "✓" },
+  { kind: "outcome", label: "Landed", mark: "●" },
+  { kind: "lesson", label: "Lesson", mark: "✧" },
+  { kind: "progress", label: "Now", mark: "◐" },
+  { kind: "note", label: "Note", mark: "✎" },
+]
+const FACT_BY_KIND: Rec = Object.fromEntries(FACT_KINDS.map((k) => [k.kind, k]))
+/** Writer tags: "progress [s_123]: did the thing" (also done/blocked). */
+const FACT_NOTE_RE = /^(progress|done|blocked) \[[^\]]+\]:\s*/i
+/** How many fact lines the Memory detail can show (DETAIL_LIMIT minus "older"). */
+const FACT_SLOTS = 4
+/** Facts read per poll: enough history to find one of each kind, bounded. */
+const FACT_SCAN = 120
 
 /**
  * "how long ago" for a worker row, from its `updated` epoch SECONDS
@@ -173,7 +192,10 @@ function age(updated: unknown): string {
   const secs = Math.max(0, Math.round((Date.now() - t * 1000) / 1000))
   if (secs < 60) return `${secs}s`
   if (secs < 3600) return `${Math.round(secs / 60)}m`
-  return `${Math.round(secs / 3600)}h`
+  // Days past two, not "242h": a memory row's age should read like a date
+  // range, and a long-running worker's age stops being measured in hours too.
+  if (secs < 48 * 3600) return `${Math.round(secs / 3600)}h`
+  return `${Math.round(secs / 86400)}d`
 }
 
 /**
@@ -323,32 +345,92 @@ function splitRow(l: string): [string, string] {
 }
 
 /**
- * One Memory detail row per fact: a progress note ("done [s_x]: …") renders
- * as its status mark plus the core message, any other fact keeps "✎".
- * Consecutive identical rows collapse with a ×N suffix, so six mock-echo
- * notes read as one line ("◐ echo: hello in mock ×6") until retention
- * prunes them. Shapes only the rows already read — never writes the DB.
+ * Which KIND a stored fact is, from the text it was written with.
+ *
+ * Used to be: every row printed bare, cut at 30 cols, so the Memory list read
+ * as one undifferentiated pile of `Posted both. Updating the…` fragments — a
+ * decision, a blocker and a stray note all looked identical. The classifiers
+ * are the same vocabulary harness/memory.py captures with (IMPORTANT_MARKERS),
+ * so a fact keeps the meaning it was stored under.
  */
-function humanizeFacts(rows: Rec[]): string[] {
-  const rendered = rows.map((r) => {
-    const text = String(r?.text ?? "")
-    const m = MEMORY_RE.exec(text)
-    if (!m) return "✎ " + wcut(text, 30)
-    const mark = MEMORY_MARKS[m[1]] ?? "✎"
-    return mark + " " + wcut(m[3], 30)
-  })
-  const out: string[] = []
-  for (const line of rendered) {
-    const prev = out.length ? out[out.length - 1] : ""
-    const g = /^(.*) ×(\d+)$/.exec(prev)
-    const core = g ? g[1] : prev
-    if (prev && core === line) {
-      out[out.length - 1] = line + " ×" + (g ? Number(g[2]) + 1 : 2)
-    } else {
-      out.push(line)
-    }
+function factKind(text: unknown): string {
+  const s = String(text ?? "").trim()
+  const note = FACT_NOTE_RE.exec(s)
+  // A writer note: progress/done are activity, blocked is a real blocker.
+  if (note) return note[1].toLowerCase() === "blocked" ? "blocker" : "progress"
+  if (/^error\b/i.test(s)) return "blocker"
+  if (/^lesson\b/i.test(s)) return "lesson"
+  if (/^(decision|decided)\b/i.test(s) || /\bdecision:/i.test(s)) return "decision"
+  if (/^root cause\b/i.test(s) || /^(fix|fixed)\b/i.test(s)) return "fix"
+  if (/^(blocker|blocked|blocking)\b/i.test(s)) return "blocker"
+  if (/^(verified|tests? )/i.test(s) || /\b(tests? (passed|failed|pass|fail)|regression|traceback)\b/i.test(s)) {
+    return "outcome"
   }
-  return out
+  return "note"
+}
+
+/**
+ * What the fact SAYS, minus what the row already prints: the writer's
+ * `progress [session]:` tag and the fact's own `Decision:`-style marker. The
+ * label column carries the kind, so repeating it in the body wastes columns.
+ */
+function factBody(text: unknown): string {
+  return String(text ?? "")
+    .replace(FACT_NOTE_RE, "")
+    .replace(
+      /^(decision|decided|why|root cause|fix|fixed|blocker|blocked|blocking|verified|lesson|note|error)\s*:\s*/i,
+      "",
+    )
+    .trim()
+}
+
+/**
+ * The Memory detail as a short BRIEFING: one line per meaningful fact, newest
+ * first within each kind, kinds in FACT_KINDS order (blocked → why → fixed →
+ * landed → lesson → now → note). Round-robin across kinds so four slots show
+ * four different things instead of four progress notes, then an honest
+ * `… +N older` line when the store holds more than the row can print.
+ *
+ * `total` is the real on-disk count (the read window is capped at
+ * FACT_SCAN), so the remainder never lies. Duplicate bodies collapse: the
+ * writer dedupes exact text, but a note repeated with a new session tag is
+ * still the same thing to read. No age column: the panel is 37 cells wide,
+ * and a timestamp cost ~4 cells of the sentence — the sentence is the point.
+ */
+function digestFacts(rows: Rec[], total = rows.length, slots = FACT_SLOTS): string[] {
+  const byKind = new Map<string, string[]>()
+  const seen = new Set<string>()
+  for (const r of rows) {
+    const raw = String(r?.text ?? "")
+    const body = factBody(raw)
+    if (!body) continue
+    const kind = factKind(raw)
+    const meta = FACT_BY_KIND[kind] ?? FACT_BY_KIND.note
+    const key = `${kind}:${body.toLowerCase()}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    // A fact may itself contain " · ": the row renderer would read that as its
+    // label/value split and right-pin the tail, so neutralise it in the body.
+    const line = `${meta.mark} ${String(meta.label).padEnd(7)} ${wcut(body.replace(/ · /g, " — "), 26)}`
+    const bucket = byKind.get(kind)
+    if (bucket) bucket.push(line)
+    else byKind.set(kind, [line])
+  }
+  const order = FACT_KINDS.map((k) => k.kind).filter((k) => byKind.has(k))
+  const take = Math.max(1, Math.min(FACT_SLOTS, Number(slots) || FACT_SLOTS))
+  const lines: string[] = []
+  for (let i = 0; lines.length < take; i++) {
+    let any = false
+    for (const kind of order) {
+      const bucket = byKind.get(kind) ?? []
+      if (i >= bucket.length) continue
+      any = true
+      if (lines.length < take) lines.push(bucket[i])
+    }
+    if (!any) break
+  }
+  if (total > lines.length) lines.push(`… +${total - lines.length} older`)
+  return lines
 }
 
 /**
@@ -986,6 +1068,7 @@ const HarnessTui = {
       skillsUsed: [] as string[],
       facts: [] as string[],
       factsCount: 0,
+      notesCount: 0,
       todos: [] as string[],
       todosDone: 0,
       todosFromProject: false,
@@ -1206,7 +1289,7 @@ const HarnessTui = {
      * project-state reader is module-level too; load is the only writer, and
      * the value is consumed on the next open (never carried across two).
      */
-    let heldCounts: { facts: number; workersActive: number } | null = null
+    let heldCounts: { facts: number; notes: number; workersActive: number } | null = null
 
     // FEATURE 1 — cached MEMORY.md lesson lines that shape the Next detail.
     // Read at most once per SLOW pass (see the slow gate in load), through the
@@ -1242,6 +1325,7 @@ const HarnessTui = {
         todosFallback: false,
         facts: [] as string[],
         factsCount: 0,
+        notesCount: 0,
         workers: [] as string[],
         workersActive: 0,
         waits: [] as string[],
@@ -1262,7 +1346,11 @@ const HarnessTui = {
           const current = JSON.parse(fs.readFileSync(uiPath, "utf8"))
           if (current?.last_skill?.id) out.lastSkill = `${shortSkill(current.last_skill.id)}`
           if (current?.last_compaction?.chars) out.lastCompaction = `${current.last_compaction.chars} chars`
-          if (current?.last_risk?.risk) out.lastRisk = `${current.last_risk.risk}${current.last_risk.ask ? " · ask" : ""}`
+          // Human phrasing, not the raw verdict key: the row reads
+          // "⚠ Risk elevated" and says out loud when a check asked first.
+          if (current?.last_risk?.risk) {
+            out.lastRisk = `${current.last_risk.risk}${current.last_risk.ask ? " · asks first" : ""}`
+          }
         } catch {
           /* no UI state yet */
         }
@@ -1354,17 +1442,28 @@ const HarnessTui = {
               // Held counts (see the workers block above): same values,
               // no full-table scan on a fast-path open.
               out.factsCount = Number(held.facts ?? 0) || 0
+              out.notesCount = Number(held.notes ?? 0) || 0
             } else {
-              // The VALUE is a real count, not the displayed window: LIMIT 6
-              // rows capped it, and the view state never received it at all, so
-              // the header and Memory row printed "0 facts" with facts on disk.
-              const fc = db.query("SELECT count(*) AS n FROM facts").get() as Rec
+              // One scan, two numbers: how much the store knows (facts) and how
+              // much of it is turn activity (notes, tagged progress/done/blocked
+              // by both writers). The Memory value says both — "11 facts · 70
+              // notes" explains why the list shows four lines out of eighty-one.
+              const fc = db.query(
+                "SELECT count(*) AS n, " +
+                  "coalesce(sum(text LIKE 'progress [%' OR text LIKE 'done [%' OR text LIKE 'blocked [%]'), 0) AS notes " +
+                  "FROM facts",
+              ).get() as Rec
               out.factsCount = Number(fc?.n ?? 0) || 0
+              out.notesCount = Number(fc?.notes ?? 0) || 0
             }
-            // Progress notes render as status + core message with runs
-            // collapsed ("◐ echo: hello in mock ×6"), not raw mid-word cuts.
-            out.facts = humanizeFacts(
-              db.query("SELECT text FROM facts ORDER BY id DESC LIMIT ?").all(ROW_LIMIT) as Rec[],
+            // A briefing, not a log: kind-labelled lines, newest of each kind
+            // first (see digestFacts). The risk line above takes one of the
+            // row's five slots, so the digest gives it up rather than pushing
+            // the honest `… +N older` line out of view.
+            out.facts = digestFacts(
+              db.query("SELECT text, ts FROM facts ORDER BY id DESC LIMIT ?").all(FACT_SCAN) as Rec[],
+              out.factsCount,
+              out.lastRisk ? FACT_SLOTS - 1 : FACT_SLOTS,
             )
           } catch {
             /* no facts table yet */
@@ -1766,7 +1865,9 @@ const HarnessTui = {
           // pass instead of one per open. A `full` pass (session change,
           // first load, refresh) always re-scans.
           const hold = !full && Number(view.countsAt ?? 0) > 0 && Date.now() - Number(view.countsAt) < POLL_MS
-          heldCounts = hold ? { facts: data.factsCount, workersActive: data.workersActive } : null
+          heldCounts = hold
+            ? { facts: data.factsCount, notes: data.notesCount, workersActive: data.workersActive }
+            : null
           const state = await readProjectState(directory, sessionID)
           data.countsAt = hold ? data.countsAt : Date.now()
           data.todos = state.todos
@@ -1774,6 +1875,7 @@ const HarnessTui = {
           data.todosFromProject = state.todosFallback
           data.facts = state.facts
           data.factsCount = state.factsCount
+          data.notesCount = state.notesCount
           data.workers = state.workers
           data.workersActive = state.workersActive
           data.waits = state.waits
@@ -1909,6 +2011,9 @@ const HarnessTui = {
           // facts never reached the view state before this — header and Memory
           // printed 0 even with facts on disk.
           d.facts = data.factsCount
+          // How many of those are turn activity rather than knowledge: the
+          // Memory value splits the two instead of calling every note a fact.
+          d.notes = data.notesCount
           // When the COUNT scans last ran (see the DB block above): the
           // timestamp is the fast path's hold gate, so it travels with the
           // values it guards.
@@ -2985,7 +3090,19 @@ const HarnessTui = {
                   icon="❖"
                   accent={ACCENT.memory}
                   label="Memory"
-                  value={() => `${view.facts ?? 0} fact${(view.facts ?? 0) === 1 ? "" : "s"}`}
+                  value={() => {
+                    void view.rev
+                    const all = view.facts ?? 0
+                    // A note is turn activity, not knowledge. Saying both out
+                    // loud ("11 facts · 70 notes") explains why a store of 81
+                    // rows prints four lines; calling every note a fact was
+                    // the old "81 facts" that told you nothing.
+                    const notes = Math.min(all, view.notes ?? 0)
+                    const known = all - notes
+                    const word = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`
+                    if (known && notes) return `${word(known, "fact")} · ${word(notes, "note")}`
+                    return notes ? word(notes, "note") : word(known, "fact")
+                  }}
                   hide={() => {
                     void view.rev
                     return !(view.facts ?? 0)
@@ -2993,22 +3110,33 @@ const HarnessTui = {
                   lines={() => {
                     void view.rev
                     const state = [] as string[]
-                    if (data.lastRisk) state.push(`⚠ last risk: ${data.lastRisk}`)
+                    // The last risk verdict is the one line that asks you to
+                    // act, so it leads — named plainly instead of the old
+                    // "last risk: elevated · ask" jargon.
+                    if (data.lastRisk) state.push(`⚠ Risk ${data.lastRisk}`)
                     return [...state, ...data.facts]
                   }}
-                  empty="(no durable facts yet)"
+                  empty="(nothing remembered yet)"
+                  // "✕ Blocked  bun is not installed" — mark and kind carry the
+                  // colour, the fact reads muted. Mark+label are ONE segment on
+                  // purpose: the host trims whitespace at a segment boundary,
+                  // which rendered "✓Fixed" until they were joined.
                   lineParts={(l) => {
+                    if (l.startsWith("…")) return segs([[l, th.muted]])
                     const i = l.indexOf(" ")
                     const mark = i > 0 ? l.slice(0, i) : l
+                    const rest = i > 0 ? l.slice(i + 1) : ""
                     const markFg =
-                      mark === "●" ? ok
-                        : mark === "✕" ? bad
-                          : mark === "⚠" ? warn
+                      mark === "✕" ? bad
+                        : mark === "⚠" ? warn
+                          : mark === "✓" || mark === "●" ? ok
                             : mark === "◐" ? warn
-                              : th.muted
-                    return i > 0
-                      ? segs([[mark + " ", markFg], [l.slice(i + 1), th.muted]])
-                      : segs([[l, markFg]])
+                              : mark === "⚑" || mark === "✧" ? ACCENT.memory
+                                : th.muted
+                    const j = rest.indexOf(" ")
+                    const head = j > 0 ? rest.slice(0, j) : rest
+                    const body = j > 0 ? rest.slice(j) : ""
+                    return segs([[`${mark} ${head}`, markFg], [body, th.muted]])
                   }}
                 />
               </box>

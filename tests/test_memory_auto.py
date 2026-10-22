@@ -193,6 +193,54 @@ Blocker: the release workflow still needs a tag.
     assert M.important_lines(text, limit=3)[-1].startswith("Blocker:")
 
 
+def test_important_lines_skips_narration_and_truncated_fragments():
+    """A turn is mostly the model narrating its next move; that is not memory.
+
+    `I'll check the log` says where the work WAS, and a line cut off with an
+    ellipsis is a fragment — both used to be stored as durable facts, which is
+    how the sidebar filled with `Posted both. Updating the…` rows.
+    """
+    from harness import memory as M
+    text = "\n".join([
+        "I'll check the log for the crash.",
+        "Let me run the suite again.",
+        "Now the diff is posted.",
+        "Fixed: the count now reaches the view state…",
+        "Decision: keep the facts index as a fast path",
+        "Tests passed: 246 passed in 51s.",
+        "Blocker: bun is not installed",
+    ])
+    assert M.important_lines(text, limit=6) == [
+        "Decision: keep the facts index as a fast path",
+        "Tests passed: 246 passed in 51s.",
+        "Blocker: bun is not installed",
+    ]
+
+
+def test_headline_prefers_a_line_that_says_something():
+    """The first line is usually deliberation; the note must still be useful."""
+    from harness import memory as M
+    text = "I'll load the ponytail skill.\nLet me check the log.\nTests passed: 246 passed in 51s.\nmore"
+    assert M.headline(text) == "Tests passed: 246 passed in 51s."
+    # only narration to choose from: keep the first line, never lose the note
+    assert M.headline("I'll load the skill.\nLet me check.") == "I'll load the skill."
+    # a truncated first line is a fragment, not the summary
+    assert M.headline("Posted both. Updating the…\nReal line of summary here.") == "Real line of summary here."
+
+
+def test_capture_turn_does_not_store_deliberation(con, root, cfg):
+    """Durable line kept, narration dropped — the hand-off stays readable."""
+    from harness import memory as M
+    text = "I'll check the log.\nLet me rerun the suite.\nFixed: the count now reaches the view state."
+    out = M.capture_turn(con, "s1", text, cfg=cfg, root=root)
+    assert out["facts"]
+    texts = [f["text"] for f in _recent(con, 10)]
+    assert "Fixed: the count now reaches the view state." in texts
+    assert not any(t.startswith("I'll") or t.startswith("Let me") for t in texts)
+    # the progress note is the line that says something, not the opener
+    assert any(t.startswith("progress [s1]: Fixed:") for t in texts), texts
+
+
 def test_important_lines_ignores_short_and_overlong_lines():
     from harness import memory as M
     assert M.important_lines("Fixed: ok") == []            # too short to mean anything

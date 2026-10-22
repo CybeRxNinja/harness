@@ -45,6 +45,17 @@ IMPORTANT_MARKERS = (
     "blocker:", "next step", "todo:", "note:", "important:", "gotcha",
     "remember:", "constraint:", "requirement:", "must ", "never ", "always ",
 )
+# A line that narrates the model's next move instead of stating knowledge:
+# "I'll check the log…", "Let me run the suite", "Now the panel…". Turn output
+# is mostly this, and storing it as a durable fact is what filled the panel
+# with `Posted both. Updating the…` fragments no later turn can use.
+NARRATION_RE = re.compile(
+    r"^(i\b|i['\u2019]|we\b|we['\u2019]|my\b|me\b|let me\b|let['\u2019]s\b|now\b|next\b|"
+    r"first\b|second\b|then\b|okay\b|ok\b|hmm\b|wait\b|so\b|also\b|but\b|"
+    r"actually\b|here['\u2019]s\b|looking\b|checking\b|reading\b|running\b)",
+    re.I)
+# A line cut off by the writer is a fragment, not a statement.
+FRAGMENT_TAIL = ("\u2026", "...")
 # A line carrying a failure/verification result is worth keeping too.
 OUTCOME_RE = re.compile(
     r"\b(passed|failing|failed|regression|tests? (pass|fail)|reproduced|timeout"
@@ -166,6 +177,10 @@ def important_lines(text: str, limit: int = 3) -> list[str]:
             continue
         if re.match(r"^(\.\.\.|\d+\s*[|:])", line):
             continue
+        # Narration and truncation are turn chatter: "I'll load the skill" is
+        # where the work WAS, not something the next session can rely on.
+        if NARRATION_RE.match(line) or line.endswith(FRAGMENT_TAIL):
+            continue
         low = line.lower()
         if not (any(low.startswith(m) or f" {m}" in low for m in IMPORTANT_MARKERS)
                 or OUTCOME_RE.search(line)):
@@ -176,11 +191,28 @@ def important_lines(text: str, limit: int = 3) -> list[str]:
 
 
 def headline(text: str, error: str = "", limit: int = 160) -> str:
-    """One-line summary of a turn, for the progress note."""
+    """One-line summary of a turn, for the progress note.
+
+    The FIRST line is usually the model announcing its next move ("I'll load
+    the ponytail skill."), which reads as nothing in the sidebar a minute later.
+    Skip those and any truncated fragment, and take the first line that still
+    says something; with only narration to choose from, keep the first line so
+    the note is never lost.
+    """
+    first = ""
     for raw in str(text or "").splitlines():
         line = normalize(raw)
-        if len(line) >= 8:
-            return line[:limit]
+        if len(line) < 8:
+            continue
+        if line.startswith(("```", "~~~", "#", "|", "+", ">")):
+            continue
+        if not first:
+            first = line
+        if NARRATION_RE.match(line) or line.endswith(FRAGMENT_TAIL):
+            continue
+        return line[:limit]
+    if first:
+        return first[:limit]
     if error:
         return f"error: {normalize(error)[:limit]}"
     return ""

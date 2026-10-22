@@ -17,6 +17,12 @@ purpose:
   Deduplicated on normalized text, capped by `memory.max_facts` (2000), and
   **credentials are refused** (`sk-…`, `ghp_…`, JWTs, `password: …`, PEM
   blocks) — a memory that leaks a key is worse than a forgetful one.
+- **Not facts** — deliberation and fragments. A line that opens with the
+  model's next move ("I'll check the log", "Let me run the suite", "Now the
+  diff is posted") or that was cut off with an ellipsis is skipped, because it
+  says where the work *was*, not what the next session can rely on. The plugin
+  mirror applies the same rule, so a live session cannot fill the store with
+  rows the Python writer would have refused.
 - **Progress** — a one-line headline per turn with source `progress`, or `done`
   when the turn *verified* itself: a test/lint/typecheck command ran and came
   back clean. `blocked` when a turn reports a blocker.
@@ -24,6 +30,17 @@ purpose:
   The project's rule is that the verification
   section is the acceptance for the checkbox, so a turn that merely *says*
   "done" closes nothing. A red test run closes nothing either.
+
+## In the sidebar
+
+The Memory row is a briefing, not the newest six rows. Each fact is labelled by
+kind — `✕ Blocked`, `⚑ Why`, `✓ Fixed`, `● Landed`, `✧ Lesson`, `◐ Now`,
+`✎ Note` — and the newest of each kind is shown, blocked first, with an honest
+`… +N older` for whatever does not fit. The value splits knowledge from
+activity (`315 facts · 968 notes`): a note is a turn's where-did-it-get-to
+headline, not something to build on, and it is never counted as a fact. When a
+`risk_check` verdict is on file it leads the row (`⚠ Risk elevated`), and the
+digest gives up one slot so the detail list still fits the panel.
 
 Recall is term-based, not phrase-based: the whole turn is tokenized into up to
 five terms and matched with OR, scored by how many terms hit and then by

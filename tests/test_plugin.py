@@ -619,6 +619,23 @@ def test_plugin_history_feed_uses_high_water_mark():
     assert "await captureHistory(db, sessionID, messages)" in text
 
 
+def test_plugin_memory_capture_skips_narration_like_python():
+    """Capture quality has two writers; both must draw the same line.
+
+    harness/memory.py's important_lines()/headline() now drop deliberation
+    ("I'll check the log") and truncated fragments; the server half mirrors
+    that so a live session does not fill the store with rows the Python writer
+    would have refused. Parity is pinned as one regex + one tail list, used by
+    both the durable-line scan and the headline.
+    """
+    srv = _srv_text()
+    assert "const MEM_NARRATION =" in srv
+    assert 'const MEM_FRAGMENT_TAIL = ["…", "..."]' in srv
+    assert srv.count("MEM_NARRATION.test(line) || MEM_FRAGMENT_TAIL.some((t) => line.endsWith(t))") == 2, (
+        "both the fact scan and the headline apply the same filter"
+    )
+
+
 def test_plugin_lesson_loop_needs_two_distinct_excerpts():
     """Each durable assistant line stages one evidence excerpt into `pending`;
     a lesson promotes into the project state dir's MEMORY.md only at >=2
@@ -864,7 +881,10 @@ def test_plugin_memo_caches_parse_once():
     assert "const ck = `head:${limit}:${text}`" in srv
     assert "if (Array.isArray(hit)) return hit" in srv
     assert 'if (typeof hit === "string") return hit' in srv
-    assert srv.count("memCachePut(ck, res)") == 2, "both pure functions memoize their result"
+    # Both pure functions memoize their result. memHeadline now caches the
+    # FALLBACK line too (`res || first…`), so the call shape, not the literal
+    # `res`, is what stays pinned.
+    assert srv.count("memCachePut(ck, ") == 2, "both pure functions memoize their result"
 
 
 def test_tui_plugin_is_a_sidebar_panel_not_a_layout_change():
@@ -960,7 +980,7 @@ def test_tui_plugin_is_a_sidebar_panel_not_a_layout_change():
         assert f"store?.{store}?.sync?.(loc)" in tui and f"store?.{store}?.list?.(loc)" in tui, store
     assert "SELECT text, status FROM todos WHERE session = ?" in tui
     assert "FROM todo WHERE session_id" not in tui, "opencode 2.x writes no todos"
-    assert "SELECT text FROM facts ORDER BY id DESC" in tui
+    assert "SELECT text, ts FROM facts ORDER BY id DESC" in tui
     assert 'await import("node:fs")' in tui and 'await import("bun:sqlite")' in tui
 
     # reactive view state without a signal import, and a cleanup function
@@ -1204,22 +1224,23 @@ def test_tui_todo_row_reads_the_harness_space_and_auto_expands():
     assert "`${openCount()} expanded`" in tui
 
 
-def test_tui_memory_row_humanizes_progress_notes():
-    """Progress notes render as status + core message, not raw mid-word cuts.
+def test_tui_memory_row_digests_facts_by_kind():
+    """The Memory list is a briefing, not the newest six rows.
 
-    Six mock-echo notes used to read as six `progress [s_..]: [mock:..` rows;
-    humanizeFacts renders the status mark plus the core message and collapses
-    consecutive identical rows with a xN suffix. (Parse coverage of the file
-    itself already lives in test_plugin_entrypoints_parse; this pins the
-    humanizer's presence and its wiring into the facts read.)
+    It used to print each fact bare, cut at 30 cols: a decision, a blocker and
+    a stray note all read as the same unlabelled fragment (`Posted both.
+    Updating the…`), and 70 progress notes buried the handful of facts that
+    matter. digestFacts() now labels each fact by kind, ages it, and shows one
+    line per kind (blocked first). Behaviour is covered by
+    tests/test_tui_memory.py; this pins the wiring.
     """
     from harness.cli import _plugin_files
     tui = Path(_plugin_files()[1]).read_text()
-    assert "function humanizeFacts(rows: Rec[]): string[]" in tui
-    assert "const MEMORY_MARKS: Rec = { progress:" in tui
-    assert "const MEMORY_RE = /^(progress|done|blocked|error)" in tui
-    assert "out.facts = humanizeFacts(" in tui
-    assert "SELECT text FROM facts ORDER BY id DESC" in tui
+    assert "function digestFacts(rows: Rec[], total = rows.length, slots = FACT_SLOTS): string[]" in tui
+    assert "const FACT_KINDS: Array<{ kind: string; label: string; mark: string }>" in tui
+    assert "function factKind(text: unknown): string" in tui
+    assert "out.facts = digestFacts(" in tui
+    assert "SELECT text, ts FROM facts ORDER BY id DESC LIMIT ?" in tui
 
 
 # Parses each entrypoint with Bun's transpiler (JSX-aware, no module
@@ -1895,9 +1916,14 @@ def test_tui_panel_shows_only_thoughtful_accurate_rows():
     for needle in ("return !(view.todos ?? 0)", "return !view.workers", "return !(view.facts ?? 0)"):
         assert needle in tui, needle
 
-    # a REAL facts count reaches the view state, and todo progress with it
-    assert "SELECT count(*) AS n FROM facts" in tui
+    # a REAL facts count reaches the view state, and todo progress with it.
+    # The count query also classifies turn notes in the SAME scan (`AS notes`),
+    # so the Memory value can say "11 facts · 70 notes" and explain why four
+    # lines print out of eighty-one rows.
+    assert "SELECT count(*) AS n, " in tui
+    assert "AS notes " in tui
     assert "d.facts = data.factsCount" in tui
+    assert "d.notes = data.notesCount" in tui
     assert "out.todosDone = rows.filter" in tui
     assert "d.todosDone = data.todosDone" in tui
 

@@ -144,7 +144,7 @@ def test_probe_locality_comment_and_recoverable_latch():
     for bad in ("readProjectState", "db.query", "?.sync?.("):
         assert bad not in probe, f"probe must stay local: {bad}"
     # the doc block is still there, reworded — not deleted to dodge the guard
-    assert "let heldCounts: { facts: number; workersActive: number } | null = null" in probe
+    assert "let heldCounts: { facts: number; notes: number; workersActive: number } | null = null" in probe
     assert "project-state reader is module-level too" in probe
     # ...and the pin has teeth: the pre-fix wording puts the identifier back
     regressed = tui.replace(
@@ -228,8 +228,9 @@ def test_family_fanout_capped_and_short_model_gone():
 
     # the two COUNT(*) scans are cached with a timestamp and refreshed only
     # on a full/slow pass, never on every DB open
-    assert "let heldCounts: { facts: number; workersActive: number } | null = null" in tui
-    assert "heldCounts = hold ? { facts: data.factsCount, workersActive: data.workersActive } : null" in tui
+    assert "let heldCounts: { facts: number; notes: number; workersActive: number } | null = null" in tui
+    assert "heldCounts = hold" in tui
+    assert "{ facts: data.factsCount, notes: data.notesCount, workersActive: data.workersActive }" in tui
     assert "Date.now() - Number(view.countsAt) < POLL_MS" in tui
     assert "d.countsAt = data.countsAt" in tui
 

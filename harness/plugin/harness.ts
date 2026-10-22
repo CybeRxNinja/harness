@@ -750,6 +750,12 @@ const MEM_MARKERS = [
 ]
 const MEM_OUTCOME =
   /\b(passed|failing|failed|regression|tests? (pass|fail)|reproduced|timeout|permission denied|not found|traceback|done|fixed|verified|success)\b/i
+/** Narration, not knowledge (parity with NARRATION_RE in harness/memory.py):
+ * "I'll check the log…" is where the work was, not a durable fact. */
+const MEM_NARRATION =
+  /^(i\b|i['’]|we\b|we['’]|my\b|me\b|let me\b|let['’]s\b|now\b|next\b|first\b|second\b|then\b|okay\b|ok\b|hmm\b|wait\b|so\b|also\b|but\b|actually\b|here['’]s\b|looking\b|checking\b|reading\b|running\b)/i
+/** A line cut off by the writer is a fragment, not a statement. */
+const MEM_FRAGMENT_TAIL = ["…", "..."]
 /** Buckets that stage for manual `memory approve` but NEVER auto-promote:
  * status-report verbs that appear in ordinary progress chatter (a release note
  * saying "fixed …" or "verified …" is not a lesson). Anything shorter than 4
@@ -808,6 +814,8 @@ function memImportantLines(text: string, limit = MEM_LINES_PER_MSG): string[] {
     if (/^(\.\.\.|\d+\s*[|:])/.test(line)) continue
     const low = line.toLowerCase()
     if (!(MEM_MARKERS.some((m) => low.startsWith(m) || low.includes(` ${m}`)) || MEM_OUTCOME.test(line))) continue
+    // Narration and truncation are turn chatter, never durable lines.
+    if (MEM_NARRATION.test(line) || MEM_FRAGMENT_TAIL.some((t) => line.endsWith(t))) continue
     if (!out.includes(line)) out.push(line)
   }
   const res = out.slice(0, limit)
@@ -815,21 +823,27 @@ function memImportantLines(text: string, limit = MEM_LINES_PER_MSG): string[] {
   return res
 }
 
-/** One-line summary of a message, for the progress note (mirrors headline()). */
+/** One-line summary of a message, for the progress note (mirrors headline()).
+ * The first line is usually the model announcing its next move; skip those and
+ * truncated fragments, keep the first line that says something, and fall back
+ * to the first line when there is nothing else (never lose the note). */
 function memHeadline(text: string, limit = MEM_HEADLINE_LIMIT): string {
   const ck = `head:${limit}:${text}`
   const hit = memParseCache.get(ck)
   if (typeof hit === "string") return hit
+  let first = ""
   let res = ""
   for (const raw of String(text ?? "").split("\n")) {
     const line = memNormalize(raw)
-    if (line.length >= 8) {
-      res = line.slice(0, limit)
-      break
-    }
+    if (line.length < 8) continue
+    if (/^(```|~~~|#|\||\+|>)/.test(line)) continue
+    if (!first) first = line
+    if (MEM_NARRATION.test(line) || MEM_FRAGMENT_TAIL.some((t) => line.endsWith(t))) continue
+    res = line.slice(0, limit)
+    break
   }
-  memCachePut(ck, res)
-  return res
+  memCachePut(ck, res || first.slice(0, limit))
+  return res || first.slice(0, limit)
 }
 
 /** True when a message deserves no progress note (mirrors _is_junk_turn()). */

@@ -345,7 +345,8 @@ def test_tui_user_names_word_boundary_truncation():
     assert "wcut(r?.label, 15)" in tui
     # detail rows (covers Memory display) + the fact humanizer itself.
     assert "wcut(l, 40)" in tui
-    assert "wcut(m[3], 30)" in tui
+    # the fact body is cut at a word boundary too (see digestFacts)
+    assert 'wcut(body.replace(/ · /g, " — "), 26)' in tui
 
 
 def test_tui_bold_section_titles():
