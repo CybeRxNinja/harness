@@ -20,20 +20,27 @@ from pathlib import Path
 import pytest
 
 from harness.skillpack import (
+    AGENTS_FILE,
     SOURCE_FILE,
     SkillPackError,
     draft_skill,
     imported,
+    install_agents,
     install_pack,
     parse_spec,
     read_skill,
     sources,
+    update_agents,
     update_installed,
 )
 from harness.skills import match
 
 
 def _skill(name: str, desc: str, body: str = "## Procedure\n1. do the thing\n") -> str:
+    return f"---\nname: {name}\ndescription: {desc}\n---\n# {name}\n{body}"
+
+
+def _agent(name: str, body: str = "You review code.", desc: str = "Reviews code. Use when reviewing.") -> str:
     return f"---\nname: {name}\ndescription: {desc}\n---\n# {name}\n{body}"
 
 
@@ -52,6 +59,10 @@ def pack(tmp_path):
     )
     (root / "skills" / "no-description").mkdir(parents=True)
     (root / "skills" / "no-description" / "SKILL.md").write_text("---\nname: No Description\n---\nbody\n")
+    (root / "agents").mkdir()
+    (root / "agents" / "code-reviewer.md").write_text(_agent("code-reviewer"))
+    (root / "agents" / "no-description.md").write_text("---\nname: no-description\n---\nbody\n")
+    (root / "agents" / "secret.md").write_text(_agent("secret") + "\ntoken = ghp_abcdefghijklmnopqrstuvwxyz\n")
     (root / "node_modules" / "junk").mkdir(parents=True)
     (root / "node_modules" / "junk" / "SKILL.md").write_text(_skill("Junk", "never imported"))
     (root / ".hidden").mkdir()
@@ -278,6 +289,101 @@ def test_github_provenance_records_owner_slash_repo(pack, tmp_path, monkeypatch)
 
     assert _source_id({"owner": "obra", "repo": "superpowers", "path": ""}) == "obra/superpowers"
     assert _source_id({"repo": "superpowers", "path": str(pack)}) == str(pack)
+
+
+# --- agents -----------------------------------------------------------------
+
+def test_install_agents_places_valid_agents_and_refuses_the_rest(pack, project):
+    rep = install_agents(str(pack), project)
+    assert rep["installed"] == 1, rep
+    actions = {a["id"]: a["action"] for a in rep["agents"]}
+    assert actions["code-reviewer"] == "installed"
+    assert actions["no-description"] == "skipped" and actions["secret"] == "skipped"
+    target = project / ".opencode" / "agents"
+    assert (target / "code-reviewer.md").read_text() == (pack / "agents" / "code-reviewer.md").read_text()
+    assert not (target / "secret.md").exists(), "a credential-shaped agent never lands"
+    prov = json.loads((target / AGENTS_FILE).read_text())
+    assert prov["repo"] == str(pack.resolve())
+    assert prov["agents"] == {"code-reviewer": "agents/code-reviewer.md"}
+    # the host discovers agents from that directory; the agent is plain markdown
+    assert (target / "code-reviewer.md").read_text().startswith("---\nname: code-reviewer")
+
+
+def test_update_agents_restores_upstream_and_is_idempotent(pack, project):
+    install_agents(str(pack), project)
+    (pack / "agents" / "code-reviewer.md").write_text(_agent("code-reviewer", "UPDATED"))
+    dry = update_agents(str(project), dry_run=True)
+    assert {a["id"] for a in dry["agents"] if a["action"] == "would update"} == {"code-reviewer"}
+    assert "UPDATED" not in (project / ".opencode/agents/code-reviewer.md").read_text()
+
+    rep = update_agents(str(project))
+    assert (rep["updated"], rep["failed"]) == (1, 0), rep
+    assert "UPDATED" in (project / ".opencode/agents/code-reviewer.md").read_text()
+    again = update_agents(str(project))
+    assert (again["unchanged"], again["updated"], again["failed"]) == (1, 0, 0), again
+
+
+def test_skills_update_covers_imported_agents_too(pack, project):
+    install_pack(str(pack), project)
+    install_agents(str(pack), project)
+    (pack / "agents" / "code-reviewer.md").write_text(_agent("code-reviewer", "UPDATED"))
+    rep = update_installed(str(project))
+    rows = {r["id"]: r["action"] for r in rep["skills"]}
+    assert rows["code-reviewer"] == "updated", rows
+    assert rows["alpha"] == "unchanged" and rows["beta"] == "unchanged", rows
+    assert rep["updated"] == 1, "only the agent drifted, and one command reports it"
+
+
+def test_a_hand_edited_agent_is_never_clobbered_without_force(pack, project):
+    install_agents(str(pack), project)
+    dest = project / ".opencode" / "agents" / "code-reviewer.md"
+    dest.write_text(dest.read_text() + "\nlocal tweak\n")
+    (pack / "agents" / "code-reviewer.md").write_text(_agent("code-reviewer", "TWEAKED"))
+
+    rep = install_agents(str(pack), project)
+    row = next(a for a in rep["agents"] if a["id"] == "code-reviewer")
+    assert row["action"] == "exists" and "--force" in row["reason"]
+    assert "local tweak" in dest.read_text(), "the user's edit survives"
+
+    forced = install_agents(str(pack), project, force=True)
+    assert {a["id"]: a["action"] for a in forced["agents"]}["code-reviewer"] == "updated"
+    assert "TWEAKED" in dest.read_text() and "local tweak" not in dest.read_text()
+    # the sidecar now claims it, so a later update can manage it
+    assert "code-reviewer" in json.loads((dest.parent / AGENTS_FILE).read_text())["agents"]
+
+    # an OWNED agent is refreshed by --update, and still not by a bare re-run
+    dest.write_text(dest.read_text() + "\nanother local edit\n")
+    (pack / "agents" / "code-reviewer.md").write_text(_agent("code-reviewer", "AGAIN"))
+    bare = install_agents(str(pack), project)
+    assert {a["id"]: a["action"] for a in bare["agents"]}["code-reviewer"] == "exists"
+    assert "another local edit" in dest.read_text()
+    upd = install_agents(str(pack), project, update=True)
+    assert {a["id"]: a["action"] for a in upd["agents"]}["code-reviewer"] == "updated"
+    assert "AGAIN" in dest.read_text()
+
+    # an OWNED agent is refreshed by --update, and still not by a bare re-run
+    dest.write_text(dest.read_text() + "\nanother local edit\n")
+    (pack / "agents" / "code-reviewer.md").write_text(_agent("code-reviewer", "AGAIN"))
+    bare = install_agents(str(pack), project)
+    assert {a["id"]: a["action"] for a in bare["agents"]}["code-reviewer"] == "exists"
+    assert "another local edit" in dest.read_text()
+    upd = install_agents(str(pack), project, update=True)
+    assert {a["id"]: a["action"] for a in upd["agents"]}["code-reviewer"] == "updated"
+    assert "AGAIN" in dest.read_text()
+
+
+def test_agents_land_in_the_host_global_dir_with_global(pack, project, monkeypatch, tmp_path):
+    cfg = tmp_path / "cfg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+    rep = install_agents(str(pack), project, global_=True)
+    assert Path(rep["target"]) == cfg / "opencode" / "agents"
+    assert (cfg / "opencode" / "agents" / "code-reviewer.md").exists()
+
+
+def test_install_agents_reports_a_pack_without_an_agents_dir(pack, project):
+    (pack / "agents").rename(pack / "crew")
+    with pytest.raises(SkillPackError, match="no agents directory"):
+        install_agents(str(pack), project)
 
 
 # --- matching ---------------------------------------------------------------

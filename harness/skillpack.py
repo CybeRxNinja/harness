@@ -44,6 +44,7 @@ MAX_SKILL_BYTES = 2_000_000
 MAX_DEPTH = 8
 CLONE_TIMEOUT = 120
 EXCLUDED = {".git", "node_modules", "__pycache__"}
+AGENTS_FILE = ".harness-agents.json"
 
 
 class SkillPackError(RuntimeError):
@@ -406,6 +407,203 @@ def install_pack(spec: str, root: str | Path, *, path: str = "", ref: str = "",
     return report
 
 
+def agents_root(root: str | Path, global_: bool = False) -> Path:
+    """Where opencode discovers agent markdown (host design): the project's
+    `.opencode/agents`, or the user's `~/.config/opencode/agents`.
+
+    The same rule as skills: an agent in a directory nothing watches is
+    invisible, and packs ship theirs as plain `agents/*.md` with
+    name/description frontmatter — which is exactly the shape opencode reads.
+    """
+    return (opencode_config_dir() if global_ else Path(root).resolve() / ".opencode") / "agents"
+
+
+AGENT_MAX_BYTES = 100_000
+
+
+def _read_agent(md: Path) -> dict:
+    """One pack agent as {id, data} or {skip: reason}.
+
+    Only the frontmatter is interpreted, the body is copied verbatim: an
+    agent is a system prompt, and rewriting someone else's prompt during
+    import is how a review stops matching what actually runs. A missing
+    description is a refusal — opencode would never advertise the agent.
+    """
+    fm = _frontmatter(md)
+    aid = _skill_id(fm.get("name") or md.stem)
+    if not aid:
+        return {"skip": f"{md.name} has no usable name"}
+    description = " ".join(str(fm.get("description") or "").split())
+    if not description:
+        return {"skip": "no description in frontmatter (the host would not advertise it)"}
+    try:
+        data = md.read_bytes()
+    except OSError as e:
+        return {"skip": f"unreadable: {e}"}
+    if md.is_symlink():
+        return {"skip": "symlink"}
+    if len(data) > AGENT_MAX_BYTES:
+        return {"skip": f"{len(data)} bytes (cap {AGENT_MAX_BYTES})"}
+    if b"\x00" in data[:4096]:
+        return {"skip": "binary"}
+    if is_secretish(data.decode("utf-8", "replace")):
+        return {"skip": "looks like it contains a credential"}
+    return {"id": aid, "data": data}
+
+
+def install_agents(spec: str, root: str | Path, *, path: str = "agents", ref: str = "",
+                   global_: bool = False, only: str = "", force: bool = False,
+                   update: bool = False, refresh: bool = False, dry_run: bool = False) -> dict:
+    """Import a pack's `agents/*.md` where opencode discovers agents.
+
+    Companion to install_pack: same fetch (shared cache), same refusal rules,
+    same provenance habit — one sidecar, `.harness-agents.json`, in the agents
+    directory, so `skills update` can re-sync the agent prompts too. Ids are
+    the frontmatter name, so an import never clobbers a `harness-*` agent
+    (those are ours) unless the pack really defines that name.
+    """
+    root = Path(root).resolve()
+    entry = find_source(spec)
+    if entry:
+        spec = entry["repo"]
+    fetched = fetch_pack(spec, state_file(root, "skill-cache"), refresh=refresh, ref=ref)
+    base = Path(str(fetched["root"])) / str(path or "agents")
+    if not base.is_dir():
+        raise SkillPackError(
+            f"no agents directory in {fetched.get('repo') or spec}: expected {path or 'agents'}/")
+    wanted = {w.strip().lower() for w in str(only or "").split(",") if w.strip()}
+    target = agents_root(root, global_)
+    sidecar = target / AGENTS_FILE
+    existing: dict = {}
+    if sidecar.is_file():
+        try:
+            existing = {k: v for k, v in json.loads(sidecar.read_text()).get("agents", {}).items()}
+        except Exception:
+            existing = {}
+    report = {
+        "source": {"repo": _source_id(fetched), "ref": fetched.get("ref", ""),
+                   "commit": fetched.get("commit", ""), "path": str(path or "agents")},
+        "target": str(target), "dry_run": bool(dry_run), "agents": [],
+    }
+    matched = 0
+    prov = dict(existing)
+    for md in sorted(base.glob("*.md")):
+        info = _read_agent(md)
+        aid = info.get("id", _skill_id(md.stem))
+        if wanted and aid not in wanted:
+            continue
+        matched += 1
+        if info.get("skip"):
+            report["agents"].append({"id": aid, "action": "skipped", "reason": info["skip"]})
+            continue
+        dest = target / f"{aid}.md"
+        data = info["data"]
+        exists = dest.exists()
+        if exists and dest.read_bytes() != data and not (force or update):
+            # Same rule as install_pack for skills: an already-written file is
+            # left alone until the caller says --update (refresh it) or
+            # --force (adopt this content and own it from here on). A local
+            # edit is never silently overwritten.
+            reason = ("differs from the pack; use --update to refresh it or --force to adopt it"
+                      if aid in existing else
+                      "differs from the pack; use --force to adopt it")
+            report["agents"].append({"id": aid, "action": "exists", "reason": reason})
+            continue
+        changed = (not exists) or dest.read_bytes() != data
+        if not dry_run and changed:
+            target.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+        action = ("would install" if not exists else "would update") if dry_run else (
+            "installed" if not exists else ("updated" if changed else "unchanged"))
+        if changed or not exists:
+            prov[aid] = str(md.relative_to(Path(str(fetched["root"])).resolve()))
+        report["agents"].append({"id": aid, "action": action})
+    if wanted and not matched:
+        raise SkillPackError(f"--only matched no agents in {fetched.get('repo') or spec}")
+    if not dry_run and any(a["action"] in ("installed", "updated") for a in report["agents"]):
+        target.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(json.dumps({
+            "repo": _source_id(fetched),
+            "ref": str(fetched.get("ref") or ""),
+            "commit": str(fetched.get("commit") or ""),
+            "installed_at": int(time.time()),
+            "agents": prov,
+        }, indent=2) + "\n")
+    report["installed"] = sum(
+        1 for a in report["agents"]
+        if a["action"] in ("installed", "updated", "would install", "would update"))
+    return report
+
+
+def update_agents(root: str | Path, *, global_: bool = False, dry_run: bool = False,
+                  refresh: bool = False, packs: dict | None = None) -> dict:
+    """Re-sync imported agents from their pack, the way update_installed does."""
+    root = Path(root).resolve()
+    target = agents_root(root, global_)
+    sidecar = target / AGENTS_FILE
+    report: dict = {"target": str(target), "agents": [], "updated": 0, "unchanged": 0,
+                    "skipped": 0, "failed": 0}
+    if not sidecar.is_file():
+        return report
+    try:
+        data = json.loads(sidecar.read_text())
+        agents_map = {str(k): str(v) for k, v in (data.get("agents") or {}).items()}
+    except Exception as e:
+        report["failed"] = 1
+        report["agents"].append({"id": AGENTS_FILE, "action": "failed", "reason": str(e)[:120]})
+        return report
+    spec, ref = str(data.get("repo") or ""), str(data.get("ref") or "")
+
+    def note(aid: str, action: str, reason: str = "") -> None:
+        report["agents"].append({"id": aid, "action": action, "reason": reason, "kind": "agent"})
+        bucket = {"failed": "failed", "skipped": "skipped", "updated": "updated",
+                  "unchanged": "unchanged", "would update": "updated"}.get(action)
+        if bucket:
+            report[bucket] += 1
+
+    cache = packs if packs is not None else {}
+    pack = cache.get((spec, ref))
+    if pack is None and spec:
+        local = Path(spec).expanduser()
+        if local.is_dir():
+            pack = {"root": str(local.resolve()), "commit": ""}
+        elif "/" in spec:
+            try:
+                pack = fetch_pack(f"{spec}@{ref}" if ref else spec,
+                                  state_file(root, "skill-cache"), refresh=refresh)
+            except SkillPackError as e:
+                pack = {"error": str(e)}
+        else:
+            pack = {"error": f"{spec!r} is neither an owner/repo nor a local directory"}
+        cache[(spec, ref)] = pack
+    if pack is None:
+        pack = {"error": "no provenance for the agents directory"}
+    if pack.get("error"):
+        for aid in agents_map:
+            note(aid, "failed", str(pack["error"])[:120])
+        return report
+    changed = False
+    for aid, rel in sorted(agents_map.items()):
+        upstream = Path(str(pack["root"])) / rel
+        dest = target / f"{aid}.md"
+        if not upstream.is_file():
+            note(aid, "failed", f"{rel} is gone upstream")
+            continue
+        blob = upstream.read_bytes()
+        if dest.exists() and dest.read_bytes() == blob:
+            note(aid, "unchanged")
+            continue
+        if not dry_run:
+            dest.write_bytes(blob)
+            changed = True
+        note(aid, "would update" if dry_run else "updated")
+    if changed and not dry_run:
+        data["commit"] = str(pack.get("commit") or "")
+        data["installed_at"] = int(time.time())
+        sidecar.write_text(json.dumps(data, indent=2) + "\n")
+    return report
+
+
 def imported(root: str | Path, global_: bool = False) -> list[dict]:
     """Installed skills that carry provenance, as {id, dir, ...provenance}.
 
@@ -517,6 +715,11 @@ def update_installed(root: str | Path, *, global_: bool = False,
         note("would update" if dry_run else "updated",
              f"{len(changed)} file(s) changed" + (f", {len(removed)} removed" if removed else ""),
              files=changed, removed=removed)
+    # Imported agents ride along: same command, same fetch cache, same rules.
+    agents = update_agents(root, global_=global_, dry_run=dry_run, refresh=refresh, packs=packs)
+    report["skills"].extend(agents["agents"])
+    for key in ("updated", "unchanged", "skipped", "failed"):
+        report[key] += agents[key]
     return report
 
 

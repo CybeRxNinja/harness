@@ -79,6 +79,7 @@ morluto/rea, Shubhamsaboo/awesome-llm-apps, K-Dense-AI/scientific-agent-skills).
 harness skills sources                      # what is curated, with licences
 harness skills add agent-skills             # alias, owner/repo, URL, or a local dir
 harness skills add obra/superpowers --only code-review   # a few, not the pack
+harness skills add agent-skills --agents    # also import agents/*.md
 harness skills add scientific-skills --dry-run           # plan, write nothing
 harness skills update                       # re-fetch every imported pack, apply drift
 ```
@@ -89,6 +90,13 @@ Imported packs land in `<project>/.opencode/skills` (host-discovered) or
 only files are copied (never symlinks), credentials/binaries/oversized files
 are refused, and `skills update` touches nothing that has no provenance — a
 hand-written skill or an approved memory draft is left alone.
+
+`--agents` imports the pack's other half: `agents/*.md` with name +
+description frontmatter land in `<project>/.opencode/agents` (opencode's
+agent discovery), tracked by one sidecar, `.harness-agents.json`, so
+`skills update` re-syncs prompts too. A file that differs from the pack is
+never overwritten by a bare re-run: it takes `--update` (refresh) or
+`--force` (adopt). `--only` filters skills; agents import whole or not at all.
 
 ## Learning a skill from the work (`harness skills draft`)
 

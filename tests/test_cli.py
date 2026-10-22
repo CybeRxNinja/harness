@@ -98,6 +98,32 @@ def test_skills_add_installs_into_the_host_directory(env, capsys):
     assert "Alpha" in capsys.readouterr().out
 
 
+def test_skills_add_agents_and_update_cover_the_agent_half(env, capsys):
+    """`--agents` imports the pack's agents/*.md where opencode discovers them,
+    and `skills update` re-syncs that half too."""
+    agent = env / "pack" / "agents"
+    agent.mkdir(parents=True)
+    (agent / "reviewer.md").write_text(
+        "---\nname: reviewer\ndescription: Reviews code. Use when reviewing.\n---\n# Reviewer\nbody\n"
+    )
+    assert cli(env, "skills", "add", str(env / "pack"), "--agents", "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "would install" in out and "agent reviewer" in out
+    assert not (env / ".opencode" / "agents").exists(), "dry run must not write"
+
+    assert cli(env, "skills", "add", str(env / "pack"), "--agents") == 0
+    assert "1 agent(s) installed" in capsys.readouterr().out
+    written = env / ".opencode" / "agents" / "reviewer.md"
+    assert written.exists() and "# Reviewer" in written.read_text()
+
+    # upstream moves: one `skills update` covers skills and agents
+    (agent / "reviewer.md").write_text(
+        "---\nname: reviewer\ndescription: Reviews code. Use when reviewing.\n---\n# Reviewer\nUPDATED\n"
+    )
+    assert cli(env, "skills", "update") == 0
+    assert "UPDATED" in written.read_text()
+
+
 def test_skills_draft_is_staged_then_approved(env, capsys):
     import re
 

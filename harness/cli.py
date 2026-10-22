@@ -47,7 +47,7 @@ def cmd_skills(args) -> int:
             print(f"{r['alias']:18s} {r['repo']:38s} {r['license']:12s} {r['note']}")
         return 0
     if args.skills_action == "add":
-        from .skillpack import SkillPackError, install_pack
+        from .skillpack import SkillPackError, install_agents, install_pack
         try:
             rep = install_pack(
                 args.name, root, path=args.path, ref=args.ref, global_=args.global_,
@@ -55,19 +55,39 @@ def cmd_skills(args) -> int:
                 refresh=args.refresh, dry_run=args.dry_run,
             )
         except SkillPackError as e:
+            # A pack may ship agents and no skills at all; with --agents that
+            # is a valid import, not an error.
+            if not args.agents or "no SKILL.md found" not in str(e):
+                print(f"skills add: {e}", file=sys.stderr)
+                return 2
+            rep = None
+        try:
+            # `--only` filters skills (a pack's agents are its other half and
+            # are small), so agents import whole or not at all.
+            arep = install_agents(
+                args.name, root, path="agents", ref=args.ref, global_=args.global_,
+                force=args.force, update=args.update, refresh=args.refresh, dry_run=args.dry_run,
+            ) if args.agents else None
+        except SkillPackError as e:
             print(f"skills add: {e}", file=sys.stderr)
             return 2
-        src = rep["source"]
-        commit = f" @ {src['commit'][:12]}" if src.get("commit") else ""
-        where = f" ({src['path']})" if src.get("path") else ""
-        lic = f" · {src['license']}" if src.get("license") else ""
-        print(f"{'would install' if rep['dry_run'] else 'installed'} → {rep['target']}")
-        print(f"source: {src['repo']}{commit}{where}{lic}")
-        for s in rep["skills"]:
-            detail = s.get("reason") or s.get("description", "")
-            print(f"  {s['action']:13s} {s['id']:32s} {detail[:70]}")
-        verb = "would be available" if rep["dry_run"] else "available on the next turn"
-        print(f"{rep['installed']} skill(s) {verb} — opencode advertises them from .opencode/skills")
+        if rep is not None:
+            src = rep["source"]
+            commit = f" @ {src['commit'][:12]}" if src.get("commit") else ""
+            where = f" ({src['path']})" if src.get("path") else ""
+            lic = f" · {src['license']}" if src.get("license") else ""
+            print(f"{'would install' if rep['dry_run'] else 'installed'} → {rep['target']}")
+            print(f"source: {src['repo']}{commit}{where}{lic}")
+            for s in rep["skills"]:
+                detail = s.get("reason") or s.get("description", "")
+                print(f"  {s['action']:13s} {s['id']:32s} {detail[:70]}")
+            verb = "would be available" if rep["dry_run"] else "available on the next turn"
+            print(f"{rep['installed']} skill(s) {verb} — opencode advertises them from .opencode/skills")
+        if arep is not None:
+            for a in arep["agents"]:
+                detail = a.get("reason") or ""
+                print(f"  {a['action']:13s} agent {a['id']:27s} {detail[:70]}")
+            print(f"{arep['installed']} agent(s) installed → {arep['target']}")
         return 0
     if args.skills_action == "update":
         from .skillpack import SkillPackError, update_installed
@@ -584,6 +604,8 @@ def build_parser() -> argparse.ArgumentParser:
     k.add_argument("--ref", default="", help="git branch/tag to fetch")
     k.add_argument("--global", dest="global_", action="store_true",
                    help="install into ~/.config/opencode/skills instead of the project")
+    k.add_argument("--agents", action="store_true",
+                   help="also import the pack's agents/*.md where opencode discovers them")
     k.add_argument("--only", default="", help="comma-separated skill ids to import")
     k.add_argument("--force", action="store_true", help="overwrite existing skills")
     k.add_argument("--update", action="store_true", help="refresh an already-imported skill")
