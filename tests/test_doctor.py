@@ -61,7 +61,7 @@ def test_agents_status_catches_a_config_merged_by_an_older_harness(tmp_path,
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
 
     msg, ok = agents_status()
-    assert not ok and "missing 12 harness agent file" in msg, msg
+    assert not ok and "missing 14 harness agent file" in msg, msg
 
     from harness.agents import install_managed_agents
     install_managed_agents()

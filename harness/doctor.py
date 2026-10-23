@@ -63,11 +63,11 @@ def _stale_entrypoints(installed: Path) -> list[str]:
     return stale
 
 
-def agents_status() -> tuple[str, bool]:
+def agents_status(root: str | Path = ".") -> tuple[str, bool]:
     """Bundled agents must be installed as native `harness-*` Markdown files."""
     try:
         from .agents import status
-        return status()
+        return status(root)
     except Exception as e:
         return f"managed agents unreadable: {e}", False
 
@@ -186,7 +186,7 @@ def run(root: Path, verbose: bool = False) -> dict:
     c["plugin"] = status
     if not healthy:
         out["ok"] = False
-    agents_msg, agents_ok = agents_status()
+    agents_msg, agents_ok = agents_status(root)
     c["agents"] = agents_msg
     if not agents_ok:
         out["ok"] = False

@@ -250,6 +250,120 @@ def cmd_memory(args) -> int:
     return 0
 
 
+def cmd_models(args) -> int:
+    """Available models, per-role routing, and the pre-dispatch health probe."""
+    from . import models as M
+    from .config import load_config
+    root = _root(args)
+    cfg, _ = load_config(root)
+    action = getattr(args, "models_action", "list")
+    if action == "sync":
+        out = M.sync(with_registry=not getattr(args, "no_registry", False),
+                     timeout=getattr(args, "timeout", 30))
+        if out["error"]:
+            print(f"models: {out['models']} from opencode ({out['providers']} providers); "
+                  f"cost/free metadata unavailable: {out['error']}", file=sys.stderr)
+        else:
+            print(f"models: {out['models']} from opencode ({out['providers']} providers), "
+                  f"{out['registry']} with cost/free metadata")
+        return 0
+    if action == "list" and not M.available():
+        # The list is local and cheap (`opencode models`), unlike the metadata
+        # fetch: fill it so an explicit `models list` answers on a fresh install.
+        # `route` stays read-only — the plugin calls it, and a tool call must not
+        # spawn opencode or write user state as a side effect.
+        M.sync(with_registry=False)
+    if action == "list":
+        cfgm = cfg.get("models") or {}
+        ttl = int(cfgm.get("health_ttl_s") or 1800)
+        ledger = M.load_health()
+        # The same eligibility the route applies: a model with no tool calls,
+        # or one a curated exclusion removes (audio, embedding, a router that
+        # picks its own model), can never run a job — so it does not belong in
+        # the list of models a dispatch could choose.
+        rows = [r for r in (M.classify(m) for m in M.available())
+                if r["tool_call"] and not M.excluded(r["model"])]
+        for row in rows:
+            row["health"], row["reason"] = M.model_health(row["model"], ttl, ledger)
+        if getattr(args, "tier", ""):
+            rows = [r for r in rows if r["tier"] == args.tier]
+        if getattr(args, "free", False):
+            rows = [r for r in rows if r["free"]]
+        if getattr(args, "working", False):
+            # Known-broken is excluded; unchecked is kept (it is unproven, not
+            # failed) so a fresh install still lists something to probe.
+            rows = [r for r in rows if r["health"] not in ("failed", "dead")]
+        rows.sort(key=lambda r: (M._TIER_ORDER.index(r["tier"]), r["cost_in"], r["model"]))
+        if getattr(args, "json", False):
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            print("(no models — run `harness models sync`)")
+            return 0
+        marks = {"ok": "works", "failed": "FAILS", "dead": "provider down"}
+        for r in rows:
+            cost = "free" if r["free"] else f"${r['cost_in']:g}/${r['cost_out']:g} per M"
+            print(f"{r['tier']:6s} {cost:24s} {marks.get(r['health'], '-'):14s} "
+                  f"{r['model']:52s} {','.join(r['strengths']) or '-'}")
+        print(f"({len(rows)} models; {sum(1 for r in rows if r['free'])} free; "
+              f"{sum(1 for r in rows if r['health'] == 'ok')} verified working — "
+              "`harness models check` probes the rest)")
+        return 0
+    roles = getattr(args, "roles", [])
+    rows = M.route(cfg, roles=roles)
+    if action == "route" and getattr(args, "check", False):
+        if roles:
+            M.check_roles(cfg, roles, root)
+        else:
+            stale = [r["pin"] for r in rows if r["pin"] and r["health"] != "ok"]
+            if stale:
+                M.check(stale, cfg, root)
+        rows = M.route(cfg, roles=roles)
+    if action == "check":
+        pins = [r["pin"] for r in rows if r["pin"]]
+        pins += [r["fallback_pin"] for r in rows if r["fallback_pin"]]
+        pins = list(dict.fromkeys(p for p in pins if p))
+        if getattr(args, "dry_run", False):
+            for pin in pins:
+                print(f"would probe {pin}")
+            return 0
+        results = (M.check_roles(cfg, roles, root) if roles
+                   else M.check(pins, cfg, root))
+        for res in results:
+            print(f"{'ok   ' if res['ok'] else 'FAIL '} {res['pin']:52s} "
+                  f"{('$%.4f' % res['cost']) if res['cost'] else 'free':8s} {res['reason'][:70]}")
+        rows = M.route(cfg, roles=roles)
+    if getattr(args, "json", False):
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("(no roles configured — see models.routes)")
+        return 0
+    for r in rows:
+        if not r["pin"]:
+            print(f"{r['role']:16s} {r['note']}")
+            continue
+        cost = "free" if r["free"] else f"${r['cost_out']:g}/M out"
+        extra = f"  fallback {r['fallback_pin']}" if r["fallback_pin"] else ""
+        warn = ""
+        if r["health"] == "failed":
+            warn = f"  UNHEALTHY: {r['reason']}"
+        elif r["health"] in ("unverified", "stale"):
+            warn = "  (unchecked)"
+        print(f"{r['role']:16s} {r['tier']:6s} {r['pin']:44s} {cost:12s} "
+              f"{r['health']}{warn}{extra}{('  ' + r['note']) if r['note'] else ''}")
+    # The docs promise `route --check` exits 1 when a role has no working
+    # model: a failed probe and a role that never resolved to a pin are both
+    # undispatchable.
+    unhealthy = [r["role"] for r in rows
+                 if r["health"] == "failed" or not r["pin"]]
+    if unhealthy:
+        print(f"unhealthy: {', '.join(unhealthy)} — fix or re-pin before dispatching",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_setup(args) -> int:
     from .skills import ensure_seed_skills
     from . import models as backend
@@ -266,6 +380,15 @@ def cmd_setup(args) -> int:
             print(f"opencode default model: {backend.resolve_model('', {})}")
         except RuntimeError as e:
             print(f"WARNING: {e}")
+        if not os.environ.get("HARNESS_MOCK"):
+            # A local list only (no metadata fetch): agent installs pin models
+            # from the cache, and a first `harness tui` needs it to exist.
+            try:
+                info = backend.sync(with_registry=False)
+                print(f"models available: {info['models']} ({info['providers']} providers) — "
+                      "`harness models route` for worker routing")
+            except Exception as e:
+                print(f"WARNING: model list unavailable: {e}")
     else:
         print("WARNING: opencode binary not found — install stock opencode "
               "(e.g. `npm create opencode@latest`); models come from YOUR opencode config.")
@@ -521,11 +644,11 @@ def cmd_plugin(args) -> int:
             plug = install_plugin()
         try:
             from .agents import install_managed_agents
-            install_managed_agents()
+            install_managed_agents(_root(args))
         except Exception as e:
             print(f"harness: managed agent install failed ({e}) — continuing", file=sys.stderr)
         print(f"plugin installed at {plug} (stock opencode v2, no fork needed)")
-        print("restart opencode/TUI to load it; agents use your opencode default model")
+        print("restart opencode/TUI to load it; `harness models route` shows the per-worker models")
     elif args.plugin_action == "uninstall":
         for line in uninstall_plugin():
             print(line)
@@ -543,9 +666,16 @@ def cmd_tui(args) -> int:
         from .agents import agents_dir
         print(f"would: write {agents_dir()}/harness-*.md, install plugin, exec opencode")
         return 0
+    if not os.environ.get("HARNESS_MOCK"):
+        from . import models as M
+        try:
+            if not M.available():  # local `opencode models`; no metadata fetch
+                M.sync(with_registry=False)
+        except Exception:
+            pass
     try:
         from .agents import install_managed_agents, agents_dir
-        agent_paths = install_managed_agents()
+        agent_paths = install_managed_agents(_root(args))
     except Exception as e:
         from .agents import agents_dir
         print(f"harness: managed agent install failed ({e}) — continuing", file=sys.stderr)
@@ -657,6 +787,24 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--path", default="")
     r.add_argument("--json", action="store_true")
     r.set_defaults(fn=cmd_risk)
+    mo = sub.add_parser("models", help="available models, worker routing, health checks")
+    mo.add_argument("models_action", nargs="?", default="list",
+                    choices=["list", "route", "check", "sync"])
+    mo.add_argument("--roles", nargs="*", default=[],
+                    help="only these worker roles (explore, code-reviewer, ...)")
+    mo.add_argument("--tier", choices=["cheap", "mid", "strong"], default="",
+                    help="`list`: only models of this tier")
+    mo.add_argument("--free", action="store_true", help="`list`: only models that cost nothing")
+    mo.add_argument("--working", action="store_true",
+                    help="`list`: drop models whose last probe (or provider) failed")
+    mo.add_argument("--check", action="store_true",
+                    help="`route`: probe stale or failed models before reporting")
+    mo.add_argument("--dry-run", action="store_true", help="`check`: list, do not probe")
+    mo.add_argument("--json", action="store_true")
+    mo.add_argument("--timeout", type=int, default=30, help="`sync`: metadata fetch timeout")
+    mo.add_argument("--no-registry", action="store_true",
+                    help="`sync`: only ask opencode, skip models.dev metadata")
+    mo.set_defaults(fn=cmd_models)
     su = sub.add_parser("setup", help="install seed skills, check the model backend")
     su.add_argument("--update-skills", action="store_true",
                     help="overwrite installed seed skills with the packaged "
@@ -686,7 +834,8 @@ def main(argv=None) -> int:
               f"from your opencode config (`harness doctor` to verify).", file=sys.stderr)
         return 2
     if argv and not argv[0].startswith("-") and argv[0] not in (
-            "doctor", "config", "skills", "memory", "setup", "tui", "plugin", "risk"):
+            "doctor", "config", "skills", "memory", "setup", "tui", "plugin",
+            "risk", "models"):
         print(f"harness: unknown command {argv[0]!r} (retired headless commands: "
               f"chat, plan, checkpoint, mcp — live sessions run in opencode)",
               file=sys.stderr)

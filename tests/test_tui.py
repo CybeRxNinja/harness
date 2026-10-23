@@ -15,7 +15,9 @@ def test_tui_config_merge(tmp_path, monkeypatch):
     assert 'mode: "subagent"' in cr
     for name in bundled_agents():
         assert f'harness-{name}' in names
-        assert "model" not in json.dumps(bundled_agents()[name])
+        # the bundled JSON is model-free; routing pins are added at install
+        # time (models.py), never hand-written into the source of truth
+        assert "model" not in bundled_agents()[name]
 
 
 def test_merge_cleans_legacy_relay(tmp_path, monkeypatch):

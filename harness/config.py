@@ -38,6 +38,30 @@ DEFAULT_CONFIG: dict = {
     "memory": {"enabled": True, "cap_lines": 200, "retention_days": 30,
                "max_facts": 2000},
     "mcp": {"servers": {}},
+    # Worker routing. Roles are the subagent names minus `harness-`; each gets
+    # the cheapest model of its tier that the install can reach (free first),
+    # and a variant only when models.dev says the model supports it. The
+    # generated agent files carry the result (`model: provider/model#variant`),
+    # because opencode's subagent tool has no model parameter.
+    "models": {
+        "prefer_free": True,
+        "pin_agents": True,
+        "fallback_to_verified": True,
+        "health_ttl_s": 1800,
+        "check_timeout_s": 90,
+        "check_candidates": 3,
+        "routes": {
+            "explore": {"tier": "cheap", "variant": "low"},
+            "librarian": {"tier": "cheap", "variant": "low"},
+            "quick": {"tier": "cheap", "variant": "low"},
+            "test-engineer": {"tier": "mid", "variant": "medium"},
+            "code-reviewer": {"tier": "strong", "variant": "high"},
+            "security-auditor": {"tier": "strong", "variant": "high"},
+            "plan-consultant": {"tier": "strong", "variant": "high"},
+            "plan-reviewer": {"tier": "strong", "variant": "high"},
+            "deep": {"tier": "strong", "variant": "high"},
+        },
+    },
     "security": {"shell_allowlist": ["git", "pytest", "python", "python3", "npm",
                                       "npx", "rg", "grep", "ls", "cat", "bun",
                                       "node", "uv"]},
@@ -47,7 +71,7 @@ DEFAULT_CONFIG: dict = {
 # NOTE: there is intentionally no "router" section (retired) and no model
 # chains: every agent inherits the user's configured opencode default model.
 MUTABLE_TOP = {"model_profile", "budgets", "categories", "skills", "memory",
-               "mcp", "compress"}
+               "mcp", "compress", "models"}
 
 # The intent list, with the legacy dict shape (categories.<name>.{reasoning,
 # max_turns}) still accepted so an existing harness.jsonc keeps loading.
@@ -201,6 +225,22 @@ def _validate(cfg: dict) -> None:
         raise ValueError("budgets.worker_timeout_s must be an int")
     if not isinstance(cfg.get("mcp", {}).get("servers", {}) or {}, dict):
         raise ValueError("mcp.servers must be an object")
+    models = cfg.get("models") or {}
+    routes = models.get("routes") or {}
+    if not isinstance(routes, dict):
+        raise ValueError("models.routes must be an object of role -> {tier|model}")
+    for role, spec in routes.items():
+        if not isinstance(spec, dict):
+            raise ValueError(f"models.routes.{role} must be an object")
+        tier = spec.get("tier")
+        if tier is not None and tier not in ("cheap", "mid", "strong"):
+            raise ValueError(f"models.routes.{role}.tier must be cheap|mid|strong")
+        model = spec.get("model")
+        if model is not None and "/" not in str(model):
+            raise ValueError(f"models.routes.{role}.model must be provider/model")
+    for key in ("health_ttl_s", "check_timeout_s", "check_candidates"):
+        if key in models and not isinstance(models[key], int):
+            raise ValueError(f"models.{key} must be an int")
 
 
 def _apply(data: dict, parts: list[str], value) -> dict:

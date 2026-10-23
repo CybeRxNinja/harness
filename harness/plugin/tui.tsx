@@ -2026,17 +2026,11 @@ const HarnessTui = {
           // read it to print "syncing…" while cold instead of the settled
           // "none seeded" line.
           d.scanned = scanned
-          // A todo list that appears or changes opens its own row: the list is
-          // the point of the section, and a collapsed "3 items" hides the plan
-          // the model is following. A manual collapse sticks until the list
-          // changes again (the signature is what re-opens it).
-          const todoSig = data.todos.join("\u0000")
-          if (todoSig !== (d.todoSig ?? "")) {
-            d.todoSig = todoSig
-            const open = new Set<string>(Array.isArray(d.open) ? d.open : [])
-            if (todoSig) open.add("todo")
-            d.open = [...open]
-          }
+          // Todos do NOT auto-expand. opencode ships its own todo UI now, and
+          // two lists opening at once is noise: this row stays a count unless
+          // the user opens it (the waits row still opens itself — it is a
+          // countdown, not a second copy of the host's plan).
+          d.todoSig = data.todos.join("\u0000")
           // A wait that appears or changes opens its own row while anything
           // is pending; when none is, the row leaves `open` so the footer
           // count stays honest (the row itself hides on `waits`, below).
@@ -3261,8 +3255,9 @@ const HarnessTui = {
  * Initial view state: which rows are expanded (`open`, a list — several at
  * once) plus the counters the rows render. `rev` is bumped on every load to
  * trigger a repaint; `scanning` is the placeholder flag (reactive, never a
- * plain var); `todoSig` is the todo list the auto-expand last reacted to,
- * `waitSig` the wait set it last reacted to.
+ * plain var); `todoSig` is the todo list last seen (the row does not open
+ * itself — opencode has its own todo UI), `waitSig` the wait set the row last
+ * reacted to.
  */
 function defaultSections(): Rec {
   // `frame` is the animation clock the rows read (see ANIM_MS): a plain

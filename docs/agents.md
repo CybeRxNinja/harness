@@ -7,17 +7,19 @@ budget come from `budgets`, not from a per-category payload — a knob nothing
 reads is not a feature.
 Curated read-only: `explore/librarian`; plan-gated: `plan-consultant/
 plan-reviewer`; reviewers: `code-reviewer/test-engineer/security-auditor`.
-All workers inherit your opencode default model (`harness doctor` shows it).
+Each role resolves to a model (`harness models route`), and the orchestrator
+passes that pin as the `model` field of the `task` call — see *Which model runs
+which job* below.
 
 TUI agents mirror this: `orchestrator` (delegates, never writes directly — it
 routes through the `task` tool to the subagents `explore`, `librarian`,
 `plan-consultant`, `plan-reviewer`, `code-reviewer`, `test-engineer`,
 `security-auditor`, falling back to opencode's built-in `general` only when none
-fits), `ask`/`debug`/`review` primaries, native `plan` — none pin a model, so
-they all run on your configured opencode default unless you pin per-agent
-`model` yourself. Every subagent carries its own prompt, none can spawn further
-subagents (depth 1), and all but `test-engineer` (which writes tests only) are
-edit-denied.
+fits), `ask`/`debug`/`review` primaries, native `plan` — primary agents never
+pin a model (they run the session the user selected), while subagents carry the
+routed `model:` written at install time as their default. Every subagent
+carries its own prompt, none can spawn further subagents (depth 1), and all but
+`test-engineer` (which writes tests only) are edit-denied.
 
 Flow: `todowrite` the plan → `todoread` before re-planning → parallel `task`
 bursts (the orchestrator picks the category itself; `rlm.spawn` validates it
@@ -42,6 +44,31 @@ its irreversible subset rather than one per step. See `docs/security.md` and
 Progress records itself: each turn writes a progress fact. (The retired headless
 ledger used to close a plan box on a verified turn; todos are the plan now.) See
 `docs/memory.md`.
+
+## Which model runs which job
+
+One model for every job is wrong in both directions: recon and mechanical
+reading run fine on a cheap (often free) model, while review, planning and
+security need the strongest one available. Each role maps to a tier in
+`models.routes`, and `harness models route` turns that into a concrete
+`provider/model#variant` (`docs/config.md` lists the keys).
+
+The model is checked **before** it is dispatched. A pin carries the verdict of
+a real one-line request through opencode:
+
+- **working** — the last probe answered; safe to dispatch.
+- **NOT WORKING** — carries the provider's own reason (quota, auth, no route,
+  unknown model/variant). Never dispatch it: `models_route` names a fallback.
+- **unchecked** — nothing has proven it either way; probe before dispatching.
+
+opencode's `subagent` tool takes a `model` input (`providerID/modelID#variant`),
+so the orchestrator passes the verified pin per dispatch — the cheap/free pin
+for a mechanical job, the strong pin for a hard one — and the host validates
+availability and variant. The `model:` in an agent file is only the fallback for
+a call that omits it. Free vs paid comes from models.dev cost data (input and
+output both 0), not from the model's name; `harness models list --free
+--working` is the shortlist, and a provider-wide failure (quota, auth, no route)
+is recorded once so the next route skips its siblings.
 
 ## Fast by construction
 

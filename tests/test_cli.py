@@ -4,6 +4,7 @@ Live sessions run inside opencode; the CLI keeps the installer and the
 inspect/repair operators (doctor/config/skills/memory/plugin/setup/tui).
 """
 import json
+import time
 
 import pytest
 
@@ -21,6 +22,50 @@ def env(tmp_path, monkeypatch):
 def cli(env, *argv):
     from harness.cli import main
     return main(list(argv))
+
+
+def test_models_list_marks_free_and_working(env, capsys):
+    """`models list` answers the two questions the owner asks before a dispatch:
+    which models are free, and which of them actually answered a probe."""
+    home = env / "home"
+    home.mkdir(exist_ok=True)
+    now = int(time.time())
+    meta = {"cost": {"input": 0, "output": 0}, "limit": 8000, "tool_call": True}
+    # kilo/lyria is excluded by the curated patterns (a music model), and
+    # acme/no-tools has tool_call false — neither can run a job, so the list
+    # must not offer them as dispatch candidates.
+    (home / "models-available.json").write_text(json.dumps({
+        "refreshed_at": now,
+        "models": ["freeco/tiny-free", "acme/paid-one",
+                   "kilo/google/lyria-3-clip-preview", "acme/no-tools"]}))
+    (home / "models-dev.json").write_text(json.dumps({
+        "refreshed_at": now,
+        "providers": {
+            "freeco": {"models": {"tiny-free": meta}},
+            "acme": {"models": {"paid-one": meta,
+                                "no-tools": {**meta, "tool_call": False}}},
+            "kilo": {"models": {"google/lyria-3-clip-preview": meta}},
+        },
+    }))
+    (home / "models-health.json").write_text(json.dumps({
+        "freeco/tiny-free#low": {"ok": True, "reason": "", "cost": 0.0,
+                                 "checked_at": now},
+        "__prov__:acme": {"ok": False, "reason": "provider.auth: no key",
+                           "checked_at": now},
+    }))
+
+    assert cli(env, "models", "list") == 0
+    out = capsys.readouterr().out
+    assert "freeco/tiny-free" in out and "works" in out
+    assert "acme/paid-one" in out and "provider down" in out
+    assert "lyria" not in out and "no-tools" not in out  # never dispatchable
+
+    # --working drops what is known broken; the free filter is independent
+    assert cli(env, "models", "list", "--working") == 0
+    out = capsys.readouterr().out
+    assert "freeco/tiny-free" in out and "acme/paid-one" not in out
+    assert cli(env, "models", "list", "--free", "--working") == 0
+    assert "freeco/tiny-free" in capsys.readouterr().out
 
 
 def test_config_get_set_show(env, capsys):

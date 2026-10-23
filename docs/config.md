@@ -85,3 +85,35 @@ plan-wide verdict (`assess_many`) naming the irreversible subset. The classifier
 is read-only by design (it never acts): classifying an
 action is read-only, and without it the only thing a read-only agent can do
 about an unfamiliar command is ask the human.
+
+## Model routing (`models`)
+
+`models.routes` picks a tier and variant per worker role; `harness models`
+resolves it against what this install can actually reach.
+
+| key | default | meaning |
+| --- | --- | --- |
+| `prefer_free` | `true` | cheap work takes a free model first |
+| `pin_agents` | `true` | subagent files get `model:` at install time |
+| `fallback_to_verified` | `true` | a role whose tier has only failed probes is downgraded to a verified model, with a note saying so |
+| `health_ttl_s` | `1800` | how long a probe verdict is trusted |
+| `check_timeout_s` | `90` | per-probe timeout |
+| `check_candidates` | `3` | probes per round, at most one candidate per tier |
+| `routes` | tier + variant per role | the routing table |
+
+Commands (nothing spends a request unless it says so):
+
+- `harness models sync` — the ids `opencode models` prints plus cost/free/
+  variant metadata from models.dev, cached under `$HARNESS_HOME`.
+- `harness models list [--free] [--working] [--tier T] [--json]` — tier, price
+  and the last probe verdict (`works` / `FAILS` / `provider down` / `-`).
+- `harness models route [--roles R...] [--check] [--json]` — the dispatch table.
+  `--check` probes anything stale with a real one-line request and re-ranks;
+  exits 1 when a role has no working model.
+- `harness models check [--roles R...] [--dry-run]` — probe and record only.
+
+Health lives in `$HARNESS_HOME/models-health.json`. A provider-wide failure
+(quota, auth, no route) is recorded once per provider, so the next check skips
+its siblings instead of repeating the same 401. `harness/data/model-tiers.json`
+carries the curated patterns (tier, strengths, `free`) that work offline; cost
+fills the gap for models no pattern knows.

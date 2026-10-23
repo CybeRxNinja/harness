@@ -18,7 +18,7 @@
 // What it registers:
 //   1. skill seeding      ctx.skill.transform(editor => editor.add(skill))
 //   2. native tools       ctx.tool.transform(editor => editor.add(tool))
-//      skills_list / skill_view / memory_recall, plus todowrite / todoread —
+//      skills_list / skill_view / memory_recall / models_route, plus todowrite / todoread —
 //      the plan tools opencode 2.x no longer ships, backed by the harness todo
 //      space (the same `todos` table the sidebar panel reads) — plus `wait`,
 //      a visible countdown sleep backed by the `waits` table the sidebar reads.
@@ -157,6 +157,38 @@ function matchSkills(items: Rec[], query: string, limit = 3, minScore = 2): Rec[
   }
   scored.sort((a, b) => Number(b.score) - Number(a.score) || String(a.name ?? "").localeCompare(String(b.name ?? "")))
   return scored.slice(0, limit)
+}
+
+/**
+ * Format the per-role model table for the model: one line per worker, with the
+ * tier, price, health and fallback. Pure so the node tests can pin it.
+ */
+function routeLines(rows: Rec[]): string {
+  if (!Array.isArray(rows) || !rows.length) {
+    return "no routed roles — run `harness models sync`, then check models.routes in .opencode/harness/harness.jsonc"
+  }
+  const lines = rows.map((r: Rec) => {
+    if (!r.pin) return `- ${r.role}: NO MODEL (${r.note || "run harness models sync"})`
+    const price = r.free ? "free" : `$${Number(r.cost_out ?? 0)}/M out`
+    // `working` is the probe's verdict, not a guess: ok came from a real
+    // request through opencode, failed carries the provider's own reason.
+    const state =
+      r.health === "ok" ? "working" :
+      r.health === "failed" ? `NOT WORKING: ${r.reason || "probe failed"}` :
+      "unchecked"
+    const fb = r.fallback_pin ? `; fallback ${r.fallback_pin}` : ""
+    const note = r.note ? ` (${r.note})` : ""
+    return `- ${r.role}: ${r.pin} [${r.tier}, ${price}, ${state}${fb}]${note}`
+  })
+  const bad = rows.filter((r: Rec) => r.health === "failed").map((r: Rec) => r.role)
+  const unchecked = rows
+    .filter((r: Rec) => r.pin && (r.health === "unverified" || r.health === "stale"))
+    .map((r: Rec) => r.role)
+  const tail = [
+    bad.length ? `Do not dispatch: ${bad.join(", ")} — use the named fallback or report the role blocked.` : "",
+    unchecked.length ? `Unchecked: ${unchecked.join(", ")} — call models_route with these roles and check=true before dispatching.` : "",
+  ].filter(Boolean)
+  return ["Pass each pin as the `model` field of its subagent call.", ...lines, ...tail].join("\n")
 }
 
 /**
@@ -1961,6 +1993,58 @@ const HarnessPlugin = {
           execute: async (input: Rec) => ({
             content: (await recallFacts(String(input?.query ?? ""), directory)) || NO_FACTS,
           }),
+        })
+
+        add({
+          name: "models_route",
+          description:
+            "Which model#variant each worker role runs on: tier, free/paid, whether the last probe " +
+            "actually answered (working / NOT WORKING / unchecked) and a fallback. Call before every " +
+            "wave with the roles you are about to use — stale or unknown models are probed first with " +
+            "a real request — then pass the returned pin as the subagent `model` field. Never dispatch " +
+            "a role marked NOT WORKING; use its fallback or report the role blocked.",
+          input: {
+            type: "object",
+            properties: {
+              roles: {
+                type: "array",
+                items: { type: "string" },
+                description: "Worker roles to check (explore, quick, deep, code-reviewer, ...). Omit for all.",
+              },
+              check: {
+                type: "boolean",
+                description: "Probe stale/unknown models before answering (default true when roles are given).",
+              },
+            },
+            additionalProperties: false,
+          },
+          options: direct,
+          execute: async (input: Rec) => {
+            const roles = Array.isArray(input?.roles)
+              ? input.roles.map((r: any) => String(r)).filter(Boolean)
+              : []
+            // `--root` precedes the subcommand (a global flag on the parser).
+            const args = ["python3", "-m", "harness", "--root", directory,
+                          "models", "route", "--json"]
+            if (roles.length) {
+              args.push("--roles", ...roles)
+              if (input?.check !== false) args.push("--check")
+            }
+            const res = await run(args)
+            const text = res.text.trim()
+            if (!text) {
+              return {
+                content:
+                  "models_route unavailable: `python3 -m harness models route` returned nothing " +
+                  "(is harness installed for python3? agents still carry their pinned models)",
+              }
+            }
+            try {
+              return { content: routeLines(JSON.parse(text)) }
+            } catch {
+              return { content: text.slice(0, 4000) }
+            }
+          },
         })
 
         add({

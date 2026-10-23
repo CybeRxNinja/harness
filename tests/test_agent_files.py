@@ -1,6 +1,7 @@
 """Bundled agent markdown files: native ownership, risk policy rendering."""
 import json
 import re
+import time
 from pathlib import Path
 
 from harness.agents import (
@@ -17,7 +18,7 @@ from harness.agents import (
 def test_agent_files_are_native_markdown_and_namespaced(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     installed = install_managed_agents()
-    assert len(installed) == 12
+    assert len(installed) == 14
     assert all(p.name.startswith("harness-") for p in installed)
     assert (agents_dir() / "harness-orchestrator.md").exists()
     assert not (agents_dir() / "orchestrator.md").exists()
@@ -47,7 +48,7 @@ def test_agent_file_status_detects_stale_and_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     install_managed_agents()
     msg, ok = status()
-    assert ok and "12 harness agents" in msg
+    assert ok and "14 harness agents" in msg
 
     target = agents_dir() / "harness-orchestrator.md"
     target.write_text(target.read_text()[:-30])
@@ -68,13 +69,13 @@ def test_agent_file_status_detects_stale_and_missing(tmp_path, monkeypatch):
 
     uninstall_managed_agents()
     msg, ok = status()
-    assert not ok and "missing 12 harness agent file" in msg
+    assert not ok and "missing 14 harness agent file" in msg
 
 
 def test_agent_prompts_are_distinct_for_subagents():
     sub = {n: s for n, s in bundled_agents().items() if s.get("mode") == "subagent"}
-    want = {"explore", "librarian", "plan-consultant", "plan-reviewer",
-            "code-reviewer", "test-engineer", "security-auditor"}
+    want = {"explore", "quick", "deep", "librarian", "plan-consultant",
+            "plan-reviewer", "code-reviewer", "test-engineer", "security-auditor"}
     assert set(sub) == want
     prompts = [s["prompt"] for s in sub.values()]
     assert len(set(prompts)) == len(prompts)
@@ -85,8 +86,9 @@ def test_agent_prompts_are_distinct_for_subagents():
 
 def test_orchestrator_prompt_mentions_all_roles():
     orch = bundled_agents()["orchestrator"]["prompt"]
-    for role in ("explore", "librarian", "plan-consultant", "plan-reviewer",
-                 "code-reviewer", "test-engineer", "security-auditor"):
+    for role in ("explore", "quick", "deep", "librarian", "plan-consultant",
+                 "plan-reviewer", "code-reviewer", "test-engineer",
+                 "security-auditor"):
         assert role in orch, role
 
 
@@ -100,6 +102,37 @@ def test_bundled_json_has_no_model_pins_or_deprecated_tools():
         assert bash != "deny", name
 
 
+def test_subagents_get_the_routed_model_and_primaries_inherit(tmp_path, monkeypatch):
+    """Install-time pins: subagents carry the model route() chose for their role.
+
+    Primary agents must NOT be pinned — a primary's model is the session the
+    user selected, so a pin there would look like routing but never apply. The
+    description badge is what the orchestrator sees when picking a worker.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HARNESS_HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    now = int(time.time())
+    meta = {"cost": {"input": 0, "output": 0}, "limit": 128000,
+            "reasoning": True, "tool_call": True,
+            "reasoning_options": [{"type": "effort", "values": ["low", "high"]}]}
+    (home / "models-available.json").write_text(json.dumps(
+        {"refreshed_at": now, "models": ["freeco/tiny-free"]}))
+    (home / "models-dev.json").write_text(json.dumps({
+        "refreshed_at": now,
+        "providers": {"freeco": {"models": {"tiny-free": meta}}},
+    }))
+
+    files = expected_agent_files()
+    explore = files[agents_dir() / "harness-explore.md"]
+    assert 'model: "freeco/tiny-free#low"' in explore
+    assert "[cheap \u00b7 free]" in explore, "the tier/free badge must be readable"
+    assert "\\u00b7" not in explore
+    head = (files[agents_dir() / "harness-orchestrator.md"]).split("---", 2)[1]
+    assert "model:" not in head
+
+
 def test_agent_files_carry_the_v2_identity_colour(tmp_path, monkeypatch):
     """opencode v2's `color:` agent option is emitted for all 12 agents.
 
@@ -111,7 +144,7 @@ def test_agent_files_carry_the_v2_identity_colour(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     install_managed_agents()
     files = sorted(agents_dir().glob("harness-*.md"))
-    assert len(files) == 12
+    assert len(files) == 14
     for path in files:
         head = path.read_text().split("---", 2)[1]
         assert re.search(r'^color: "#[0-9a-f]{6}"$', head, re.M), f"{path.name} has no v2 colour"

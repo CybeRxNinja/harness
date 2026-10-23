@@ -1193,12 +1193,14 @@ def test_tui_workers_row_shows_the_rlm_pool():
     assert '(no workers in this project)' in tui
 
 
-def test_tui_todo_row_reads_the_harness_space_and_auto_expands():
+def test_tui_todo_row_reads_the_harness_space_without_auto_expanding():
     """The Todo row is backed by the HARNESS todo space — the table the server
     half's `todowrite` writes — not by opencode's `todo` table, which nothing
-    past 2.0.13 writes (the row was permanently empty). The row also opens
-    itself when the list appears or changes, and a manual collapse sticks until
-    the list changes again.
+    past 2.0.13 writes (the row was permanently empty).
+
+    It deliberately does NOT open itself: opencode ships its own todo UI, and
+    two expanded lists at once were the reported bug. The count is shown until
+    the user opens the row; only the waits countdown still auto-expands.
     """
     from harness.cli import _plugin_files
     tui = Path(_plugin_files()[1]).read_text()
@@ -1217,13 +1219,27 @@ def test_tui_todo_row_reads_the_harness_space_and_auto_expands():
     assert "out.todosFallback = !mine.length && rows.length > 0" in tui
     assert 'view.todosProject ? " · project" : ""' in tui
 
-    # auto-expand on a new/changed list, and only then (a manual collapse lasts)
-    assert "if (todoSig !== (d.todoSig ?? \"\")) {" in tui
-    assert "d.todoSig = todoSig" in tui
-    assert 'open.add("todo")' in tui
+    # no auto-expand: opencode's own todo row is the one that opens
+    assert 'open.add("todo")' not in tui
+    assert "if (todoSig !== (d.todoSig ?? \"\")) {" not in tui
+    # the waits countdown is not a duplicate plan, so it still opens itself
+    assert 'open.add("waits")' in tui
 
     # several rows may be open, so the footer reports how many
     assert "`${openCount()} expanded`" in tui
+
+
+def test_models_route_answers_with_working_free_and_the_dispatch_field():
+    """The tool the orchestrator gates a wave on must be explicit about the
+    three things the routing turns on: which pins work, which are free, and
+    which field carries the pin into the subagent call."""
+    from harness.cli import _plugin_files
+    text = Path(_plugin_files()[0]).read_text()
+    assert "Pass each pin as the `model` field of its subagent call." in text
+    assert "NOT WORKING" in text and "unchecked" in text
+    assert "whether the last probe" in text
+    # an unchecked role must be probed, not dispatched on faith
+    assert "call models_route with these roles and check=true" in text
 
 
 def test_tui_memory_row_digests_facts_by_kind():
@@ -1368,13 +1384,13 @@ def test_plugin_features(tmp_path):
     # not depend on the lost API still register, one bad editor.add does not
     # sink the other tools, and a drifted DB schema degrades to an answer.
     assert out["degradeNoSkillTransform"] is True
-    assert out["degradeNoSkillTransformTools"] == 6 and out["degradeNoSkillTransformHooks"] == 4
+    assert out["degradeNoSkillTransformTools"] == 8 and out["degradeNoSkillTransformHooks"] == 4
     assert out["degradeNoToolTransform"] is True
     assert out["degradeNoToolTransformSeeds"] >= 11 and out["degradeNoToolTransformHooks"] == 4
     assert out["degradeNoToolHook"] is True
-    assert out["degradeNoToolHookTools"] == 6 and out["degradeNoToolHookCondense"] is False
+    assert out["degradeNoToolHookTools"] == 8 and out["degradeNoToolHookCondense"] is False
     assert out["degradeNoSessionHook"] is True
-    assert out["degradeNoSessionHookTools"] == 6 and out["degradeNoSessionHookBrief"] is False
+    assert out["degradeNoSessionHookTools"] == 8 and out["degradeNoSessionHookBrief"] is False
     assert out["degradePartialAdd"] is True
     assert out["degradePartialAddTools"] == ["memory_recall", "skills_list", "todoread", "todowrite", "wait"]
     assert out["degradeNoList"] is True and out["degradeNoListSeeds"] >= 11
@@ -1395,14 +1411,18 @@ def test_plugin_setup_registers_through_ctx(tmp_path):
     assert out["id"] == "harness"
     assert out["returned"] is None, "setup must not return a hooks object"
     assert out["hooks"] == ["tool:execute.after", "session:compaction", "session:context", "tool:execute.before"]
-    assert [t["name"] for t in out["tools"]] == ["skills_list", "skill_view", "memory_recall", "todowrite", "todoread", "wait"]
+    assert [t["name"] for t in out["tools"]] == [
+        "skills_list", "skill_view", "memory_recall", "models_route",
+        "risk_check", "todowrite", "todoread", "wait"]
     for t in out["tools"]:
         assert t["input"] == "object" and t["execute"] == "function"
         # codemode:false == exposed as a direct tool (the v2 default hides it
         # in the Code Mode catalog, where calling it by name fails)
         assert t["direct"] is True, f"{t['name']} is not a direct tool"
     # every executor answers with a content string (the v2 tool result shape)
-    assert set(out["execs"]) == {"skills_list", "skill_view", "memory_recall", "todowrite", "todoread", "wait"}
+    assert set(out["execs"]) == {
+        "skills_list", "skill_view", "memory_recall", "models_route",
+        "risk_check", "todowrite", "todoread", "wait"}
     assert all(v == "string" for v in out["execs"].values()), out["execs"]
     # bundled seeds are registered in opencode's skill shape
     assert out["skills"], "no skills seeded"

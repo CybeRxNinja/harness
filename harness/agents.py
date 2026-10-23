@@ -71,11 +71,25 @@ def _render_perms(perm: dict | None) -> list[str]:
     return out or []
 
 
-def render_agent(name: str, spec: dict) -> str:
-    lines = ["---", f"description: {json.dumps(str(spec.get('description', '')))}"]
+def render_agent(name: str, spec: dict, model: str = "", badge: str = "") -> str:
+    """One agent as opencode markdown.
+
+    `model` is the routed `provider/model#variant` (empty = inherit the session
+    model). `badge` says the tier in the description — that text is what the
+    orchestrator sees when it chooses a worker, so it is where the cost/speed
+    difference has to be visible.
+    """
+    desc = str(spec.get("description", ""))
+    if badge:
+        desc = f"{desc} [{badge}]"
+    # ensure_ascii=False keeps the tier badge readable in the file (a `·`
+    # escaped to \u00b7 is noise in frontmatter the user opens by hand).
+    lines = ["---", f"description: {json.dumps(desc, ensure_ascii=False)}"]
     mode = spec.get("mode")
     if mode:
         lines.append(f"mode: {json.dumps(str(mode))}")
+    if model:
+        lines.append(f"model: {json.dumps(model)}")
     # opencode v2 agent option: a six-digit hex the UI uses to colour the
     # agent. Validated here so a bad palette entry is dropped, not installed
     # as an unusable frontmatter value.
@@ -91,18 +105,44 @@ def render_agent(name: str, spec: dict) -> str:
     return "\n".join(lines)
 
 
-def expected_agent_files() -> dict[Path, str]:
+def routed_agents(root: str | Path = ".") -> dict[str, dict]:
+    """role -> route row, for subagents whose model could be resolved.
+
+    Reads the cached model list only (`harness models sync` writes it); a
+    machine that never synced gets no pins, so agents keep inheriting the
+    session model instead of failing install on a network call.
+    """
+    try:
+        from .config import load_config
+        from .models import route
+        cfg, _ = load_config(root)
+        if not bool(((cfg.get("models") or {}).get("pin_agents", True))):
+            return {}
+        return {r["role"]: r for r in route(cfg) if r.get("pin")}
+    except Exception:
+        return {}
+
+
+def expected_agent_files(root: str | Path = ".") -> dict[Path, str]:
     out: dict[Path, str] = {}
+    routes = routed_agents(root)
     for name, spec in bundled_agents().items():
-        out[agents_dir() / f"{agent_id(name)}.md"] = render_agent(name, spec)
+        # Primary agents inherit the session's model: a pin there would look
+        # like routing but never apply to the session the user selected.
+        row = routes.get(name) if spec.get("mode") == "subagent" else None
+        badge = ""
+        if row:
+            badge = str(row.get("tier") or "") + (" · free" if row.get("free") else "")
+        out[agents_dir() / f"{agent_id(name)}.md"] = render_agent(
+            name, spec, model=str((row or {}).get("pin") or ""), badge=badge)
     return out
 
 
-def install_managed_agents() -> list[Path]:
+def install_managed_agents(root: str | Path = ".") -> list[Path]:
     installed: list[Path] = []
     target = agents_dir()
     target.mkdir(parents=True, exist_ok=True)
-    for path, content in expected_agent_files().items():
+    for path, content in expected_agent_files(root).items():
         existed = path.exists()
         if not existed or path.read_text(errors="replace") != content:
             path.write_text(content)
@@ -123,10 +163,10 @@ def uninstall_managed_agents() -> list[Path]:
     return removed
 
 
-def status() -> tuple[str, bool]:
-    expected = expected_agent_files()
+def status(root: str | Path = ".") -> tuple[str, bool]:
+    expected = expected_agent_files(root)
     if not expected:
-        return "12 harness agents unreadable from the package", False
+        return "harness agents unreadable from the package", False
     missing = [p.name for p in expected if not p.exists()]
     stale = [p.name for p in expected if p.exists() and p.read_text(errors="replace") != expected[p]]
     if missing:
