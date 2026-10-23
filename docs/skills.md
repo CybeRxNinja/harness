@@ -81,22 +81,40 @@ harness skills add agent-skills             # alias, owner/repo, URL, or a local
 harness skills add obra/superpowers --only code-review   # a few, not the pack
 harness skills add agent-skills --agents    # also import agents/*.md
 harness skills add scientific-skills --dry-run           # plan, write nothing
-harness skills update                       # re-fetch every imported pack, apply drift
+harness skills update                       # fetch each pack's current head, apply drift
+harness skills update --dry-run             # what would change, write nothing
+harness skills update --refresh             # re-clone instead of fetching in place
 ```
 
 Imported packs land in `<project>/.opencode/skills` (host-discovered) or
 `~/.config/opencode/skills` with `--global`, each skill carrying
 `.harness-source.json` (repo, ref, commit, licence, files). Untrusted text:
-only files are copied (never symlinks), credentials/binaries/oversized files
-are refused, and `skills update` touches nothing that has no provenance — a
-hand-written skill or an approved memory draft is left alone.
+only files are copied (never symlinks), credential-shaped files are refused
+(a literal key, not a doc whose example is `secret: process.env.X`),
+binaries/oversized files are refused, and `skills update` touches nothing that
+has no provenance — a hand-written skill or an approved memory draft is left
+alone. Two categories holding the same skill id are reported as a duplicate
+instead of the second silently replacing the first, and the import cap (40)
+says when a pack has more, so a partial import never reads as complete. An
+imported id that a bundled seed already uses installs, and the report says so:
+the project copy wins for this project, which is a choice worth seeing.
+
+`--only` filters while the pack is scanned, so it reaches a skill past the cap
+(a filter applied after the cap made everything past 40 unimportable).
 
 `--agents` imports the pack's other half: `agents/*.md` with name +
 description frontmatter land in `<project>/.opencode/agents` (opencode's
-agent discovery), tracked by one sidecar, `.harness-agents.json`, so
-`skills update` re-syncs prompts too. A file that differs from the pack is
-never overwritten by a bare re-run: it takes `--update` (refresh) or
-`--force` (adopt). `--only` filters skills; agents import whole or not at all.
+agent discovery), tracked per agent in `.harness-agents.json` (repo, ref,
+commit, path), so `skills update` re-syncs each prompt from the pack it came
+from — importing a second pack does not claim the first pack's agents. A file
+that differs from the pack is never overwritten by a bare re-run: it takes
+`--update` (refresh) or `--force` (adopt). `--only` filters skills; agents
+import whole or not at all.
+
+`skills update` asks upstream before diffing: the cached clone is fetched and
+reset to the remote head once per pack, then only real drift is written. A
+remote that cannot be reached leaves the install working on its cached copy
+and says so (`cached copy — upstream fetch failed`).
 
 ## Learning a skill from the work (`harness skills draft`)
 
@@ -113,6 +131,9 @@ evidence-backed lines, and stages as `skill-create` — the same queue lessons
 use. Approval writes to the host's project dir (it used to write harness'
 private overlay, where nothing could see it) plus its provenance, so
 `skills update` knows it came from memory and never looks for it upstream.
+Approval refuses to overwrite a skill that harness did not write (imported or
+hand-made): that would replace someone else's content and drop its provenance.
+Rename the draft, or delete the existing skill first.
 
 ## ponytail (MIT, attributed — see `harness/data/skills/NOTICE.md`)
 

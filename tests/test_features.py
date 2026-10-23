@@ -54,10 +54,13 @@ def test_ponytail_skills_ship_with_the_ladder_intact(root, cfg):
     from pathlib import Path
     from harness import skills as S
     S.ensure_seed_skills()
-    names = {s["name"] for s in S.scan(Path("."), cfg)}
+    # Scan the hermetic project, not the repo: `harness skills add` writes
+    # project skills into the cwd (that is the feature), and those would
+    # shadow the bundled seed these assertions are about.
+    names = {s["name"] for s in S.scan(root, cfg)}
     assert {"ponytail", "ponytail-review", "ponytail-audit"} <= names, sorted(names)
 
-    body = S.view(Path("."), cfg, "ponytail")
+    body = S.view(root, cfg, "ponytail")
     for rung in ("Does this need to exist", "Already in this codebase", "Stdlib does it",
                  "Native platform feature", "Already-installed dependency",
                  "Can it be one line", "Only then"):
@@ -70,19 +73,19 @@ def test_ponytail_skills_ship_with_the_ladder_intact(root, cfg):
 
     # both review skills must report the one metric and list, never apply
     for name, tag in (("ponytail-review", "delete:"), ("ponytail-audit", "stale:")):
-        text = S.view(Path("."), cfg, name)
+        text = S.view(root, cfg, name)
         assert "net: -" in text and tag in text, name
     # report-only, in each skill's own current wording: the cut is a later pass
-    review = S.view(Path("."), cfg, "ponytail-review")
+    review = S.view(root, cfg, "ponytail-review")
     assert "List, do not apply" in review and "separate pass" in review, review[-400:]
-    audit = S.view(Path("."), cfg, "ponytail-audit")
+    audit = S.view(root, cfg, "ponytail-audit")
     assert "Apply the cuts in a second pass" in audit, audit[-400:]
     assert "never delete and fix in the same step" in audit, audit[-400:]
 
     # the L0 index is one line per skill: descriptions ship flat (a folded
     # `description: >-` reads as the literal ">-" to any line-based parser) and
     # fit the 120-char cap scan() applies, tail intact.
-    shown = {s["name"]: s["description"] for s in S.scan(Path("."), cfg)}
+    shown = {s["name"]: s["description"] for s in S.scan(root, cfg)}
     for name in ("ponytail", "ponytail-review", "ponytail-audit"):
         md = next(Path("harness/data/skills").rglob(f"{name}/SKILL.md"))
         raw = next(l for l in md.read_text().splitlines()
@@ -98,14 +101,15 @@ def test_ponytail_skills_ship_with_the_ladder_intact(root, cfg):
 
 def test_skills_progressive(root, cfg):
     from harness import skills as S
-    from pathlib import Path as _P
     S.ensure_seed_skills()
-    names = [s["name"] for s in S.scan(_P("."), cfg)]
+    # Hermetic project: a local `skills add` install must not decide what the
+    # bundled-seed assertions see (it did, when this scanned the repo cwd).
+    names = [s["name"] for s in S.scan(root, cfg)]
     assert "using-agent-skills" in names
     assert "reverse-router" not in names  # disabled by default (opt-in sec pack)
     cfg2 = dict(cfg, skills={**cfg["skills"], "disabled": []})
-    assert "reverse-router" in [s["name"] for s in S.scan(_P("."), cfg2)]
-    body = S.view(_P("."), cfg, "using-agent-skills")
+    assert "reverse-router" in [s["name"] for s in S.scan(root, cfg2)]
+    body = S.view(root, cfg, "using-agent-skills")
     assert "When to Use" in body
 
 
@@ -236,13 +240,12 @@ def test_seeded_skill_references_are_reachable_via_view(root, cfg):
     useless if the file did not come with it, and `view` with a subpath is how
     a model actually reads it. Proves the whole-dir install end to end."""
     from harness import skills as S
-    from pathlib import Path as _P
     S.ensure_seed_skills()
     for name, ref in (("ui-ux-craft", "references/quick-reference.md"),
                       ("frontend-craft-floor", "references/craft-floor.md")):
-        body = S.view(_P("."), cfg, name)
+        body = S.view(root, cfg, name)
         assert ref in body, f"{name} documents {ref} but never names it"
-        text = S.view(_P("."), cfg, name, subpath=ref)
+        text = S.view(root, cfg, name, subpath=ref)
         assert len(text) > 500, f"{name}: {ref} did not install ({len(text)} chars)"
 
 

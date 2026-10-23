@@ -36,9 +36,12 @@ def test_skill_discovery_does_not_create_state_dir(tmp_path, monkeypatch):
 def test_skills_scan(tmp_path, monkeypatch):
     from harness import skills as S
     from harness.config import load_config
-    from pathlib import Path
     monkeypatch.setenv("HARNESS_HOME", str(tmp_path / "home"))
     assert "using-agent-skills" in S.ensure_seed_skills()
-    cfg, _ = load_config(Path("."))
-    names = [s["name"] for s in S.scan(Path("."), cfg)]
+    # A temp project, not cwd: `skills add` writes project skills into the
+    # repo, and a local install must not decide what this seed test sees.
+    root = tmp_path / "proj"
+    root.mkdir()
+    cfg, _ = load_config(root)
+    names = [s["name"] for s in S.scan(root, cfg)]
     assert "using-agent-skills" in names

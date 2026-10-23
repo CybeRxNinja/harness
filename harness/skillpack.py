@@ -32,9 +32,9 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .memory import is_secretish, normalize
+from .memory import is_secretish, memory_file, normalize
 from .paths import opencode_config_dir, state_file
-from .skills import _frontmatter
+from .skills import _frontmatter, seed_source
 
 SOURCE_FILE = ".harness-source.json"
 MAX_SKILLS = 40
@@ -176,11 +176,33 @@ def _git(args: list[str], cwd: Path | None = None) -> str:
     return r.stdout
 
 
-def fetch_pack(spec: str, cache_root: Path, refresh: bool = False, ref: str = "") -> dict:
-    """Resolve a spec to a local pack root; clones GitHub packs into the cache."""
+def _pull(dest: Path, ref: str = "") -> bool:
+    """Move a cached clone to the remote head. False when that is impossible.
+
+    A cached clone is a snapshot, not upstream. `skills update` used to diff
+    against the last clone, so a pack that moved on after the import reported
+    "unchanged" until `--refresh` re-cloned it. Fetching in place is the same
+    shallow clone, current.
+    """
+    try:
+        _git(["fetch", "--depth", "1", "origin", ref or "HEAD"], cwd=dest)
+        _git(["reset", "--hard", "FETCH_HEAD"], cwd=dest)
+        return True
+    except SkillPackError:
+        return False
+
+
+def fetch_pack(spec: str, cache_root: Path, refresh: bool = False, ref: str = "",
+               pull: bool = False) -> dict:
+    """Resolve a spec to a local pack root; clones GitHub packs into the cache.
+
+    `pull` asks the cached clone for upstream's current head (what an update
+    means); an unreachable remote is reported as `stale` instead of raising, so
+    an offline run still repairs drift it can see locally.
+    """
     src = parse_spec(spec, ref)
     if src["kind"] == "local":
-        return {**src, "root": src["path"], "commit": ""}
+        return {**src, "root": src["path"], "commit": "", "stale": False}
     dest = Path(cache_root) / f"{src['owner']}--{src['repo']}"
     if refresh and dest.exists():
         shutil.rmtree(dest)
@@ -191,12 +213,30 @@ def fetch_pack(spec: str, cache_root: Path, refresh: bool = False, ref: str = ""
             args += ["--branch", src["ref"]]
         args += [f"https://github.com/{src['owner']}/{src['repo']}.git", str(dest)]
         _git(args)
+    stale = False
+    if pull and not refresh and dest.exists():
+        stale = not _pull(dest, src["ref"])
     commit = ""
     try:
         commit = _git(["rev-parse", "HEAD"], cwd=dest).strip()
     except SkillPackError:
         commit = ""
-    return {**src, "root": str(dest), "commit": commit}
+    return {**src, "root": str(dest), "commit": commit, "stale": stale}
+
+
+def _resolve_pack(spec: str, ref: str, root: Path, *, refresh: bool = False,
+                  pull: bool = False) -> dict:
+    """Provenance spec -> pack root, or {error}. One rule for skills and agents."""
+    local = Path(spec).expanduser()
+    if local.is_dir():
+        return {"root": str(local.resolve()), "commit": "", "stale": False}
+    if "/" not in spec:
+        return {"error": f"{spec!r} is neither an owner/repo nor a local directory"}
+    try:
+        return fetch_pack(f"{spec}@{ref}" if ref else spec,
+                          state_file(root, "skill-cache"), refresh=refresh, pull=pull)
+    except SkillPackError as e:
+        return {"error": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -208,27 +248,76 @@ def _skill_id(name: str) -> str:
     return out[:64]
 
 
-def discover(root: str | Path, subpath: str = "") -> list[Path]:
-    """Every SKILL.md under `subpath` (or the pack root), bounded and filtered."""
+MAX_SCANNED = 2_000
+
+
+def _pack_base(root: str | Path, subpath: str) -> Path:
+    """The directory a pack's skills are scanned from, confined to the pack."""
     base = Path(root).resolve()
-    if subpath:
-        target = (base / subpath).resolve()
-        if target != base and base not in target.parents:
-            raise SkillPackError(f"path escapes the pack: {subpath}")
-        if not target.is_dir():
-            raise SkillPackError(f"no such directory in the pack: {subpath}")
-        base = target
+    if not subpath:
+        return base
+    target = (base / subpath).resolve()
+    # `..` in a --path must not walk out of the checkout.
+    if target != base and base not in target.parents:
+        raise SkillPackError(f"path escapes the pack: {subpath}")
+    if not target.is_dir():
+        raise SkillPackError(f"no such directory in the pack: {subpath}")
+    return target
+
+
+def discover(root: str | Path, subpath: str = "",
+             wanted: set[str] | None = None) -> tuple[list[Path], bool]:
+    """SKILL.md paths under `subpath` (or the pack root), confined and bounded.
+
+    Returns (paths, truncated). The cap applies to the KEPT list and the scan
+    itself is bounded, so `--only skill-44` can reach skill 44 of a large pack
+    — filtering after the cap made everything past MAX_SKILLS unimportable.
+    """
+    base = _pack_base(root, subpath)
+    eligible = (
+        md for md in sorted(base.rglob("SKILL.md"))
+        if not any(part.startswith(".") or part in EXCLUDED
+                   for part in md.relative_to(base).parts)
+        and len(md.relative_to(base).parts) <= MAX_DEPTH
+    )
     found: list[Path] = []
-    for md in sorted(base.rglob("SKILL.md")):
-        rel = md.relative_to(base)
-        if any(part.startswith(".") or part in EXCLUDED for part in rel.parts):
-            continue
-        if len(rel.parts) > MAX_DEPTH:
+    scanned = 0
+    truncated = False
+    for md in eligible:
+        scanned += 1
+        if scanned > MAX_SCANNED:
+            truncated = True
+            break
+        if wanted is not None and _skill_id(md.parent.name).lower() not in wanted:
             continue
         found.append(md)
         if len(found) >= MAX_SKILLS:
+            # Only claim "left behind" when something actually was.
+            truncated = wanted is None and next(eligible, None) is not None
             break
-    return found
+    return found, truncated
+
+
+def _seed_ids() -> set[str]:
+    """Ids of the bundled seed skills, for the shadow notice."""
+    root = seed_source()
+    return {_skill_id(p.parent.name) for p in root.rglob("SKILL.md")} if root else set()
+
+
+def _available_ids(root: str | Path, subpath: str, limit: int = 20) -> list[str]:
+    """Ids in a pack, for the "--only matched nothing" message. No file reads."""
+    base = _pack_base(root, subpath)
+    ids: set[str] = set()
+    for n, md in enumerate(base.rglob("SKILL.md")):
+        if n >= MAX_SCANNED:
+            break
+        rel = md.relative_to(base)
+        if any(part.startswith(".") or part in EXCLUDED for part in rel.parts):
+            continue
+        i = _skill_id(md.parent.name)
+        if i:
+            ids.add(i)
+    return sorted(ids)[:limit]
 
 
 def _skill_files(skill_dir: Path) -> list[tuple[Path, str]]:
@@ -333,14 +422,18 @@ def install_pack(spec: str, root: str | Path, *, path: str = "", ref: str = "",
             path = entry["path"]
     fetched = fetch_pack(spec, state_file(root, "skill-cache"), refresh=refresh, ref=ref)
     subpath = path or fetched.get("subpath") or ""
-    found = discover(fetched["root"], subpath)
+    wanted = [w.strip().lower() for w in str(only or "").split(",") if w.strip()]
+    # Filter while walking: `--only` is how a big pack is imported, and a cap
+    # applied before the filter made every skill past MAX_SKILLS unreachable.
+    found, truncated = discover(fetched["root"], subpath, wanted=set(wanted) or None)
     if not found:
         raise SkillPackError(
             f"no SKILL.md found in {fetched['repo']}"
             + (f" under {subpath}" if subpath else "")
-            + " — pass --path <subdir> if the pack nests its skills"
+            + (f" matching --only {', '.join(wanted)}"
+               f" (available: {', '.join(_available_ids(fetched['root'], subpath))})"
+               if wanted else " — pass --path <subdir> if the pack nests its skills")
         )
-    wanted = [w.strip().lower() for w in str(only or "").split(",") if w.strip()]
     target = _target_root(root, global_)
     src_id = _source_id(fetched)
     report = {
@@ -349,15 +442,28 @@ def install_pack(spec: str, root: str | Path, *, path: str = "", ref: str = "",
                    "license": (entry or {}).get("license", "")},
         "target": str(target),
         "dry_run": bool(dry_run),
+        "truncated": truncated,
         "skills": [],
     }
     matched = 0
+    seen: dict[str, str] = {}
     for md in found:
+        sid = _skill_id(md.parent.name)
+        # Two categories may each hold `<id>/SKILL.md`; both would install under
+        # one id, the second silently replacing the first. First wins, and the
+        # loser is reported instead of vanishing.
+        if sid in seen:
+            if not wanted or sid in wanted:
+                report["skills"].append({
+                    "id": sid, "action": "skipped",
+                    "reason": f"duplicate id {sid!r}: already imported from {seen[sid]}"})
+            continue
         info = read_skill(md)
-        sid = info["id"]
+        sid = info.get("id") or sid
         if wanted and sid not in wanted and str(info.get("name", "")).lower() not in wanted:
             continue
         matched += 1
+        seen[sid] = str(md.parent.relative_to(Path(fetched["root"]).resolve()))
         if info.get("skip"):
             report["skills"].append({"id": sid, "action": "skipped", "reason": info["skip"]})
             continue
@@ -367,19 +473,21 @@ def install_pack(spec: str, root: str | Path, *, path: str = "", ref: str = "",
             report["skills"].append({"id": sid, "name": info["name"], "description": info["description"],
                                      "action": "exists", "reason": "use --update to refresh it"})
             continue
-        changed = True
+        changed = False
         if not dry_run:
             dest.mkdir(parents=True, exist_ok=True)
-            changed = False
-            for _path, rel, data in info["files"]:
-                out = dest / rel
-                if out.exists() and out.read_bytes() == data:
-                    continue
+        for _path, rel, data in info["files"]:
+            out = dest / rel
+            if out.exists() and out.read_bytes() == data:
+                continue
+            changed = True
+            if not dry_run:
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(data)
-                changed = True
         if dry_run:
-            action = "would update" if exists else "would install"
+            # "would update" for an identical skill is a lie about the plan.
+            action = (("would update" if exists else "would install") if changed
+                      else "unchanged")
         elif not exists:
             action = "installed"
         else:
@@ -398,12 +506,14 @@ def install_pack(spec: str, root: str | Path, *, path: str = "", ref: str = "",
         report["skills"].append({"id": sid, "name": info["name"], "description": info["description"],
                                  "action": action})
     if wanted and not matched:
-        ids = sorted({read_skill(md).get("id", "") for md in found} - {""})
-        raise SkillPackError(f"--only matched nothing in this pack (available: {', '.join(ids[:20])})")
-    report["installed"] = sum(
-        1 for s in report["skills"]
-        if s["action"] in ("installed", "updated", "would install", "would update")
-    )
+        raise SkillPackError(f"--only matched nothing in this pack (available: {', '.join(_available_ids(fetched['root'], subpath))})")
+    written = {s["id"] for s in report["skills"]
+               if s["action"] in ("installed", "updated", "would install", "would update")}
+    report["installed"] = len(written)
+    # A project skill outranks the bundled seed of the same id in scan(), so the
+    # model sees the pack's version. That is a legitimate choice, but not a
+    # silent one: the pack ships ids the seeds already use.
+    report["shadows"] = sorted(written & _seed_ids())
     return report
 
 
@@ -436,12 +546,12 @@ def _read_agent(md: Path) -> dict:
     description = " ".join(str(fm.get("description") or "").split())
     if not description:
         return {"skip": "no description in frontmatter (the host would not advertise it)"}
+    if md.is_symlink():
+        return {"skip": "symlink"}  # before reading: never follow one out of the pack
     try:
         data = md.read_bytes()
     except OSError as e:
         return {"skip": f"unreadable: {e}"}
-    if md.is_symlink():
-        return {"skip": "symlink"}
     if len(data) > AGENT_MAX_BYTES:
         return {"skip": f"{len(data)} bytes (cap {AGENT_MAX_BYTES})"}
     if b"\x00" in data[:4096]:
@@ -449,6 +559,43 @@ def _read_agent(md: Path) -> dict:
     if is_secretish(data.decode("utf-8", "replace")):
         return {"skip": "looks like it contains a credential"}
     return {"id": aid, "data": data}
+
+
+def _read_agent_prov(sidecar: Path) -> dict[str, dict]:
+    """id -> {repo, ref, commit, path}, upgrading the first flat shape.
+
+    Shape 1 stored one repo for the whole directory plus `{id: path}`, so a
+    second pack's import took over the first pack's agents. Reading it here (and
+    rewriting it on the next sync) keeps an existing install upgradable.
+    """
+    try:
+        data = json.loads(sidecar.read_text())
+    except Exception:
+        return {}
+    rows = data.get("agents") if isinstance(data, dict) else None
+    if not isinstance(rows, dict):
+        return {}
+    base = {"repo": str(data.get("repo") or ""), "ref": str(data.get("ref") or ""),
+            "commit": str(data.get("commit") or "")}
+    out: dict[str, dict] = {}
+    for aid, val in rows.items():
+        if isinstance(val, dict):
+            out[str(aid)] = {"repo": str(val.get("repo") or base["repo"]),
+                             "ref": str(val.get("ref") or ""),
+                             "commit": str(val.get("commit") or ""),
+                             "path": str(val.get("path") or "")}
+        elif isinstance(val, str) and val:
+            out[str(aid)] = {**base, "path": val}
+    return out
+
+
+def _sidecar_is_flat(sidecar: Path) -> bool:
+    """True for shape 1, which the next sync rewrites in the per-agent shape."""
+    try:
+        rows = json.loads(sidecar.read_text()).get("agents") or {}
+    except Exception:
+        return False
+    return any(isinstance(v, str) for v in rows.values())
 
 
 def install_agents(spec: str, root: str | Path, *, path: str = "agents", ref: str = "",
@@ -474,19 +621,16 @@ def install_agents(spec: str, root: str | Path, *, path: str = "agents", ref: st
     wanted = {w.strip().lower() for w in str(only or "").split(",") if w.strip()}
     target = agents_root(root, global_)
     sidecar = target / AGENTS_FILE
-    existing: dict = {}
-    if sidecar.is_file():
-        try:
-            existing = {k: v for k, v in json.loads(sidecar.read_text()).get("agents", {}).items()}
-        except Exception:
-            existing = {}
+    existing = _read_agent_prov(sidecar)
+    legacy = _sidecar_is_flat(sidecar)
     report = {
         "source": {"repo": _source_id(fetched), "ref": fetched.get("ref", ""),
                    "commit": fetched.get("commit", ""), "path": str(path or "agents")},
         "target": str(target), "dry_run": bool(dry_run), "agents": [],
     }
     matched = 0
-    prov = dict(existing)
+    prov: dict[str, dict] = dict(existing)
+    src_id = _source_id(fetched)
     for md in sorted(base.glob("*.md")):
         info = _read_agent(md)
         aid = info.get("id", _skill_id(md.stem))
@@ -513,19 +657,23 @@ def install_agents(spec: str, root: str | Path, *, path: str = "agents", ref: st
         if not dry_run and changed:
             target.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(data)
-        action = ("would install" if not exists else "would update") if dry_run else (
-            "installed" if not exists else ("updated" if changed else "unchanged"))
+        action = (("would install" if not exists else
+                   ("would update" if changed else "unchanged")) if dry_run else
+                  ("installed" if not exists else ("updated" if changed else "unchanged")))
         if changed or not exists:
-            prov[aid] = str(md.relative_to(Path(str(fetched["root"])).resolve()))
+            # Per-agent provenance: one repo for the whole directory meant a
+            # second pack's import claimed the first pack's agents, so
+            # `skills update` then looked for them in the wrong repo.
+            prov[aid] = {"repo": src_id, "ref": str(fetched.get("ref") or ""),
+                         "commit": str(fetched.get("commit") or ""),
+                         "path": str(md.relative_to(Path(str(fetched["root"])).resolve()))}
         report["agents"].append({"id": aid, "action": action})
     if wanted and not matched:
         raise SkillPackError(f"--only matched no agents in {fetched.get('repo') or spec}")
-    if not dry_run and any(a["action"] in ("installed", "updated") for a in report["agents"]):
+    wrote = any(a["action"] in ("installed", "updated") for a in report["agents"])
+    if not dry_run and prov and (wrote or legacy):
         target.mkdir(parents=True, exist_ok=True)
         sidecar.write_text(json.dumps({
-            "repo": _source_id(fetched),
-            "ref": str(fetched.get("ref") or ""),
-            "commit": str(fetched.get("commit") or ""),
             "installed_at": int(time.time()),
             "agents": prov,
         }, indent=2) + "\n")
@@ -537,7 +685,7 @@ def install_agents(spec: str, root: str | Path, *, path: str = "agents", ref: st
 
 def update_agents(root: str | Path, *, global_: bool = False, dry_run: bool = False,
                   refresh: bool = False, packs: dict | None = None) -> dict:
-    """Re-sync imported agents from their pack, the way update_installed does."""
+    """Re-sync imported agents from the pack each one came from."""
     root = Path(root).resolve()
     target = agents_root(root, global_)
     sidecar = target / AGENTS_FILE
@@ -545,14 +693,13 @@ def update_agents(root: str | Path, *, global_: bool = False, dry_run: bool = Fa
                     "skipped": 0, "failed": 0}
     if not sidecar.is_file():
         return report
-    try:
-        data = json.loads(sidecar.read_text())
-        agents_map = {str(k): str(v) for k, v in (data.get("agents") or {}).items()}
-    except Exception as e:
+    prov = _read_agent_prov(sidecar)
+    legacy = _sidecar_is_flat(sidecar)
+    if not prov:
         report["failed"] = 1
-        report["agents"].append({"id": AGENTS_FILE, "action": "failed", "reason": str(e)[:120]})
+        report["agents"].append({"id": AGENTS_FILE, "action": "failed",
+                                 "reason": "no usable agent provenance — re-import the pack"})
         return report
-    spec, ref = str(data.get("repo") or ""), str(data.get("ref") or "")
 
     def note(aid: str, action: str, reason: str = "") -> None:
         report["agents"].append({"id": aid, "action": action, "reason": reason, "kind": "agent"})
@@ -562,28 +709,19 @@ def update_agents(root: str | Path, *, global_: bool = False, dry_run: bool = Fa
             report[bucket] += 1
 
     cache = packs if packs is not None else {}
-    pack = cache.get((spec, ref))
-    if pack is None and spec:
-        local = Path(spec).expanduser()
-        if local.is_dir():
-            pack = {"root": str(local.resolve()), "commit": ""}
-        elif "/" in spec:
-            try:
-                pack = fetch_pack(f"{spec}@{ref}" if ref else spec,
-                                  state_file(root, "skill-cache"), refresh=refresh)
-            except SkillPackError as e:
-                pack = {"error": str(e)}
-        else:
-            pack = {"error": f"{spec!r} is neither an owner/repo nor a local directory"}
-        cache[(spec, ref)] = pack
-    if pack is None:
-        pack = {"error": "no provenance for the agents directory"}
-    if pack.get("error"):
-        for aid in agents_map:
-            note(aid, "failed", str(pack["error"])[:120])
-        return report
     changed = False
-    for aid, rel in sorted(agents_map.items()):
+    for aid, meta in sorted(prov.items()):
+        spec, ref, rel = meta.get("repo", ""), meta.get("ref", ""), meta.get("path", "")
+        if not spec or not rel:
+            note(aid, "failed", "no usable provenance — re-import the agent to track its source")
+            continue
+        key = (spec, ref)
+        if key not in cache:
+            cache[key] = _resolve_pack(spec, ref, root, refresh=refresh, pull=not refresh)
+        pack = cache[key]
+        if pack.get("error"):
+            note(aid, "failed", str(pack["error"])[:120])
+            continue
         upstream = Path(str(pack["root"])) / rel
         dest = target / f"{aid}.md"
         if not upstream.is_file():
@@ -591,16 +729,17 @@ def update_agents(root: str | Path, *, global_: bool = False, dry_run: bool = Fa
             continue
         blob = upstream.read_bytes()
         if dest.exists() and dest.read_bytes() == blob:
-            note(aid, "unchanged")
+            note(aid, "unchanged",
+                 "cached copy — upstream fetch failed (offline?)" if pack.get("stale") else "")
             continue
         if not dry_run:
             dest.write_bytes(blob)
-            changed = True
+        prov[aid] = {**meta, "commit": str(pack.get("commit") or meta.get("commit") or "")}
+        changed = True
         note(aid, "would update" if dry_run else "updated")
-    if changed and not dry_run:
-        data["commit"] = str(pack.get("commit") or "")
-        data["installed_at"] = int(time.time())
-        sidecar.write_text(json.dumps(data, indent=2) + "\n")
+    if not dry_run and prov and (changed or legacy):
+        sidecar.write_text(json.dumps({"installed_at": int(time.time()),
+                                       "agents": prov}, indent=2) + "\n")
     return report
 
 
@@ -667,17 +806,9 @@ def update_installed(root: str | Path, *, global_: bool = False,
             continue
         key = (spec, ref)
         if key not in packs:
-            local = Path(spec).expanduser()
-            if "/" not in spec and not local.is_dir():
-                packs[key] = {"error": f"{spec!r} is neither an owner/repo nor a local directory"}
-            elif local.is_dir():
-                packs[key] = {"root": str(local.resolve()), "commit": ""}
-            else:
-                try:
-                    packs[key] = fetch_pack(f"{spec}@{ref}" if ref else spec,
-                                            state_file(root, "skill-cache"), refresh=refresh)
-                except SkillPackError as e:
-                    packs[key] = {"error": str(e)}
+            # `update` means "ask upstream", not "read whatever we cloned last
+            # time": the cached clone is moved to the remote head first.
+            packs[key] = _resolve_pack(spec, ref, root, refresh=refresh, pull=not refresh)
         pack = packs[key]
         if pack.get("error"):
             note("failed", str(pack["error"]))
@@ -697,7 +828,8 @@ def update_installed(root: str | Path, *, global_: bool = False,
         removed = [r for r in (str(f) for f in (row.get("files") or []))
                    if r not in new_files and (dest / r).is_file()]
         if not changed and not removed:
-            note("unchanged")
+            note("unchanged",
+                 "cached copy — upstream fetch failed (offline?)" if pack.get("stale") else "")
             continue
         if not dry_run:
             for _p, rel_path, data in info["files"]:
@@ -756,9 +888,8 @@ def _skill_name(name: str) -> str:
 
 
 def _lesson_lines(root: Path) -> list[str]:
-    path = Path(root) / ".opencode" / "harness" / "MEMORY.md"
     try:
-        text = path.read_text(errors="replace")
+        text = memory_file(root).read_text(errors="replace")
     except Exception:
         return []
     out: list[str] = []

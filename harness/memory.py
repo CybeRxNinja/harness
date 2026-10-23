@@ -61,10 +61,21 @@ OUTCOME_RE = re.compile(
     r"\b(passed|failing|failed|regression|tests? (pass|fail)|reproduced|timeout"
     r"|permission denied|not found|traceback|done\b|fixed\b|verified\b|success\b)", re.I)
 
+_GENERIC_SECRET = re.compile(
+    r"\b(api[_-]?key|password|passwd|secret|token)\b\s*[:=]\s*(?P<val>\S{8,})", re.I)
+# `secret: process.env.SESSION_SECRET` is code that READS a credential, not a
+# credential. Treating it as one made the security skill of a pack unimportable
+# ("looks like it contains a credential") and would refuse a safe memory line.
+_PLACEHOLDER_VALUE = re.compile(
+    r"^(?:process\.env|os\.(?:environ|getenv)|env(?:iron)?\[|\$\{?[A-Za-z_]|<[^<>]{1,}>"
+    r"|your[_-]|xxx+|\*{3,}|\.{3,}|redacted|changeme|placeholder|example)",
+    re.I,
+)
+
 # Never remember anything that looks like a credential.
 SECRET_RES = (
     re.compile(r"\b(sk|xoxb|ghp|gho|aiza|AKIA)[-_A-Za-z0-9]{12,}"),
-    re.compile(r"\b(api[_-]?key|password|passwd|secret|token)\b\s*[:=]\s*\S{8,}", re.I),
+    _GENERIC_SECRET,
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}"),  # JWT
 )
@@ -83,7 +94,19 @@ def normalize(text: str) -> str:
 
 
 def is_secretish(text: str) -> bool:
-    return any(r.search(text or "") for r in SECRET_RES)
+    """True when `text` contains a literal credential.
+
+    The generic `name = value` rule skips values that point at the environment
+    or are obvious placeholders, so a doc whose example is
+    `secret: process.env.SESSION_SECRET` documents safe practice instead of
+    being refused as a leak. Everything with a credential-shaped literal is
+    still caught.
+    """
+    t = text or ""
+    if any(r.search(t) for r in SECRET_RES if r is not _GENERIC_SECRET):
+        return True
+    return any(not _PLACEHOLDER_VALUE.match(m.group("val"))
+               for m in _GENERIC_SECRET.finditer(t))
 
 
 def memory_file(root: str | Path) -> Path:

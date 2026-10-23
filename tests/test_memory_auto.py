@@ -165,6 +165,23 @@ def test_save_fact_dedupes_and_refuses_secrets(con):
         assert M.save_fact(con, secret, "turn") == 0
 
 
+def test_a_reference_to_a_secret_is_not_itself_a_secret():
+    """Docs and security skills are full of `secret: process.env.X`; refusing
+    those made the most relevant pack skill unimportable."""
+    from harness import memory as M
+    for safe in ("secret: process.env.SESSION_SECRET",
+                 "const API_KEY = process.env.STRIPE_API_KEY;",
+                 "password: os.getenv('DB_PASSWORD')",
+                 "token: ${GITHUB_TOKEN}",
+                 "password: <your-password>",
+                 "api_key = changeme"):
+        assert not M.is_secretish(safe), safe
+    for leak in ("secret: hunter2hunter2",
+                 "api_key = abcdefgh12345678",
+                 "password: correcthorsebattery"):
+        assert M.is_secretish(leak), leak
+
+
 def test_facts_are_capped(con):
     from harness import memory as M
     for i in range(12):

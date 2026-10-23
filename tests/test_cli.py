@@ -77,6 +77,16 @@ def test_skills_sources_and_match(env, capsys):
     assert first.startswith("test-driven-development"), first
 
 
+def test_skills_add_reports_a_bundled_id_it_shadows(env, capsys):
+    """A project skill outranks the bundled seed of the same id; saying so is
+    the difference between a choice and a surprise."""
+    skill = env / "pack" / "skills" / "ponytail" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: ponytail\ndescription: pack copy of the ladder\n---\nbody\n")
+    assert cli(env, "skills", "add", str(env / "pack")) == 0
+    assert "replaces the bundled ponytail" in capsys.readouterr().out
+
+
 def test_skills_add_installs_into_the_host_directory(env, capsys):
     """Placement is the point: the host advertises what it can discover."""
     skill = env / "pack" / "skills" / "alpha"
@@ -186,6 +196,46 @@ def test_skills_approve_writes_a_staged_skill_file(env, capsys):
     assert cli(env, "skills", "reject", "--ids", "all") == 0
     assert "rejected" in capsys.readouterr().out
     assert not (env / ".opencode" / "skills" / "other-skill").exists()
+
+
+def test_approve_refuses_to_overwrite_an_imported_skill(env, capsys):
+    """Approving a draft whose id already belongs to a pack skill would replace
+    someone else's content AND its provenance (so `skills update` loses it)."""
+    skill = env / "pack" / "skills" / "code-review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: code-review\ndescription: Reviews code\n---\nUPSTREAM BODY\n")
+    assert cli(env, "skills", "add", str(env / "pack")) == 0
+    capsys.readouterr()
+
+    from harness.store import connect
+    con = connect(env)
+    try:
+        con.execute("INSERT INTO pending(kind,name,diff,gist,ts) VALUES(?,?,?,?,0)",
+                    ("skill-create", "code-review", "---\nname: code-review\n---\nDRAFT BODY", "gist"))
+        con.commit()
+        pid = con.execute("SELECT id FROM pending").fetchone()[0]
+    finally:
+        con.close()
+
+    assert cli(env, "skills", "approve", "--ids", str(pid)) == 1
+    out = capsys.readouterr().out
+    assert "refusing" in out and str(env / "pack") in json.loads(
+        (env / ".opencode/skills/code-review/.harness-source.json").read_text())["repo"]
+    written = env / ".opencode" / "skills" / "code-review" / "SKILL.md"
+    assert "UPSTREAM BODY" in written.read_text(), "the imported skill is intact"
+    assert "DRAFT BODY" not in written.read_text()
+    # still pending, so the decision is not lost
+    con = connect(env)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM pending WHERE id=?", (pid,)).fetchone()[0] == 1
+    finally:
+        con.close()
+
+    # a memory-authored skill is the draft's own: re-approving is allowed
+    (env / ".opencode" / "skills" / "code-review" / ".harness-source.json").write_text(
+        json.dumps({"repo": "harness-memory", "files": ["SKILL.md"]}))
+    assert cli(env, "skills", "approve", "--ids", str(pid)) == 0
+    assert "DRAFT BODY" in written.read_text()
 
 
 def test_memory_save_search_and_refine(env, capsys):

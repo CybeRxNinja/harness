@@ -38,6 +38,7 @@ def cmd_skills(args) -> int:
     from . import skills as S
     root = _root(args)
     cfg, _ = load_config(root)
+    rc = 0
     if args.skills_action == "sources":
         from .skillpack import sources
         rows = sources(args.search)
@@ -81,6 +82,11 @@ def cmd_skills(args) -> int:
             for s in rep["skills"]:
                 detail = s.get("reason") or s.get("description", "")
                 print(f"  {s['action']:13s} {s['id']:32s} {detail[:70]}")
+            if rep.get("truncated"):
+                print("  (the pack has more skills than one import: pass --only id1,id2 for the rest)")
+            if rep.get("shadows"):
+                print(f"  (replaces the bundled {', '.join(rep['shadows'])} — "
+                      "the imported version wins for this project)")
             verb = "would be available" if rep["dry_run"] else "available on the next turn"
             print(f"{rep['installed']} skill(s) {verb} — opencode advertises them from .opencode/skills")
         if arep is not None:
@@ -99,7 +105,9 @@ def cmd_skills(args) -> int:
         verb = "checked" if rep["dry_run"] else "updated"
         print(f"{verb} → {rep['target']}")
         for s in rep["skills"]:
-            if s["action"] == "unchanged":
+            # unchanged rows are noise, except when they carry a caveat: a
+            # cached copy because the upstream fetch failed is worth saying.
+            if s["action"] == "unchanged" and not s.get("reason"):
                 continue
             print(f"  {s['action']:13s} {s['id']:32s} {s.get('reason', '')[:70]}")
         print(f"{rep['updated']} changed, {rep['unchanged']} unchanged, "
@@ -156,6 +164,24 @@ def cmd_skills(args) -> int:
                     # the TUI's Skills row opens.
                     from .skillpack import SOURCE_FILE, install_root
                     base = install_root(root) / row[1]
+                    prov_file = base / SOURCE_FILE
+                    owner = ""
+                    if prov_file.is_file():
+                        try:
+                            owner = str(json.loads(prov_file.read_text()).get("repo") or "")
+                        except Exception:
+                            owner = ""
+                    if base.exists() and not owner.startswith("harness-memory"):
+                        # Approving a same-named draft over an imported (or
+                        # hand-written) skill would replace someone else's
+                        # content and its provenance — and `skills update`
+                        # would then have no source to sync from.
+                        why = (f"is imported from {owner}" if owner else
+                               "already exists and was not written by harness")
+                        print(f"refusing {pid}: {row[1]!r} {why} — rename the draft, "
+                              "or delete that skill first")
+                        rc = 1
+                        continue
                     if row[0] == "skill-create":
                         base.mkdir(parents=True, exist_ok=True)
                         (base / "SKILL.md").write_text(row[2])
@@ -183,7 +209,7 @@ def cmd_skills(args) -> int:
                 con.commit()
                 print(f"rejected {pid}")
     con.close()
-    return 0
+    return rc
 
 
 def cmd_memory(args) -> int:
