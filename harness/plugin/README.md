@@ -42,8 +42,9 @@ v2. Everything is registered through `ctx`:
 | output condensing | `ctx.tool.hook("execute.after", fn)` |
 | compaction brief | `ctx.session.hook("compaction", fn)` → append to `event.system` |
 
-Registered tools: `skills_list`, `skill_view`, `memory_recall`, `todowrite`,
-`todoread`, `wait`. `todowrite`/`todoread` are the plan tools opencode 2.x dropped; they persist
+Registered tools: `skills_list`, `skill_view`, `memory_recall`, `models_status`,
+`models_route`, `panel_route`, `council`, `risk_check`, `secret_exec`,
+`todowrite`, `todoread`, `wait`. `todowrite`/`todoread` are the plan tools opencode 2.x dropped; they persist
 into the harness todo space (`<project>/.opencode/harness/sessions.db` → `todos`,
 keyed by the opencode session id), which is also what the sidebar's Todo row and
 the compaction brief read — and every `todowrite` is **mirrored into opencode's
@@ -69,6 +70,59 @@ Agent definitions are installed as native `harness-*` Markdown files under
 At activation, the server plugin sets the runtime default agent
 (`ctx.agent.transform(editor => editor.default(...))`); every agent carries no
 model pins: they inherit your opencode default model.
+
+## Model council (`council`)
+
+A topic-scoped roster of 2-4 **distinct upstreams**. Each seat carries the
+model's tier, strengths, release date, context, health and win/loss record.
+The orchestrator spawns each seat with its pin for an independent answer,
+anonymizes the answers, then records one attributed vote per seat:
+
+```
+council({ topic: "auth-plan" })
+council({ topic: "auth-plan", votes: ["panel-lead>panel-peer=win",
+                                      "panel-peer>panel-lead=loss"] })
+council({ topic: "auth-plan", roles: ["panel-skeptic", "panel-edge"] })
+```
+
+The tool refuses a seat's vote on its own answer and any voter that is not a
+seat. A seat that loses twice in a row is retired for that topic; two seats
+that award each other a win in two rounds are a collusion bloc, and the lower
+scorer is retired the same way. Either retirement seats a different model on a
+different upstream; retired pins are never re-seated. History is keyed by
+`role|pin` and survives rebuilds (`.opencode/harness/council/<topic>.json`).
+`roles` re-resolves only the seats a phase needs (plan/execute/test); the
+other seats keep their pins and stay in the roster, so the same topic can
+change its active panel between phases. Release date is a last tiebreak,
+not a capability claim; profiles come from the synced model cache, and
+`models_route` prints strengths + release date beside every pin.
+
+## Secret Broker (`secret_exec`)
+
+One curl request, one session secret, default deny. The model supplies a
+`[[hb:…]]` ref and a curl argv; the ref must occur exactly once and must exist
+in the **current session's** vault. The tool reads `context.sessionID` from its
+execute context (never the event, never input), so a subagent cannot borrow its
+parent's vault.
+
+`harness/secrets.py` (via `harness secret check --json`) is authoritative: exact
+host grants for one env key, a narrow curl option set, http/https only, no
+userinfo. The value is substituted only after an allow; the approved URL
+indices are re-parsed for the same origin, then absolute `curl -q` runs with
+`PATH=/usr/bin:/bin`, `HOME=/nonexistent`, no shell, 64 KiB caps and a 30 s kill.
+Output is redacted before the model sees it.
+
+```bash
+cat > ~/.harness/secret-grants.json <<'JSON'
+{"GITHUB_TOKEN": ["api.github.com"]}
+JSON
+chmod 600 ~/.harness/secret-grants.json   # group/world-writable is refused
+```
+
+The env key comes from the assignment that created the placeholder
+(`GITHUB_TOKEN=ghp_…`); a bare prefix-detected token has no key and is
+denied. Disable with `"secrets": {"exec_enabled": false}` in
+`~/.harness/harness.jsonc` (user config only).
 
 ## TUI contract (tui.tsx, probed against opencode 2.0.11)
 

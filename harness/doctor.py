@@ -129,6 +129,28 @@ def worker_status(root: Path, cfg: dict | None = None) -> dict:
     return {"total": len(rows), "unfinished": len(unfinished), "stale": len(stale)}
 
 
+def panel_status(cfg: dict) -> str:
+    """One doctor line: the three headline panel seats must be resolvable and
+    the hand-seeded upstream table present on this install."""
+    from . import models as backend
+    try:
+        table = backend._load_upstream_table()
+    except Exception:
+        table = {}
+    line = (f"upstream table present ({len(table)} aliases)" if table
+            else "upstream table MISSING (harness/data/panel-upstream.json)")
+    count, roles = 0, []
+    for role in ("panel-lead", "panel-peer", "panel-skeptic"):
+        try:
+            rows = backend.route(cfg, roles=[role])
+            pin = str((rows[0] or {}).get("pin") or "") if rows else ""
+        except Exception:
+            pin = ""
+        roles.append(f"{role}={'seated' if pin else 'open'}")
+        count += bool(pin)
+    return f"panel {count}/3 resolvable ({', '.join(roles)}); {line}"
+
+
 def run(root: Path, verbose: bool = False) -> dict:
     from .config import load_config
     out: dict = {"ok": True, "checks": {}}
@@ -192,6 +214,7 @@ def run(root: Path, verbose: bool = False) -> dict:
         out["ok"] = False
     c["memory"] = memory_status(root)
     c["workers"] = worker_status(root, cfg)
+    c["panel"] = panel_status(cfg)
     if verbose:
         from . import risk
         from .config import intents

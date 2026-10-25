@@ -68,7 +68,8 @@ _GENERIC_SECRET = re.compile(
 # ("looks like it contains a credential") and would refuse a safe memory line.
 _PLACEHOLDER_VALUE = re.compile(
     r"^(?:process\.env|os\.(?:environ|getenv)|env(?:iron)?\[|\$\{?[A-Za-z_]|<[^<>]{1,}>"
-    r"|your[_-]|xxx+|\*{3,}|\.{3,}|redacted|changeme|placeholder|example)",
+    r"|your[_-]|xxx+|\*{3,}|\.{3,}|redacted|changeme|placeholder|example"
+    r"|\[\[hb:[a-f0-9]{8}-\d+\]\])",
     re.I,
 )
 

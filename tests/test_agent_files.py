@@ -17,6 +17,7 @@ from harness.agents import (
 
 def test_agent_files_are_native_markdown_and_namespaced(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "no-state"))
     installed = install_managed_agents()
     assert len(installed) == 14
     assert all(p.name.startswith("harness-") for p in installed)
@@ -34,6 +35,7 @@ def test_agent_files_are_native_markdown_and_namespaced(tmp_path, monkeypatch):
 
 def test_agent_files_use_json_as_source_of_truth(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "no-state"))
     install_managed_agents()
     prompts = [spec.get("prompt", "") for spec in bundled_agents().values()]
     for expected_path, content in expected_agent_files().items():
@@ -46,6 +48,7 @@ def test_agent_files_use_json_as_source_of_truth(tmp_path, monkeypatch):
 
 def test_agent_file_status_detects_stale_and_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "no-state"))
     install_managed_agents()
     msg, ok = status()
     assert ok and "14 harness agents" in msg
@@ -103,7 +106,10 @@ def test_bundled_json_has_no_model_pins_or_deprecated_tools():
 
 
 def test_subagents_get_the_routed_model_and_primaries_inherit(tmp_path, monkeypatch):
-    """Install-time pins: subagents carry the model route() chose for their role.
+    """Opt-in install-time pins (`models.pin_agents: true`): subagents carry
+    the model route() chose for their role. The default leaves agent files
+    with no `model:` line at all — model choice is per dispatch (see
+    test_agent_files_default_to_per_call_models in test_models.py).
 
     Primary agents must NOT be pinned — a primary's model is the session the
     user selected, so a pin there would look like routing but never apply. The
@@ -113,6 +119,7 @@ def test_subagents_get_the_routed_model_and_primaries_inherit(tmp_path, monkeypa
     home.mkdir()
     monkeypatch.setenv("HARNESS_HOME", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "no-state"))
     now = int(time.time())
     meta = {"cost": {"input": 0, "output": 0}, "limit": 128000,
             "reasoning": True, "tool_call": True,
@@ -123,6 +130,8 @@ def test_subagents_get_the_routed_model_and_primaries_inherit(tmp_path, monkeypa
         "refreshed_at": now,
         "providers": {"freeco": {"models": {"tiny-free": meta}}},
     }))
+    # opt-in: the default (pins off) renders no model/badge anywhere
+    (home / "harness.jsonc").write_text(json.dumps({"models": {"pin_agents": True}}))
 
     files = expected_agent_files()
     explore = files[agents_dir() / "harness-explore.md"]
@@ -142,6 +151,7 @@ def test_agent_files_carry_the_v2_identity_colour(tmp_path, monkeypatch):
     entry is dropped rather than installed as unusable frontmatter.
     """
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "no-state"))
     install_managed_agents()
     files = sorted(agents_dir().glob("harness-*.md"))
     assert len(files) == 14

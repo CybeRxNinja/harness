@@ -108,9 +108,13 @@ def render_agent(name: str, spec: dict, model: str = "", badge: str = "") -> str
 def routed_agents(root: str | Path = ".") -> dict[str, dict]:
     """role -> route row, for subagents whose model could be resolved.
 
-    Reads the cached model list only (`harness models sync` writes it); a
-    machine that never synced gets no pins, so agents keep inheriting the
-    session model instead of failing install on a network call.
+    Empty under the default models.pin_agents: False — the orchestrator picks
+    the model per dispatch (models_route before each wave, then `model: <pin>`
+    on the task call itself), so expected_agent_files renders no model/badge;
+    `pin_agents: true` opts back into install-time pins. Reads the cached
+    model list only (`harness models sync` writes it); a machine that never
+    synced gets no pins, so agents keep inheriting the session model instead
+    of failing install on a network call.
     """
     try:
         from .config import load_config

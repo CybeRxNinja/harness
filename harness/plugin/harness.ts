@@ -40,12 +40,444 @@ const NO_FACTS = "(nothing recalled — verify from the transcript instead)"
 const BRIEF_MARK = "Harness memory brief"
 const ERROR_LINE = /Traceback |Error:|Exception:|FAILED|failed|AssertionError|panic:|fatal:/
 
+// ---------------------------------------------------------------------------
+// 0. Secret Broker v1 — redaction layer (RED: does NOT resolve secrets in
+//    shell/file commands; placeholders are inert until Wave 2).
+// ---------------------------------------------------------------------------
+let SECRETS_ENABLED = true
+let SECRETS_EXEC_ENABLED = true
+const SECRET_VAULTS = new Map<string, {salt: string; byId: Map<string,string>; byValue: Map<string,string>; envKeyById: Map<string,string>; next: number}>()
+const MAX_VAULT_SESSIONS = 64
+const PLACEHOLDER_REGEX = /\[\[hb:[a-f0-9]{8}-\d+\]\]/g
+const PLACEHOLDER_ONE = /^\[\[hb:[a-f0-9]{8}-\d+\]\]$/
+
+function fnv1a16(s: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24)
+    h &= 0xffff
+  }
+  return (h >>> 0).toString(16).padStart(4, "0")
+}
+
+function sessionSalt(sessionID: string): string {
+  let random6 = ""
+  try {
+    const bytes = new Uint8Array(3)
+    crypto.getRandomValues(bytes)
+    random6 = [...bytes].map(b => b.toString(16).padStart(2, "0")).join("")
+  } catch {
+    random6 = Math.floor(Math.random() * 0x1000000).toString(16).padStart(6, "0")
+  }
+  const tag2 = fnv1a16(String(sessionID ?? "").slice(0, 32)).slice(0, 2)
+  return random6 + tag2
+}
+
+function getVault(sessionID: string) {
+  if (SECRET_VAULTS.size >= MAX_VAULT_SESSIONS) {
+    const oldest = SECRET_VAULTS.keys().next().value
+    if (oldest !== undefined) SECRET_VAULTS.delete(oldest)
+  }
+  if (!SECRET_VAULTS.has(sessionID)) {
+    SECRET_VAULTS.set(sessionID, { salt: sessionSalt(sessionID), byId: new Map(), byValue: new Map(), envKeyById: new Map(), next: 1 })
+  }
+  return SECRET_VAULTS.get(sessionID)!
+}
+
+function callSessionId(event: Rec): string {
+  return String(event?.sessionID ?? event?.session ?? "")
+}
+
+const CALL_SESSIONS = new Map<string, string>()
+const MAX_CALL_SESSIONS = 512
+
+function getSessionFromEvent(event: Rec): string {
+  const sid = callSessionId(event)
+  if (sid) return sid
+  const workerIdStr = String(event?.id ?? event?.callID ?? "")
+  const mapped = CALL_SESSIONS.get(workerIdStr)
+  if (mapped) return mapped
+  return sid
+}
+
+/** Secret Broker config: only `$HARNESS_HOME/harness.jsonc`, fail-open. */
+async function loadSecretsConfig(): Promise<{enabled: boolean; execEnabled: boolean}> {
+  try {
+    const fs = await import("node:fs")
+    const home = String(process.env.HOME ?? "")
+    const harnessHome = process.env.HARNESS_HOME || (home ? `${home}/.harness` : "")
+    const configFile = harnessHome ? `${harnessHome}/harness.jsonc` : ""
+    if (!configFile) return { enabled: true, execEnabled: true }
+    let raw = ""
+    try {
+      raw = fs.readFileSync(configFile, "utf8")
+    } catch {
+      return { enabled: true, execEnabled: true }
+    }
+    const stripped = raw
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|\s)\/\/.*$/gm, "$1")
+    const secretsMatch = stripped.match(/"secrets"\s*:\s*\{([^}]*)\}/)
+    if (!secretsMatch) return { enabled: true, execEnabled: true }
+    const blk = secretsMatch[1]
+    const flag = (name: string): boolean => {
+      const m = new RegExp(`"${name}"\\s*:\\s*(true|false)`).exec(blk)
+      return m ? m[1] === "true" : true
+    }
+    return { enabled: flag("enabled"), execEnabled: flag("exec_enabled") }
+  } catch {
+    return { enabled: true, execEnabled: true }
+  }
+}
+
+async function loadSecretsEnabled(_directory?: string): Promise<boolean> {
+  return (await loadSecretsConfig()).enabled
+}
+
+const DETECT_PREFIXES = [
+  /\bsk-[A-Za-z0-9_-]{4}[A-Za-z0-9_-]+/,
+  /\bgh[pous]_[A-Za-z0-9_]{8,}/,
+  /\bgithub_pat_[A-Za-z0-9_]{4,}/,
+  /\bxox[bposr]-[A-Za-z0-9_-]{8,}/,
+  /\bAIza[A-Za-z0-9_-]{30,}/,
+  /\bAKIA[A-Za-z0-9]{16}/,
+]
+
+const DETECT_JWT = /\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b/
+const DETECT_PEM = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/
+const DETECT_BEARER = /(Bearer\s+)([A-Za-z0-9._~+/=-]{10,})/
+const DETECT_ENV_ASSIGN = /\b(api[_-]?key|password|passwd|secret|token|access_key|private_key|client_secret)\b\s*[:=]\s*(\S{8,})/i
+const DETECT_SCHEME_PASSWORD = /([a-z][a-z0-9+.-]*:\/\/[^:]+):([^@]+)@/
+// A real identifier, not just the keyword: GITHUB_TOKEN=ghp_... must yield the
+// env key so the broker can match a grant. Values may be quoted; the span is
+// the inner value only.
+const DETECT_ENV_IDENT = /\b([A-Za-z_][A-Za-z0-9_]*(?:key|token|secret|password|passwd|credential|private|auth|pat)[A-Za-z0-9_]*)\s*=\s*(?:"([^"\n]{8,})"|'([^'\n]{8,})'|([^\s"'`]{8,}))/gi
+
+const EXEMPT_VALUES = /\b(process\.env|os\.(?:environ|getenv)|env(?:iron)?\[|\$\{?[A-Za-z_]|<[^<>]{1,}>|your[_-]|xxx+|\*{3,}|\.{3,}|redacted|changeme|placeholder|example)\b|\[\[hb:[a-f0-9]{8}-\d+\]\]/i
+
+function detectSecretSpans(text: string): Array<{start:number;end:number;envKey?:string}> {
+  const spans: Array<{start:number;end:number;envKey?:string}> = []
+  const t = String(text ?? "")
+  for (const re of DETECT_PREFIXES) {
+    let m: RegExpExecArray | null
+    const regex = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g")
+    while ((m = regex.exec(t)) !== null) {
+      spans.push({ start: m.index, end: m.index + m[0].length })
+    }
+  }
+  {
+    const regex = new RegExp(DETECT_JWT.source, DETECT_JWT.flags.includes("g") ? DETECT_JWT.flags : DETECT_JWT.flags + "g")
+    let m: RegExpExecArray | null
+    while ((m = regex.exec(t)) !== null) spans.push({ start: m.index, end: m.index + m[0].length })
+  }
+  {
+    const regex = new RegExp(DETECT_PEM.source, DETECT_PEM.flags.includes("g") ? DETECT_PEM.flags : DETECT_PEM.flags + "g")
+    let m: RegExpExecArray | null
+    while ((m = regex.exec(t)) !== null) spans.push({ start: m.index, end: m.index + m[0].length })
+  }
+  {
+    const regex = new RegExp(DETECT_BEARER.source, DETECT_BEARER.flags.includes("g") ? DETECT_BEARER.flags : DETECT_BEARER.flags + "g")
+    let m: RegExpExecArray | null
+    while ((m = regex.exec(t)) !== null) {
+      const full = m[0]
+      const bearerLen = "Bearer".length + 1 // word + one space
+      const tokenStart = m.index + (full.indexOf("Bearer") >= 0 ? bearerLen : 0)
+      const afterBearer = full.replace(/^Bearer\s+/, "")
+      spans.push({ start: tokenStart, end: tokenStart + afterBearer.length })
+    }
+  }
+  {
+    const regex = new RegExp(DETECT_ENV_ASSIGN.source, DETECT_ENV_ASSIGN.flags.includes("g") ? DETECT_ENV_ASSIGN.flags : DETECT_ENV_ASSIGN.flags + "g")
+    let m: RegExpExecArray | null
+    while ((m = regex.exec(t)) !== null) {
+      const full = m[0]
+      const value = m[2] ?? ""
+      if (value) {
+        const valueStart = m.index + full.lastIndexOf(value)
+        spans.push({ start: valueStart, end: valueStart + value.length })
+      } else {
+        spans.push({ start: m.index, end: m.index + full.length })
+      }
+    }
+  }
+  {
+    const regex = new RegExp(DETECT_ENV_IDENT.source, DETECT_ENV_IDENT.flags.includes("g") ? DETECT_ENV_IDENT.flags : DETECT_ENV_IDENT.flags + "g")
+    let m: RegExpExecArray | null
+    while ((m = regex.exec(t)) !== null) {
+      const full = m[0]
+      const value = m[2] ?? m[3] ?? m[4] ?? ""
+      if (!value) continue
+      const valueStart = m.index + full.lastIndexOf(value)
+      spans.push({ start: valueStart, end: valueStart + value.length,
+                   envKey: String(m[1] ?? "") })
+    }
+  }
+  {
+    const regex = new RegExp(DETECT_SCHEME_PASSWORD.source, DETECT_SCHEME_PASSWORD.flags.includes("g") ? DETECT_SCHEME_PASSWORD.flags : DETECT_SCHEME_PASSWORD.flags + "g")
+    let m: RegExpExecArray | null
+    while ((m = regex.exec(t)) !== null) {
+      const full = m[0]
+      const pwStart = m.index + full.indexOf(":") + 1
+      const pwEnd = full.indexOf("@")
+      if (pwEnd > pwStart) {
+        spans.push({ start: pwStart, end: m.index + pwEnd })
+      }
+    }
+  }
+  return spans
+}
+
+function resolveSecret(placeholder: string, sessionID: string): string | null {
+  if (!placeholder || typeof placeholder !== "string") return null
+  const match = placeholder.match(PLACEHOLDER_REGEX)
+  if (!match) return null
+  const vault = getVault(sessionID)
+  const id = placeholder.slice(2, -2).replace(/^hb:/, "")
+  return vault.byId.get(id) || null
+}
+
+/** Session-keyed lookup. Never creates a vault: an unknown session is null. */
+function resolveSecretMeta(ref: string, sessionID: string): { value: string; envKey: string } | null {
+  try {
+    if (!ref || typeof ref !== "string" || !PLACEHOLDER_ONE.test(ref)) return null
+    const vault = SECRET_VAULTS.get(String(sessionID ?? ""))
+    if (!vault) return null
+    const id = ref.slice(2, -2).replace(/^hb:/, "")
+    const value = vault.byId.get(id)
+    if (!value) return null
+    return { value, envKey: vault.envKeyById.get(id) || "" }
+  } catch {
+    return null
+  }
+}
+
+function mergeSpans(spans: Array<{start:number;end:number;envKey?:string}>): Array<{start:number;end:number;envKey?:string}> {
+  if (!spans.length) return []
+  const sorted = [...spans].sort((a, b) => a.start - b.start || a.end - b.end)
+  const merged: Array<{start:number;end:number;envKey?:string}> = [{ ...sorted[0] }]
+  for (let i = 1; i < sorted.length; i++) {
+    const last = merged[merged.length - 1]
+    const cur = sorted[i]
+    if (cur.start <= last.end) {
+      last.end = Math.max(last.end, cur.end)
+      if (!last.envKey && cur.envKey) last.envKey = cur.envKey
+    } else {
+      merged.push({ ...cur })
+    }
+  }
+  return merged
+}
+
+/** base64 / urlencoded / JSON-escaped forms of a value, all mapping to the
+ * same placeholder. A secret copied into any of them is still the secret. */
+function derivedSecretForms(value: string): string[] {
+  const out: string[] = []
+  try {
+    const B = (globalThis as any).Buffer
+    if (B) out.push(B.from(value, "utf8").toString("base64"))
+  } catch { /* Buffer unavailable */ }
+  try { out.push(encodeURIComponent(value)) } catch { /* malformed */ }
+  try { out.push(JSON.stringify(value).slice(1, -1)) } catch { /* malformed */ }
+  return [...new Set(out)].filter(f => f && f !== value && f.length >= 8)
+}
+
+function redactText(text: string, sessionID: string): string {
+  if (!SECRETS_ENABLED) return String(text ?? "")
+  let t = String(text ?? "")
+  const existingPlaceholders = [...t.matchAll(PLACEHOLDER_REGEX)].map(m => ({ start: m.index, end: m.index + m[0].length }))
+  const spans = detectSecretSpans(t)
+  const merged = mergeSpans(spans)
+  const filtered = merged.filter(s => {
+    for (const ep of existingPlaceholders) {
+      if (s.start < ep.end && s.end > ep.start) return false
+    }
+    return true
+  })
+  const vault = getVault(sessionID)
+  // Apply descending by start so earlier replacements don't corrupt later span indices
+  const sortedFiltered = [...filtered].sort((a, b) => b.start - a.start)
+  for (const span of sortedFiltered) {
+    const value = t.slice(span.start, span.end)
+    if (EXEMPT_VALUES.test(value)) continue
+    let placeholder: string
+    if (vault.byValue.has(value)) {
+      placeholder = vault.byValue.get(value)!
+      const id = placeholder.slice(2, -2).replace(/^hb:/, "")
+      if (span.envKey && !vault.envKeyById.has(id)) vault.envKeyById.set(id, span.envKey)
+    } else {
+      const id = `${vault.salt}-${vault.next}`
+      vault.next++
+      placeholder = `[[hb:${id}]]`
+      vault.byId.set(id, value)
+      vault.byValue.set(value, placeholder)
+      if (span.envKey) vault.envKeyById.set(id, span.envKey)
+      for (const derived of derivedSecretForms(value)) {
+        if (!vault.byValue.has(derived)) vault.byValue.set(derived, placeholder)
+      }
+    }
+    const before = t.slice(0, span.start)
+    const after = t.slice(span.end)
+    t = before + placeholder + after
+  }
+  // Literal pass for values that arrive in a derived form (base64, urlencoded,
+  // JSON-escaped) rather than as a detectable token. Longest first so a shorter
+  // value can never eat part of a longer one.
+  try {
+    const entries = [...vault.byValue.entries()]
+      .filter(([raw]) => raw && raw.length >= 8)
+      .sort((a, b) => b[0].length - a[0].length)
+    for (const [raw, placeholder] of entries) {
+      if (t.includes(raw)) t = t.split(raw).join(placeholder)
+    }
+  } catch { /* redaction of derived forms is best-effort */ }
+  return t
+}
+
+/** Absolute curl only: a PATH lookup here would trust whatever runs first. */
+async function resolveCurlPath(): Promise<string> {
+  try {
+    const fs = await import("node:fs")
+    for (const candidate of ["/usr/bin/curl", "/bin/curl", "/usr/local/bin/curl"]) {
+      if (fs.existsSync(candidate)) return candidate
+    }
+  } catch { /* fall through to Bun.which */ }
+  const found = (globalThis as any)?.Bun?.which?.("curl")
+  return found ? String(found) : ""
+}
+
+/** Literal replacement, one argv element stays one element (never re-parsed). */
+function substituteRef(argv: string[], ref: string, value: string): string[] {
+  return argv.map(arg => arg.replaceAll(ref, value))
+}
+
+/**
+ * Bun.spawn with a stripped environment, no shell, stdin closed, 64 KiB caps
+ * and a hard kill. Returns {code, stdout, stderr, truncated}.
+ */
+async function runSecret(cmd: string[], budgetMs: number): Promise<{ code: number; stdout: string; stderr: string; truncated: boolean }> {
+  const bun = (globalThis as any)?.Bun
+  if (!bun?.spawn) {
+    return { code: -1, stdout: "", stderr: "Bun.spawn unavailable", truncated: false }
+  }
+  const proc = bun.spawn(cmd, {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    cwd: "/",
+    env: { PATH: "/usr/bin:/bin", HOME: "/nonexistent", LANG: "C" },
+  })
+  const timer = setTimeout(() => {
+    try { proc.kill(9) } catch { /* already gone */ }
+  }, Math.max(1, budgetMs))
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+    return {
+      code: Number(code) || 0,
+      stdout: String(stdout ?? "").slice(0, 65536),
+      stderr: String(stderr ?? "").slice(0, 65536),
+      truncated: String(stdout ?? "").length > 65536 || String(stderr ?? "").length > 65536,
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Pre-substitution validation. The secret value is looked up from the CURRENT
+ * session's vault only; model input never names the session or the value.
+ */
+async function prepareSecretExec(input: Rec, sessionID: string): Promise<
+  { ok: true; ref: string; envKey: string; value: string; argv: string[]; curlPath: string } |
+  { ok: false; reason: string }
+> {
+  try {
+    const ref = String(input?.ref ?? "")
+    if (!PLACEHOLDER_ONE.test(ref)) return { ok: false, reason: "malformed secret reference" }
+    if (!Array.isArray(input?.argv) || !input.argv.every((a: any) => typeof a === "string")) {
+      return { ok: false, reason: "argv must be an array of strings" }
+    }
+    const argv = input.argv.map((a: string) => String(a))
+    if (!argv.length) return { ok: false, reason: "argv is empty" }
+    if (argv[0] !== "curl") return { ok: false, reason: "only curl is allowed" }
+    const meta = resolveSecretMeta(ref, sessionID)
+    if (!meta) return { ok: false, reason: "unknown secret reference for this session" }
+    if (!meta.envKey) return { ok: false, reason: "the reference has no env key — grant it by assignment (KEY=value) first" }
+    const occurrences = argv.reduce((n, arg) => n + arg.split(ref).length - 1, 0)
+    if (occurrences !== 1) return { ok: false, reason: "the secret reference must occur exactly once" }
+    if (argv.some(arg => /[\0\r\n]/.test(arg)) || /[\0\r\n]/.test(meta.value)) {
+      return { ok: false, reason: "control characters are not allowed" }
+    }
+    const curlPath = await resolveCurlPath()
+    if (!curlPath) return { ok: false, reason: "curl was not found at an absolute path" }
+    return { ok: true, ref, envKey: meta.envKey, value: meta.value, argv, curlPath }
+  } catch (e) {
+    return { ok: false, reason: short(e) }
+  }
+}
+
+/** The Python policy is authoritative; an unparseable answer is a deny. */
+async function secretPolicy(payload: Rec, directory: string): Promise<Rec> {
+  try {
+    const out = await runBudget([
+      "python3", "-m", "harness", "--root", directory,
+      "secret", "check", JSON.stringify(payload), "--json",
+    ], 10000)
+    const parsed = JSON.parse(String(out.text ?? "").trim())
+    return parsed && typeof parsed === "object" ? parsed : { allow: false, reason: "empty policy answer", rule: "policy" }
+  } catch (e) {
+    return { allow: false, reason: `policy unavailable: ${short(e)}`, rule: "policy" }
+  }
+}
+
+function redactTextSafe(text: string, sessionID: string): string {
+  try {
+    return redactText(text, sessionID)
+  } catch {
+    return String(text ?? "")
+  }
+}
+
+function redactToolResult(event: Rec, sessionID: string): void {
+  try {
+    if (!event || typeof event !== "object") return
+    const sid = sessionID || callSessionId(event)
+    const result = event.result
+    if (result && typeof result === "object") {
+      const content = result.content
+      if (Array.isArray(content)) {
+        for (const part of content) {
+          if (part && part.type === "text" && typeof part.text === "string") {
+            part.text = redactTextSafe(part.text, sid)
+          }
+        }
+      }
+    }
+  } catch {
+    // Never break
+  }
+}
+
+function handleToolResult(event: Rec, sessionID: string): void {
+  try {
+    const sid = sessionID || getSessionFromEvent(event)
+    redactToolResult(event, sid)
+    condenseToolResult(event)
+  } catch {
+    // Never break
+  }
+}
+
 function short(e: unknown): string {
   const s = e instanceof Error ? e.message : String(e)
   return s.length > 160 ? `${s.slice(0, 160)}…` : s
 }
 
-/** Async process helper: never blocks the opencode server's event loop. */
+/** Async subprocess helper: never blocks the opencode server's event loop. */
 async function run(cmd: string[]): Promise<{ ok: boolean; text: string }> {
   try {
     const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" })
@@ -55,6 +487,30 @@ async function run(cmd: string[]): Promise<{ ok: boolean; text: string }> {
     return { ok: false, text: "" }
   }
 }
+
+/**
+ * Like run(), with a budget: the child is killed after `budgetMs` so a
+ * shell-out (the panel probes models and may re-sync) can never wedge the
+ * tool call. stdout up to the kill is still returned.
+ */
+async function runBudget(cmd: string[], budgetMs: number): Promise<{ ok: boolean; text: string }> {
+  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" })
+  const timer = setTimeout(() => {
+    try { proc.kill(9) } catch {}
+  }, budgetMs)
+  try {
+    const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+    return { ok: code === 0, text: out ?? "" }
+  } catch {
+    return { ok: false, text: "" }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Panel budget: a stale-list sync (~30s) plus a handful of real probes
+ * (thinking models answer slowly) stays inside this ceiling — killed after. */
+const PANEL_BUDGET_MS = 300000
 
 /**
  * `ctx.skill.list()` returns the raw server response, whose shape differs
@@ -163,7 +619,7 @@ function matchSkills(items: Rec[], query: string, limit = 3, minScore = 2): Rec[
  * Format the per-role model table for the model: one line per worker, with the
  * tier, price, health and fallback. Pure so the node tests can pin it.
  */
-function routeLines(rows: Rec[]): string {
+export function routeLines(rows: Rec[]): string {
   if (!Array.isArray(rows) || !rows.length) {
     return "no routed roles — run `harness models sync`, then check models.routes in .opencode/harness/harness.jsonc"
   }
@@ -177,8 +633,12 @@ function routeLines(rows: Rec[]): string {
       r.health === "failed" ? `NOT WORKING: ${r.reason || "probe failed"}` :
       "unchecked"
     const fb = r.fallback_pin ? `; fallback ${r.fallback_pin}` : ""
+    const quotaNote = r.quota_note ? `; quota ${r.quota_note}` : ""
+    const strengths = Array.isArray(r.strengths) && r.strengths.length
+      ? `, ${r.strengths.join("+")}` : ""
+    const released = r.released ? `, released ${String(r.released)}` : ""
     const note = r.note ? ` (${r.note})` : ""
-    return `- ${r.role}: ${r.pin} [${r.tier}, ${price}, ${state}${fb}]${note}`
+    return `- ${r.role}: ${r.pin} [${r.tier}, ${price}${strengths}${released}, ${state}${fb}${quotaNote}]${note}`
   })
   const bad = rows.filter((r: Rec) => r.health === "failed").map((r: Rec) => r.role)
   const unchecked = rows
@@ -189,6 +649,213 @@ function routeLines(rows: Rec[]): string {
     unchecked.length ? `Unchecked: ${unchecked.join(", ")} — call models_route with these roles and check=true before dispatching.` : "",
   ].filter(Boolean)
   return ["Pass each pin as the `model` field of its subagent call.", ...lines, ...tail].join("\n")
+}
+
+/**
+ * Format the models_status JSON into <=15 text lines: counts + sync age,
+ * verified strong free pins, recent failures, provider quota, warnings.
+ * Pure so the node tests can pin it.
+ */
+export function modelsStatusLines(status: Rec): string {
+  if (!status || typeof status !== "object") return "models_status: empty response"
+  const lines: string[] = []
+  const counts = status.counts || {}
+  const sync = status.sync || {}
+  const recent = status.recent || []
+  const providers = status.providers || []
+  const warnings = status.warnings || []
+
+  // Line 1: counts + sync age
+  const ageSec = typeof sync.age_s === "number" ? sync.age_s : 0
+  const ageStr = ageSec < 60 ? `${ageSec}s` : ageSec < 3600 ? `${Math.round(ageSec / 60)}m` : `${Math.round(ageSec / 3600)}h`
+  const staleMark = sync.stale ? " (stale)" : ""
+  const errorMark = sync.last_error ? ` last_error="${String(sync.last_error).slice(0, 60)}"` : ""
+  lines.push(
+    `models: ${counts.available ?? 0} available, ${counts.free ?? 0} free, ${counts.verified ?? 0} verified, ${counts.strong_free_verified ?? 0} strong-free-verified | sync ${ageStr} ago${staleMark}${errorMark}`
+  )
+
+  // Verified strong free pins (up to 3)
+  const strongFree = recent
+    .filter((r: Rec) => r.free && r.tier === "strong" && r.health === "ok")
+    .slice(0, 3)
+  if (strongFree.length) {
+    lines.push("strong-free-verified: " + strongFree.map((r: Rec) => `${r.pin || r.model}`).join(", "))
+  }
+
+  // Recent failures (up to 3)
+  const failures = recent
+    .filter((r: Rec) => r.health === "failed" && r.reason)
+    .slice(0, 3)
+  if (failures.length) {
+    lines.push("recent failures: " + failures.map((r: Rec) => `${r.model}: ${String(r.reason).slice(0, 80)}`).join("; "))
+  }
+
+  // Provider quota lines (up to 3)
+  const quotaLines = providers
+    .filter((p: Rec) => p.quota && (p.quota.exhausted || (p.quota.remaining_day !== null && p.quota.remaining_day !== undefined && p.quota.remaining_day <= 10)))
+    .slice(0, 3)
+  for (const p of quotaLines) {
+    const q = p.quota
+    const rem = q.remaining_day !== null && q.remaining_day !== undefined ? ` ${q.remaining_day} left today` : ""
+    lines.push(`quota ${p.provider}:${rem}${q.note ? ` (${q.note})` : ""}`)
+  }
+
+  // Warnings (up to remaining lines, max 15 total)
+  const maxLines = 15
+  const remaining = maxLines - lines.length
+  if (warnings.length && remaining > 0) {
+    lines.push(...warnings.slice(0, remaining).map((w: any) => `warning: ${String(w).slice(0, 120)}`))
+  }
+
+  return lines.join("\n")
+}
+
+/**
+ * Autosync gate: true at most once per session id (Set capped at 200,
+ * evict oldest), no session id => at most once per 5 minutes.
+ * Pure so the node tests can pin it.
+ */
+export function autosyncGate(
+  sessionID: string | undefined,
+  state: { sessions: Set<string>; lastNoSession: number },
+  now: number,
+  ttlMs: number
+): boolean {
+  if (sessionID) {
+    if (state.sessions.has(sessionID)) return false
+    if (state.sessions.size >= 200) {
+      const oldest = state.sessions.values().next().value
+      if (oldest !== undefined) state.sessions.delete(oldest)
+    }
+    state.sessions.add(sessionID)
+    return true
+  }
+  if (state.lastNoSession !== 0 && now - state.lastNoSession < ttlMs) return false
+  state.lastNoSession = now
+  return true
+}
+
+const AUTOSYNC_TTL_MS = 5 * 60 * 1000
+const AUTOSYNC_STATE = { sessions: new Set<string>(), lastNoSession: 0 }
+
+/**
+ * Fire-and-forget model cache refresh for this session: sync (only when the
+ * cache is stale/errored) then ingest usage. Never awaited by a hook and never
+ * allowed to throw; the gate keeps it to once per session id.
+ */
+function kickAutosync(directory: string, sessionID: string): void {
+  try {
+    if (!autosyncGate(sessionID || undefined, AUTOSYNC_STATE, Date.now(), AUTOSYNC_TTL_MS)) return
+    const base = ["python3", "-m", "harness", "--root", directory]
+    void runBudget([...base, "models", "sync", "--auto"], 60000)
+      .then(() => runBudget([...base, "usage", "ingest", "--quiet"], 60000))
+      .catch(() => {})
+  } catch {
+    /* a model cache refresh must never break a turn */
+  }
+}
+
+/**
+ * The panel bundle → advice lines: seat pins (one per role, DISTINCT upstreams),
+ * drift swaps, and where the next wave reads/writes the decision bundle.
+ * Pure so the python tests can pin it. Keep the slug in sync with
+ * `_bundle_slug()` in harness/cli.py.
+ */
+function panelLines(bundle: Rec, directory: string): string {
+  const slug = (String(bundle?.topic ?? "default") || "default")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "default"
+  const path = `${directory}/.opencode/harness/panel/${slug}.json`
+  const rows: Rec[] = Array.isArray(bundle?.panel) ? bundle.panel : []
+  const lines = rows.map((r: Rec) => {
+    if (!r.pin) return `- ${r.role}: NO PANELIST (seat left open — steer without it)`
+    const state =
+      r.health === "ok" ? "working" :
+      r.health === "failed" ? `NOT WORKING: ${r.reason || "probe failed"}` :
+      "unchecked"
+    const fb = r.fallback_pin ? `; fallback ${r.fallback_pin}` : ""
+    return `- ${r.role}: ${r.pin} [${r.upstream}, ${state}${fb}]`
+  })
+  const swaps: Rec[] = Array.isArray(bundle?.model_replaced) ? bundle.model_replaced : []
+  const swapLines = swaps.map((s: Rec) =>
+    `- swapped ${s.role}: ${s.old} → ${s.new} (${s.reason || "drifted"})`)
+  return [
+    `Spawn each panelist as a subagent with its pin as the \`model\` field; merge the answers into ONE topic bundle.`,
+    ...lines,
+    ...swapLines,
+    `decision bundle: ${path} — a later wave reads/extends it (verdict, decisions, sources).`,
+  ].join("\n")
+}
+
+/**
+ * Council roster → advice lines. Seats carry the model profile (strengths,
+ * release date, context) and their win/loss record; retired seats and auto
+ * replacements are spelled out so the orchestrator can see the survival rule
+ * working instead of guessing why a pin changed.
+ */
+export function councilLines(doc: Rec): string {
+  const seats: Rec[] = Array.isArray(doc?.seats) ? doc.seats : []
+  if (!seats.length) {
+    return "council has no seats — widen the model list or retire fewer upstreams"
+  }
+  const head = `council ${String(doc?.topic ?? "default")} · round ${Number(doc?.round ?? 0)} · ${seats.length} seat(s)`
+  const lines = seats.map((s: Rec) => {
+    const strengths = Array.isArray(s.strengths) && s.strengths.length
+      ? s.strengths.join("+") : "-"
+    const free = s.free ? ", free" : ""
+    const released = s.released ? `, released ${String(s.released)}` : ""
+    const ctx = Number(s.context ?? 0)
+    const ctxText = ctx >= 1_000_000 ? `, ${(ctx / 1_000_000).toFixed(1)}M ctx`
+      : ctx > 0 ? `, ${Math.round(ctx / 1000)}k ctx` : ""
+    const state =
+      s.health === "ok" ? "working" :
+      s.health === "failed" ? `NOT WORKING: ${s.reason || "probe failed"}` :
+      "unchecked"
+    const streak = Number(s.streak ?? 0)
+    const note = s.note ? ` (${String(s.note)})` : ""
+    return `- ${String(s.role)}: ${String(s.pin)} [${String(s.tier ?? "?")}${free}, ${strengths}${released}${ctxText}, W${Number(s.wins ?? 0)}/L${Number(s.losses ?? 0)} streak ${streak >= 0 ? "+" : ""}${streak}, ${state}]${note}`
+  })
+  const retired = (Array.isArray(doc?.retired) ? doc.retired : []).map((r: Rec) =>
+    `- retired ${String(r.role)}: ${String(r.pin)} (${String(r.reason || "council vote")})`)
+  const blocs = (Array.isArray(doc?.collusion) ? doc.collusion : []).map((c: Rec) => {
+    const pair = Array.isArray(c?.pair) ? c.pair.map(String).join(" + ") : "?"
+    const rounds = Array.isArray(c?.rounds) ? c.rounds.length : 0
+    const gone = c?.retired ? ` → retired ${String(c.retired)}` : ""
+    return `- collusion: ${pair} voted for each other in ${rounds} round(s)${gone}`
+  })
+  const swaps = (Array.isArray(doc?.model_replaced) ? doc.model_replaced : []).map((s: Rec) =>
+    `- swapped ${String(s.role)}: ${String(s.old || "(none)")} → ${String(s.new || "(empty)")} (${String(s.reason || "drift")})`)
+  const warnings = (Array.isArray(doc?.warnings) ? doc.warnings : []).map((w: any) =>
+    `- warning: ${String(w).slice(0, 160)}`)
+  return [
+    head,
+    ...lines,
+    ...blocs,
+    ...retired,
+    ...swaps,
+    ...warnings,
+    "Ask every seat for an independent answer, anonymize the answers, then have each seat vote once per round as `voter>target=win|loss|tie` — a seat never judges its own answer. Two straight losses retire it; two rounds of seats voting for each other is a collusion bloc, and the lower scorer is retired. A retirement seats a different model on a different upstream automatically.",
+  ].join("\n")
+}
+
+/**
+ * Build the `models council` argv. `--roles` is a nargs="*" flag, so it must
+ * come last or it would swallow the flags after it. Pure for the node tests.
+ */
+export function councilArgs(directory: string, input: Rec): string[] {
+  const topic = String(input?.topic ?? "").trim()
+  const args = ["python3", "-m", "harness", "--root", directory,
+                "models", "council", "--json", "--topic", topic]
+  const size = Number(input?.size ?? 0)
+  if (Number.isFinite(size) && size > 0) args.push("--size", String(Math.round(size)))
+  for (const vote of (Array.isArray(input?.votes) ? input.votes : [])) {
+    const text = String(vote ?? "").trim()
+    if (text) args.push("--vote", text)
+  }
+  const roles = (Array.isArray(input?.roles) ? input.roles : [])
+    .map((r: any) => String(r ?? "").trim())
+    .filter(Boolean)
+  if (roles.length) args.push("--roles", ...roles)
+  return args
 }
 
 /**
@@ -957,7 +1624,8 @@ function memNormalize(text: unknown): string {
 }
 
 function memSecret(text: string): boolean {
-  return MEM_SECRETS.some((r) => r.test(text))
+  const stripped = String(text ?? "").replace(/\[\[hb:[a-f0-9]{8}-\d+\]\]/g, "")
+  return MEM_SECRETS.some((r) => r.test(stripped))
 }
 
 /** The durable lines of one assistant message (mirrors important_lines()). */
@@ -1815,6 +2483,16 @@ const HarnessPlugin = {
     const log = (m: string) => console.error(`[harness] ${m}`)
     const directory: string = ctx?.location?.directory || process.cwd()
 
+    // Secret Broker: load user config, fail-open
+    try {
+      const secretCfg = await loadSecretsConfig()
+      SECRETS_ENABLED = secretCfg.enabled
+      SECRETS_EXEC_ENABLED = secretCfg.execEnabled
+    } catch {
+      SECRETS_ENABLED = true
+      SECRETS_EXEC_ENABLED = true
+    }
+
     // 0. Temp confinement: everything this process tree creates as "temp" —
     //    bun/node JIT caches, LSP server scratch, browsers, and every tool the
     //    agents run — lands under THIS PROJECT's .opencode/harness/tmp/, not
@@ -1996,6 +2674,32 @@ const HarnessPlugin = {
         })
 
         add({
+          name: "models_status",
+          description:
+            "Fast model status: available/free counts, sync age, verified strong-free pins, " +
+            "recent failures, provider quota/limits, warnings. No probes — uses cached data only.",
+          input: { type: "object", properties: {}, additionalProperties: false },
+          options: direct,
+          execute: async () => {
+            const args = ["python3", "-m", "harness", "--root", directory, "models", "status", "--json"]
+            const res = await run(args)
+            const text = res.text.trim()
+            if (!text) {
+              return {
+                content:
+                  "models_status unavailable: `python3 -m harness models status` returned nothing " +
+                  "(is harness installed for python3?)",
+              }
+            }
+            try {
+              return { content: modelsStatusLines(JSON.parse(text)) }
+            } catch {
+              return { content: text.slice(0, 4000) }
+            }
+          },
+        })
+
+        add({
           name: "models_route",
           description:
             "Which model#variant each worker role runs on: tier, free/paid, whether the last probe " +
@@ -2023,6 +2727,8 @@ const HarnessPlugin = {
             const roles = Array.isArray(input?.roles)
               ? input.roles.map((r: any) => String(r)).filter(Boolean)
               : []
+            // Best-effort usage ingest (never fatal, short timeout via runBudget).
+            await runBudget(["python3", "-m", "harness", "--root", directory, "usage", "ingest", "--quiet"], 10000).catch(() => {})
             // `--root` precedes the subcommand (a global flag on the parser).
             const args = ["python3", "-m", "harness", "--root", directory,
                           "models", "route", "--json"]
@@ -2041,6 +2747,125 @@ const HarnessPlugin = {
             }
             try {
               return { content: routeLines(JSON.parse(text)) }
+            } catch {
+              return { content: text.slice(0, 4000) }
+            }
+          },
+        })
+
+        add({
+          name: "panel_route",
+          description:
+            "Build ONE topic-scoped model panel: a 2-4 seat roster of DISTINCT upstreams " +
+            "(panel-lead/panel-peer/panel-skeptic [+ cheap panel-edge]) with model pins, " +
+            "health from real probes and a fallback per seat — two gateways serving the " +
+            "same upstream count once, and a drifted (failed/stale) pin is substituted " +
+            "under a capability rule and recorded. Returns the bundle path + seat lines: " +
+            "spawn each panelist as a subagent with its pin as the `model` field.",
+          input: {
+            type: "object",
+            properties: {
+              topic: {
+                type: "string",
+                description: "What the panel decides (e.g. 'rename-constants-plan'). Scopes the bundle file.",
+              },
+              size: {
+                type: "number",
+                description: "Seats 2-4; default 3 (4 adds the cheap panel-edge voice).",
+              },
+              roles: {
+                type: "array",
+                items: { type: "string" },
+                description: "Explicit panel roles (panel-lead, panel-peer, ...). Overrides size.",
+              },
+            },
+            additionalProperties: false,
+          },
+          options: direct,
+          execute: async (input: Rec) => {
+            const topic = String(input?.topic ?? "").trim()
+            const size = Number(input?.size ?? 0)
+            const roles = Array.isArray(input?.roles)
+              ? input.roles.map((r: any) => String(r)).filter(Boolean)
+              : []
+            // `--root` precedes the subcommand (a global flag on the parser).
+            const args = ["python3", "-m", "harness", "--root", directory,
+                          "models", "panel", "--json"]
+            if (topic) args.push("--topic", topic)
+            if (Number.isFinite(size) && size > 0) args.push("--size", String(Math.round(size)))
+            if (roles.length) args.push("--roles", ...roles)
+            // a stale-list sync plus real probes runs inside this budget
+            const res = await runBudget(args, PANEL_BUDGET_MS)
+            const text = res.text.trim()
+            if (!text) {
+              return {
+                content:
+                  "panel_route unavailable: `python3 -m harness models panel` returned nothing " +
+                  "(is harness installed for python3? routing still runs: models_route)",
+              }
+            }
+            try {
+              const bundle = JSON.parse(text)
+              if (!bundle || !Array.isArray(bundle.panel)) {
+                throw new Error("bundle payload missing a panel array")
+              }
+              return { content: panelLines(bundle, directory) }
+            } catch {
+              return { content: text.slice(0, 4000) }
+            }
+          },
+        })
+
+        add({
+          name: "council",
+          description:
+            "The model council for a topic: distinct-upstream seats with model strengths, release " +
+            "date, context, health and a win/loss record. Call with just `topic` to seat the roster, " +
+            "spawn each seat as a subagent with its pin, collect independent answers, then call again " +
+            "with one attributed vote per seat (`voter>target=win|loss|tie`). A seat that loses twice " +
+            "in a row is retired and the roster is rebuilt on a different upstream; two seats that " +
+            "award each other a win in two rounds are a collusion bloc, and the lower scorer is " +
+            "retired the same way. Retired pins are never re-seated for that role in this topic. " +
+            "Pass `roles` to re-resolve only the seats a phase needs (plan/execute/test); the " +
+            "other seats keep their pins and stay in the roster.",
+          input: {
+            type: "object",
+            properties: {
+              topic: { type: "string", description: "What the council is deciding" },
+              size: { type: "number", description: "Seats 2-4 (default 3)" },
+              votes: {
+                type: "array",
+                items: { type: "string" },
+                description: "Voter first: voter>target=win|loss|tie[:note]. Omit to just build/read the roster.",
+              },
+              roles: {
+                type: "array",
+                items: { type: "string" },
+                description: "Re-resolve only these panel roles (plan: panel-lead,panel-peer; test: panel-skeptic,panel-edge); other seats keep their pins.",
+              },
+            },
+            required: ["topic"],
+            additionalProperties: false,
+          },
+          options: direct,
+          execute: async (input: Rec) => {
+            const topic = String(input?.topic ?? "").trim()
+            if (!topic) return { content: "council needs a topic" }
+            const args = councilArgs(directory, { ...input, topic })
+            // cold build -> up to 3 real probes + two verification rounds
+            const res = await runBudget(args, 300000)
+            const text = res.text.trim()
+            if (!text) {
+              return {
+                content:
+                  "council unavailable: `python3 -m harness models council` returned nothing " +
+                  "(is harness installed for python3?)",
+              }
+            }
+            try {
+              const doc = JSON.parse(text)
+              if (!doc || !Array.isArray(doc.seats)) throw new Error("missing seats")
+              return { content: councilLines(doc) }
             } catch {
               return { content: text.slice(0, 4000) }
             }
@@ -2094,6 +2919,78 @@ const HarnessPlugin = {
               return { content: out.trim() || "risk_check failed" }
             } catch (e) {
               return { content: `risk_check unavailable: ${short(e)}` }
+            }
+          },
+        })
+
+        if (SECRETS_ENABLED && SECRETS_EXEC_ENABLED) add({
+          name: "secret_exec",
+          description:
+            "Run ONE curl request with a session secret substituted locally. `ref` must be a [[hb:...]] " +
+            "placeholder from this session and occur exactly once in `argv`; `argv[0]` must be `curl`. " +
+            "Default-deny: the host must be granted for that secret's env key in ~/.harness/secret-grants.json, " +
+            "and only a narrow curl option set is allowed (no config files, proxies, redirects or writes). " +
+            "The value never enters the model context; output is redacted before it returns.",
+          input: {
+            type: "object",
+            properties: {
+              ref: { type: "string", description: "A [[hb:...]] placeholder from this session" },
+              argv: {
+                type: "array",
+                items: { type: "string" },
+                description: "curl argv (argv[0] must be `curl`); put the ref where the secret belongs",
+              },
+            },
+            required: ["ref", "argv"],
+            additionalProperties: false,
+          },
+          options: direct,
+          execute: async (input: Rec, tool: Rec) => {
+            // B1: the tool handler trusts its execution context's sessionID
+            // ONLY. Never the event id, never anything the model supplied.
+            const sessionID = String(tool?.sessionID ?? "")
+            if (!sessionID) return { content: "secret_exec denied: no session context" }
+            const prepared = await prepareSecretExec(input, sessionID)
+            if (!prepared.ok) return { content: `secret_exec denied: ${prepared.reason}` }
+            try {
+              const decision = await secretPolicy({
+                argv: prepared.argv,
+                env_key: prepared.envKey,
+                ref: prepared.ref,
+              }, directory)
+              if (decision?.allow !== true) {
+                const why = String(decision?.reason ?? "denied").slice(0, 240)
+                const rule = String(decision?.rule ?? "policy")
+                return { content: `secret_exec denied (${rule}): ${why}` }
+              }
+              // Re-parse ONLY the URL indices the policy approved, after
+              // substitution, and require the same origin with no userinfo.
+              const indices = Array.isArray(decision?.url_indices) ? decision.url_indices : []
+              const origins = Array.isArray(decision?.origins) ? decision.origins : []
+              if (!indices.length || indices.length !== origins.length) {
+                return { content: "secret_exec denied (policy): no approved URL" }
+              }
+              const finalArgv = substituteRef(prepared.argv, prepared.ref, prepared.value)
+              for (let i = 0; i < indices.length; i++) {
+                const idx = Number(indices[i])
+                const expected = String(origins[i] ?? "")
+                let parsed: URL
+                try {
+                  parsed = new URL(String(finalArgv[idx] ?? ""))
+                } catch {
+                  return { content: "secret_exec denied (policy): substituted URL is unparseable" }
+                }
+                if (parsed.username || parsed.password || parsed.origin !== expected) {
+                  return { content: "secret_exec denied (policy): substituted URL changed origin" }
+                }
+              }
+              const result = await runSecret([prepared.curlPath, "-q", ...finalArgv.slice(1)], 30000)
+              const body = `exit ${result.code}\n${result.stdout}${result.stderr}`
+                + (result.truncated ? "\n[truncated at 64 KiB]" : "")
+              return { content: redactTextSafe(body, sessionID) }
+            } catch (e) {
+              // The reason must never carry the value.
+              return { content: `secret_exec failed: ${short(e)}` }
             }
           },
         })
@@ -2209,11 +3106,16 @@ const HarnessPlugin = {
       if (typeof ctx?.tool?.hook !== "function") throw new Error("ctx.tool.hook unavailable")
       await ctx.tool.hook("execute.after", async (event: Rec) => {
         try {
-          condenseToolResult(event)
+          const sid = getSessionFromEvent(event) || callSessionId(event)
+          if (sid || event) {
+            handleToolResult(event, sid || "")
+          }
         } catch {
           /* never break tool execution */
         }
         try {
+          const wid = String(event?.id ?? event?.callID ?? "")
+          if (wid) CALL_SESSIONS.delete(wid)
           await workerFinished(directory, event)
         } catch {
           /* never break tool execution */
@@ -2266,6 +3168,11 @@ const HarnessPlugin = {
       if (typeof ctx?.session?.hook !== "function") throw new Error("ctx.session.hook unavailable")
       await ctx.session.hook("context", async (event: Rec) => {
         try {
+          kickAutosync(directory, String(event?.sessionID ?? ""))
+        } catch {
+          /* never break generation */
+        }
+        try {
           await nudgeSkills(ctx, directory, String(event?.sessionID ?? ""), event?.messages, event)
         } catch (e) {
           // never break generation, but never fail silently either
@@ -2290,6 +3197,20 @@ const HarnessPlugin = {
       // guarded: a host without tool hooks just loses worker rows, not activation
       if (typeof ctx?.tool?.hook !== "function") throw new Error("ctx.tool.hook unavailable")
       await ctx.tool.hook("execute.before", async (event: Rec) => {
+        // Record session mapping for execute.after retrieval
+        try {
+          const wid = String(event?.id ?? event?.callID ?? "")
+          const sid = String(event?.sessionID ?? "")
+          if (wid && sid) {
+            CALL_SESSIONS.set(wid, sid)
+            if (CALL_SESSIONS.size > MAX_CALL_SESSIONS) {
+              const oldest = CALL_SESSIONS.keys().next().value
+              if (oldest !== undefined) CALL_SESSIONS.delete(oldest)
+            }
+          }
+        } catch {
+          /* never break */
+        }
         try {
           await workerStarted(directory, event)
         } catch {
@@ -2317,4 +3238,5 @@ const HarnessPlugin = {
   },
 }
 
+export { detectSecretSpans, redactText, resolveSecret, resolveSecretMeta, prepareSecretExec, substituteRef, runSecret, redactToolResult, handleToolResult }
 export default HarnessPlugin

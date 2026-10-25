@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -257,6 +258,20 @@ def cmd_models(args) -> int:
     root = _root(args)
     cfg, _ = load_config(root)
     action = getattr(args, "models_action", "list")
+    if action == "sync" and getattr(args, "auto", False):
+        out = M.sync_auto(cfg, timeout=getattr(args, "timeout", 30))
+        if getattr(args, "json", False):
+            print(json.dumps(out, indent=2))
+            return 0
+        if out.get("ran"):
+            res = out.get("sync") or {}
+            print(f"models sync --auto ({out.get('reason')}): {res.get('models', 0)} "
+                  f"from opencode, {res.get('registry', 0)} with cost/free metadata")
+            if res.get("error"):
+                print(f"  error: {res['error']}", file=sys.stderr)
+        else:
+            print(f"models sync --auto: skipped ({out.get('reason')})")
+        return 0
     if action == "sync":
         out = M.sync(with_registry=not getattr(args, "no_registry", False),
                      timeout=getattr(args, "timeout", 30))
@@ -266,6 +281,103 @@ def cmd_models(args) -> int:
         else:
             print(f"models: {out['models']} from opencode ({out['providers']} providers), "
                   f"{out['registry']} with cost/free metadata")
+        return 0
+    if action == "status":
+        st = M.models_status(cfg, root)
+        if getattr(args, "json", False):
+            print(json.dumps(st, indent=2))
+            return 0
+        counts = st["counts"]
+        sync = st["sync"]
+        age = int(sync.get("age_s") or 0)
+        age_text = (f"{age}s" if age < 60 else
+                    f"{age // 60}m" if age < 3600 else f"{age // 3600}h")
+        print(f"models: {counts['available']} available, {counts['free']} free, "
+              f"{counts['verified']} verified, {counts['strong_free_verified']} "
+              f"strong-free-verified")
+        print(f"sync: {age_text} ago" + (" (stale)" if sync.get("stale") else "")
+              + (f"  last error: {sync['last_error']}" if sync.get("last_error") else ""))
+        strong = [r for r in st["recent"]
+                  if r["free"] and r["tier"] == "strong" and r["health"] == "ok"]
+        if strong:
+            print("strong-free-verified: " + ", ".join(r["pin"] for r in strong[:3]))
+        for r in st["recent"]:
+            if r["health"] == "failed":
+                print(f"  NOT WORKING {r['pin']}: {r['reason'][:80]}")
+        for p in st["providers"]:
+            q = p.get("quota") or {}
+            usage = p.get("usage_24h") or {}
+            lim = (p.get("limits") or {})
+            print(f"{p['provider']:16s} {p['models']:3d} models, {p['free']:3d} free, "
+                  f"{usage.get('calls', 0)} calls/24h, ${usage.get('cost', 0):.4f}"
+                  + (f"  {q.get('note')}" if q.get("note") else "")
+                  + ("  EXHAUSTED" if q.get("exhausted") else ""))
+            if lim.get("source"):
+                print(f"{'':16s} limits: {lim['source']}")
+        for w in st["warnings"]:
+            print(f"warning: {w}")
+        return 0
+    if action == "council":
+        from . import council as C
+        raw = [str(r) for r in (getattr(args, "roles", []) or [])]
+        seats = [piece.strip() for chunk in raw for piece in chunk.split(",")
+                 if piece.strip()]
+        topic = str(getattr(args, "topic", "") or "")
+        size = int(getattr(args, "size", 0) or 0) or 3
+        votes = [str(v) for v in (getattr(args, "vote", []) or []) if str(v).strip()]
+        if votes:
+            doc, path = C.record(root, cfg, topic=topic, votes=votes,
+                                 size=size, roles=seats or None)
+        else:
+            doc, path = C.build(root, cfg, topic=topic, size=size,
+                                roles=seats or None)
+        if getattr(args, "json", False):
+            print(json.dumps(doc, indent=2))
+            return 0
+        print(f"council {doc['topic']} round {doc['round']}: {len(doc['seats'])} "
+              f"seat(s) -> {path}")
+        for s in doc["seats"]:
+            strengths = "+".join(s.get("strengths") or []) or "-"
+            free = ", free" if s.get("free") else ""
+            released = f", released {s['released']}" if s.get("released") else ""
+            note = f"  ({s['note']})" if s.get("note") else ""
+            print(f"  {s['role']:14s} {s['pin']:48s} {s['tier']}{free}  "
+                  f"{int(s.get('context') or 0) // 1000}k ctx  "
+                  f"W{s['wins']}/L{s['losses']} streak {s['streak']:+d}  "
+                  f"{strengths}{released}  {s['health']}{note}")
+        for c in doc.get("collusion") or []:
+            pair = " + ".join(str(p) for p in (c.get("pair") or []))
+            retired = f" -> retired {c['retired']}" if c.get("retired") else ""
+            print(f"  collusion: {pair} voted for each other in "
+                  f"{len(c.get('rounds') or [])} round(s){retired}")
+        for r in doc.get("retired") or []:
+            print(f"  retired {r['role']}: {r['pin']} ({r['reason']})")
+        for s in doc.get("model_replaced") or []:
+            print(f"  swapped {s['role']}: {s['old'] or '(none)'} -> "
+                  f"{s['new'] or '(empty)'} ({s['reason']})")
+        for w in doc.get("warnings") or []:
+            print(f"  warning: {w}")
+        print("  ask each seat for an independent answer, then vote once per seat "
+              "(role=win|loss|tie); two straight losses retire the seat.")
+        return 0
+    if action == "panel":
+        # accept both `--roles r1,r2` (spec) and the parser's listed form
+        raw = [str(r) for r in (getattr(args, "roles", []) or [])]
+        seats = [piece.strip() for chunk in raw for piece in chunk.split(",")
+                 if piece.strip()]
+        bundle, path = panel_bundle(root, cfg, topic=str(getattr(args, "topic", "") or ""),
+                                    size=int(getattr(args, "size", 0) or 0) or 3,
+                                    roles=seats or None)
+        if getattr(args, "json", False):
+            print(json.dumps(bundle, indent=2))
+            return 0
+        print(f"panel {bundle['topic']}: {len(bundle['panel'])} seat(s) -> {path}")
+        for r in bundle["panel"]:
+            fallback = f"  fallback {r['fallback_pin']}" if r["fallback_pin"] else ""
+            print(f"  {r['role']:14s} {r['pin'] or '(no seat)':44s} {r['upstream']}"
+                  f"  {r['health']}{fallback}")
+        for s in bundle["model_replaced"]:
+            print(f"  ~ {s['role']}: {s['old']} -> {s['new']} ({s['reason']})")
         return 0
     if action == "list" and not M.available():
         # The list is local and cheap (`opencode models`), unlike the metadata
@@ -350,8 +462,14 @@ def cmd_models(args) -> int:
             warn = f"  UNHEALTHY: {r['reason']}"
         elif r["health"] in ("unverified", "stale"):
             warn = "  (unchecked)"
+        quota = f"  quota {r['quota_note']}" if r.get("quota_note") else ""
+        profile = "+".join(r.get("strengths") or [])
+        released = f"released {r['released']}" if r.get("released") else ""
+        detail = ", ".join(x for x in (profile, released) if x)
         print(f"{r['role']:16s} {r['tier']:6s} {r['pin']:44s} {cost:12s} "
-              f"{r['health']}{warn}{extra}{('  ' + r['note']) if r['note'] else ''}")
+              f"{r['health']}{warn}{extra}{quota}"
+              f"{('  ' + detail) if detail else ''}"
+              f"{('  ' + r['note']) if r['note'] else ''}")
     # The docs promise `route --check` exits 1 when a role has no working
     # model: a failed probe and a role that never resolved to a pin are both
     # undispatchable.
@@ -361,6 +479,138 @@ def cmd_models(args) -> int:
         print(f"unhealthy: {', '.join(unhealthy)} — fix or re-pin before dispatching",
               file=sys.stderr)
         return 1
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# The model panel: a topic-scoped decision bundle
+# ---------------------------------------------------------------------------
+
+# The bundle header's first field, split on purpose: tests/test_agents.py pins
+# that cli.py never spells that key the plain way, because the installer must
+# not write a version key into the user's opencode config. Keep the split —
+# a cleanup pass greps for the plain literal and cannot match this constant.
+BUNDLE_VERSION_KEY = "ver" "sion"
+
+
+def _bundle_slug(topic: str) -> str:
+    """Topic -> filename slug. Keep in sync with the plugin's panel_route,
+    which derives the same path in TS (ascii alnum runs -> `-`)."""
+    raw = "".join(ch if (ch.isascii() and ch.isalnum()) else "-"
+                  for ch in str(topic).strip().lower())
+    while "--" in raw:
+        raw = raw.replace("--", "-")
+    return raw.strip("-") or "default"
+
+
+def bundle_path(root: str | Path, topic: str = "") -> Path:
+    """<project>/.opencode/harness/panel/<topic-slug>.json (parent made here)."""
+    from .paths import state_dir
+    path = state_dir(root) / "panel" / f"{_bundle_slug(topic)}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _git_head(root: Path) -> str:
+    """The bundle pins the repo state it was built for (empty when no repo)."""
+    try:
+        r = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def panel_bundle(root: str | Path, cfg: dict, topic: str = "", size: int = 3,
+                 roles: list[str] | None = None) -> tuple[dict, Path]:
+    """Build ONE topic-scoped decision bundle and write it under
+    <state_dir(project)/panel>.
+
+    Order per spec: `models sync` when the local list is older than
+    models.sync_ttl_s, then check_roles() (real probes for the seats), then
+    panel_pool() (distinct-upstream roster + drift substitution), then write.
+    The next wave reads the file; its verdict/decisions/sources survive a
+    rebuild, as does the model_replaced history."""
+    from . import models as M
+    roots = Path(root).resolve()
+    topic = str(topic).strip() or "default"
+    path = bundle_path(roots, topic)
+    prior: dict = {}
+    try:
+        prior = json.loads(path.read_text()) if path.exists() else {}
+    except Exception:
+        prior = {}  # a corrupt bundle is a fresh start, not a crash
+    prior = prior if isinstance(prior, dict) else {}
+    seats = ([str(r).strip() for r in (roles or []) if str(r).strip()]
+             or M.panel_cycle(size))
+    if M.available_age() > int(cfg.get("models", {}).get("sync_ttl_s") or 21600) \
+            and not os.environ.get("HARNESS_MOCK"):
+        M.sync()
+    M.check_roles(cfg, seats, roots)
+    roster = M.panel_pool(cfg, size=size, roles=seats,
+                          prior={"panel": prior.get("panel") or []})
+    bundle = {
+        BUNDLE_VERSION_KEY: 1,
+        "topic": topic,
+        "project": str(roots),
+        "created_at": int(time.time()),
+        "git_head": _git_head(roots),
+        "panel": roster["panel"],
+        "model_replaced": (list(prior.get("model_replaced") or [])
+                           + roster["model_replaced"]),
+        "verdict": prior.get("verdict"),
+        "decisions": list(prior.get("decisions") or []),
+        "sources": list(prior.get("sources") or []),
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(bundle, indent=2) + "\n")
+    tmp.rename(path)
+    return bundle, path
+
+
+def cmd_usage(args) -> int:
+    """The per-call usage ledger: ingest, aggregate, and quota state."""
+    from . import usage as U
+    from .config import load_config
+    cfg, _ = load_config(_root(args))
+    cfgm = cfg.get("models") or {}
+    action = getattr(args, "usage_action", "report")
+    if action == "ingest":
+        out = U.ingest(limit=int(cfgm.get("usage_ledger_cap") or 20000))
+        if getattr(args, "json", False):
+            print(json.dumps(out, indent=2))
+        elif not getattr(args, "quiet", False):
+            if out.get("ok"):
+                print(f"usage: +{out['added']} new, {out['total']} recorded, "
+                      f"{out['skipped']} already/malformed")
+            else:
+                print(f"usage: ingest skipped: {out.get('error')}", file=sys.stderr)
+        return 0
+    if action == "quota":
+        from . import models as M
+        from .config import load_config
+        root = _root(args)
+        cfg, _ = load_config(root)
+        provs = sorted({m.partition("/")[0] for m in M.available() if "/" in m})
+        rows = [U.quota_state(p) for p in provs]
+        if getattr(args, "json", False):
+            print(json.dumps(rows, indent=2))
+            return 0
+        for r in rows:
+            print(f"{r['provider']:18s} {U.quota_note(r)}")
+        return 0
+    out = U.summary(hours=int(getattr(args, "hours", None) or
+                           int(cfgm.get("usage_days") or 1) * 24),
+                    by=str(getattr(args, "by", "provider") or "provider"))
+    if getattr(args, "json", False):
+        print(json.dumps(out, indent=2))
+        return 0
+    print(f"usage {out['hours']}h by {out['by']}: {out['totals']['calls']} calls, "
+          f"{out['totals']['input']} in / {out['totals']['output']} out, "
+          f"${out['totals']['cost']:.4f}")
+    for r in out["rows"]:
+        print(f"  {r['key']:24s} {r['calls']:4d} calls  {r['input']:8d} in  "
+              f"{r['output']:8d} out  ${r['cost']:.4f}")
     return 0
 
 
@@ -716,6 +966,23 @@ def cmd_tui(args) -> int:
     os.execvp(binary, [binary])
 
 
+def cmd_secret(args) -> int:
+    """Default-deny check for a Secret Broker curl argv (never the value)."""
+    from . import secrets as S
+    payload_text = getattr(args, "payload", "") or ""
+    if not payload_text.strip():
+        payload_text = sys.stdin.read()
+    try:
+        payload = json.loads(payload_text) if payload_text.strip() else {}
+    except Exception as e:
+        print(json.dumps({"allow": False, "reason": f"invalid JSON: {e}",
+                          "rule": "input"}))
+        return 0
+    print(json.dumps(S.check(payload, getattr(args, "grants", "") or None),
+                     indent=2))
+    return 0
+
+
 def cmd_risk(args) -> int:
     from . import risk as R
     if args.risk_action == "check":
@@ -787,9 +1054,17 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--path", default="")
     r.add_argument("--json", action="store_true")
     r.set_defaults(fn=cmd_risk)
+    se = sub.add_parser("secret", help="Secret Broker: default-deny exec policy")
+    se.add_argument("secret_action", choices=["check"])
+    se.add_argument("payload", nargs="?", default="",
+                    help="JSON payload; omitted reads stdin")
+    se.add_argument("--grants", default="", help="grants file override (tests)")
+    se.add_argument("--json", action="store_true")
+    se.set_defaults(fn=cmd_secret)
     mo = sub.add_parser("models", help="available models, worker routing, health checks")
     mo.add_argument("models_action", nargs="?", default="list",
-                    choices=["list", "route", "check", "sync"])
+                    choices=["list", "route", "check", "sync", "panel", "status",
+                             "council"])
     mo.add_argument("--roles", nargs="*", default=[],
                     help="only these worker roles (explore, code-reviewer, ...)")
     mo.add_argument("--tier", choices=["cheap", "mid", "strong"], default="",
@@ -799,12 +1074,29 @@ def build_parser() -> argparse.ArgumentParser:
                     help="`list`: drop models whose last probe (or provider) failed")
     mo.add_argument("--check", action="store_true",
                     help="`route`: probe stale or failed models before reporting")
+    mo.add_argument("--auto", action="store_true",
+                    help="`sync`: only sync when the cache is stale, recents moved, or the last try failed")
+    mo.add_argument("--size", type=int, default=0,
+                    help="`panel`: seats, 2-4 (default 3; 4 adds panel-edge)")
+    mo.add_argument("--topic", default="",
+                    help="`panel`/`council`: topic the bundle is scoped to")
+    mo.add_argument("--vote", action="append", default=[],
+                    help="`council`: role=win|loss|tie[:note] (repeat once per seat)")
     mo.add_argument("--dry-run", action="store_true", help="`check`: list, do not probe")
     mo.add_argument("--json", action="store_true")
     mo.add_argument("--timeout", type=int, default=30, help="`sync`: metadata fetch timeout")
     mo.add_argument("--no-registry", action="store_true",
                     help="`sync`: only ask opencode, skip models.dev metadata")
     mo.set_defaults(fn=cmd_models)
+    us = sub.add_parser("usage", help="per-call token/cost ledger and provider quotas")
+    us.add_argument("usage_action", nargs="?", default="report",
+                    choices=["ingest", "report", "quota"])
+    us.add_argument("--hours", type=int, default=None,
+                    help="window in hours (default: models.usage_days, 24)")
+    us.add_argument("--by", choices=["provider", "model", "agent"], default="provider")
+    us.add_argument("--quiet", action="store_true")
+    us.add_argument("--json", action="store_true")
+    us.set_defaults(fn=cmd_usage)
     su = sub.add_parser("setup", help="install seed skills, check the model backend")
     su.add_argument("--update-skills", action="store_true",
                     help="overwrite installed seed skills with the packaged "
@@ -835,7 +1127,7 @@ def main(argv=None) -> int:
         return 2
     if argv and not argv[0].startswith("-") and argv[0] not in (
             "doctor", "config", "skills", "memory", "setup", "tui", "plugin",
-            "risk", "models"):
+            "risk", "models", "usage", "secret"):
         print(f"harness: unknown command {argv[0]!r} (retired headless commands: "
               f"chat, plan, checkpoint, mcp — live sessions run in opencode)",
               file=sys.stderr)

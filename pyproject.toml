@@ -23,5 +23,5 @@ include = ["harness*"]
 [tool.setuptools.package-data]
 # data/skills/** keeps the skill tree intact (SKILL.md plus its references/),
 # so an installed package seeds the same files the repo tree ships.
-harness = ["harness-opencode.json", "data/model-tiers.json", "data/skills/**/*",
+harness = ["harness-opencode.json", "data/model-tiers.json", "data/panel-upstream.json", "data/provider-limits.json", "data/skills/**/*",
            "plugin/*.ts", "plugin/*.tsx"]

@@ -41,6 +41,14 @@ function you touch and fix it once where all callers route through.
 - Workers return SUMMARY+DIFF (<=4k). Full logs stay in `.opencode/harness/workers/<id>/`, not parent context.
 - Status ends done|error|timeout (`rlm.py:11`); `stale` is a computed verdict, not a terminal state. `rlm.worker_timeout` defaults 600s. A child's summary arrives once, as the task tool's result: read it there, never hunt a second copy.
 
+## Model council — diverse models, survival by vote
+- Start a non-trivial plan or wave with `council({topic})`. It seats 2-4 **distinct upstreams**, each with tier, strengths, release date, context, health and win/loss record. Pass each seat's pin as the subagent `model`.
+- Ask every seat for an **independent** answer first (plan, competing implementation, test strategy); never show one seat another's answer before it has written its own. Then anonymize the answers and have each seat vote once per round with attributed ballots: `council({topic, votes:["panel-lead>panel-peer=win", ...]})`. The tool refuses self-votes (a seat never judges its own answer) and unknown voters.
+- **Two consecutive losses retire that pin** for the topic. Two seats that award each other a win in two rounds are a **collusion bloc** — the lower scorer is retired the same way. The next build seats a different model on a different upstream automatically; never re-seat a retired pin. If no replacement exists the seat is reported empty — say so; never invent a model.
+- Use the roster across phases, re-resolving only what a phase needs: `council({topic, roles:["panel-lead","panel-peer"]})` for planning, `["panel-peer","panel-edge"]` for execution, `["panel-skeptic","panel-edge"]` for tests; the other seats keep their pins. Lead drives the plan, peer proposes the implementation, skeptic attacks the tests. When a seat's answer is weak, ask the other seats for a competing answer and record that round's vote before retiring it.
+- `models_route` shows each pin's strengths, release date, context and quota; prefer a **verified** model whose strengths fit the role. Release date is only a tiebreak — newer is not automatically better. Never dispatch a `failed` pin.
+- The spawn cap still applies: at most 2 seats per wave; queue the third.
+
 ## Modes
 - code: all tools. orchestrator: never write product code; only plan/dispatch/merge/verify.
 - plan/ask/review: read-only set (read|glob|grep|skill_view|skills_list|memory|risk_check). Debug: all tools.

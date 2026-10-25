@@ -40,16 +40,23 @@ DEFAULT_CONFIG: dict = {
     "mcp": {"servers": {}},
     # Worker routing. Roles are the subagent names minus `harness-`; each gets
     # the cheapest model of its tier that the install can reach (free first),
-    # and a variant only when models.dev says the model supports it. The
-    # generated agent files carry the result (`model: provider/model#variant`),
-    # because opencode's subagent tool has no model parameter.
+    # and a variant only when models.dev says the model supports it. Generated
+    # agent files intentionally carry NO `model:` by default: the orchestrator
+    # passes `model: <pin>` on every task/subagent dispatch, after a fresh
+    # models_route. `pin_agents: true` is the opt-in fallback for clients that
+    # cannot pass a per-call model.
     "models": {
         "prefer_free": True,
-        "pin_agents": True,
+        "pin_agents": False,
         "fallback_to_verified": True,
         "health_ttl_s": 1800,
         "check_timeout_s": 90,
         "check_candidates": 3,
+        # the model panel re-syncs at most this often (6h) when one is built
+        "sync_ttl_s": 21600,
+        # usage ledger retention (tokens/cost only — never message text)
+        "usage_days": 7,
+        "usage_ledger_cap": 20000,
         "routes": {
             "explore": {"tier": "cheap", "variant": "low"},
             "librarian": {"tier": "cheap", "variant": "low"},
@@ -60,11 +67,21 @@ DEFAULT_CONFIG: dict = {
             "plan-consultant": {"tier": "strong", "variant": "high"},
             "plan-reviewer": {"tier": "strong", "variant": "high"},
             "deep": {"tier": "strong", "variant": "high"},
+            # Panel roles (one panelist each, distinct upstreams). A lead to
+            # chair the topic, a peer at mid to reason about the code path,
+            # a skeptic to attack the plan, and an optional cheap edge voice.
+            "panel-lead": {"tier": "strong", "variant": "max"},
+            "panel-peer": {"tier": "mid", "variant": "high"},
+            "panel-skeptic": {"tier": "strong", "variant": "high"},
+            "panel-edge": {"tier": "cheap", "variant": "low"},
         },
     },
     "security": {"shell_allowlist": ["git", "pytest", "python", "python3", "npm",
                                       "npx", "rg", "grep", "ls", "cat", "bun",
                                       "node", "uv"]},
+    # Secret Broker config: user-only, default enabled, fail-open.
+    # `exec_enabled` gates the `secret_exec` native tool (curl only).
+    "secrets": {"enabled": True, "redact_output": True, "exec_enabled": True},
 }
 
 # Agent-mutable top-level keys. Everything else needs human CLI.
@@ -238,7 +255,8 @@ def _validate(cfg: dict) -> None:
         model = spec.get("model")
         if model is not None and "/" not in str(model):
             raise ValueError(f"models.routes.{role}.model must be provider/model")
-    for key in ("health_ttl_s", "check_timeout_s", "check_candidates"):
+    for key in ("health_ttl_s", "check_timeout_s", "check_candidates", "sync_ttl_s",
+                "usage_days", "usage_ledger_cap"):
         if key in models and not isinstance(models[key], int):
             raise ValueError(f"models.{key} must be an int")
 

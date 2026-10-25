@@ -1,0 +1,10 @@
+{
+  "note": "Hand-seeded upstream -> gateway-ids map, maintained by humans only. The panel dedupes by upstream, so the same model family served by several gateways counts as ONE upstream. The key (lowercase) is the canonical upstream; the array lists gateway ids (normalized by harness/models.py upstream_key: lowercase, `:free` and `#variant` stripped, gateway prefix before the first `/` stripped) that are known to serve it. Under-dedupe is safe, over-dedupe starves the panel — add an entry only when two gateways are PROVEN to serve the same upstream.",
+  "upstreams": {
+    "z-ai-glm-5.3-flash": [
+      "opencode/glm-5.3-flash-free",
+      "openrouter/z-ai/glm-5.3-flash-free:free",
+      "kilo/z-ai/glm-5.3-flash-free:free"
+    ]
+  }
+}

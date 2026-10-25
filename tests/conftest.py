@@ -47,7 +47,13 @@ def _reap() -> None:
     """Remove everything a test run may have left directly in SCRATCH."""
     if not SCRATCH.is_dir():
         return
+    # The suite owns SCRATCH's temp junk. One reserved exception: artifacts/
+    # holds durable agent/user files (specs, run logs) that must survive every
+    # run, so the sweep pretends that subtree does not exist.
+    artifacts = SCRATCH / "artifacts"
     for path in SCRATCH.iterdir():
+        if path == artifacts:
+            continue
         try:
             if path.is_dir():
                 shutil.rmtree(path, ignore_errors=True)
