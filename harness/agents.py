@@ -144,12 +144,22 @@ def expected_agent_files(root: str | Path = ".") -> dict[Path, str]:
 
 def install_managed_agents(root: str | Path = ".") -> list[Path]:
     installed: list[Path] = []
+    files = expected_agent_files(root)
+    if not files:
+        # expected_agent_files is empty only when the bundled JSON cannot be
+        # read (a broken package). Pruning on that would delete every managed
+        # agent — the one failure this function must never cause.
+        return []
     target = agents_dir()
     target.mkdir(parents=True, exist_ok=True)
-    for path, content in expected_agent_files(root).items():
+    for path, content in files.items():
         existed = path.exists()
         if not existed or path.read_text(errors="replace") != content:
-            path.write_text(content)
+            # Temp + rename: a crash mid-write cannot leave opencode loading a
+            # half-written agent prompt.
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(content)
+            tmp.replace(path)
         installed.append(path)
     # Prune only Harness-managed files from an older package layout.
     for path in target.glob(f"{PREFIX}*.md"):

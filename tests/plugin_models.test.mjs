@@ -114,6 +114,19 @@ describe("models_route formatting", () => {
     assert.match(text, /Do not dispatch: deep/);
   });
 
+  it("shows a pin's cross-topic council record when it has one", () => {
+    const text = routeLines([
+      { role: "deep", pin: "acme/x#high", tier: "strong", health: "ok",
+        standing: { wins: 3, losses: 1 } },
+    ]);
+    assert.match(text, /council W3\/L1/);
+    const plain = routeLines([
+      { role: "deep", pin: "acme/x#high", tier: "strong", health: "ok" },
+    ]);
+    assert.doesNotMatch(plain, /council W/);
+    assert.doesNotMatch(plain, /undefined/);
+  });
+
   it("says so when nothing is routed", () => {
     assert.match(routeLines([]), /no routed roles/);
   });

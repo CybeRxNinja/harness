@@ -294,3 +294,165 @@ def test_cli_council_builds_and_records(tmp_path, monkeypatch, capsys):
                  "--vote", f"{role}=loss", "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["round"] == 1 and doc["seats"][0]["losses"] == 1
+
+
+def test_round_verdict_names_the_seat_the_ballots_backed(tmp_path, monkeypatch):
+    """A round is a decision: the most-voted seat and its pin are recorded,
+    and a rebuild cannot forget what the round decided."""
+    _home(tmp_path, monkeypatch, _healthy())
+    from harness import council as C
+    cfg = _cfg()
+    first, _ = C.build(tmp_path, cfg, topic="verdict")
+    a, b, c = [s["role"] for s in first["seats"]]
+    doc, _ = C.record(tmp_path, cfg, topic="verdict",
+                      votes=[f"{a}>{b}=win", f"{c}>{b}=win", f"{b}>{a}=loss"])
+    v = doc["verdict"]
+    assert (v["role"], v["round"], v["wins"]) == (b, 1, 2)
+    assert (v["ballots"], v["voters"]) == (3, 3)
+    assert v["pin"] == next(s["pin"] for s in first["seats"] if s["role"] == b)
+    again, _ = C.build(tmp_path, cfg, topic="verdict")
+    assert again["verdict"]["role"] == b and again["verdict"]["pin"] == v["pin"]
+
+
+def test_a_single_ballot_round_warns_it_is_one_voice(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch, _healthy())
+    from harness import council as C
+    cfg = _cfg()
+    first, _ = C.build(tmp_path, cfg, topic="one")
+    a, b = [s["role"] for s in first["seats"][:2]]
+    doc, _ = C.record(tmp_path, cfg, topic="one", votes=[f"{a}>{b}=win"])
+    assert doc["verdict"]["role"] == b and doc["verdict"]["voters"] == 1
+    assert any("one voice" in w for w in doc["warnings"])
+
+
+def test_votes_feed_the_cross_topic_pin_standing(tmp_path, monkeypatch):
+    """The topic file is per project; a pin's record follows the model, so
+    routing can see it in a later session or another topic."""
+    _home(tmp_path, monkeypatch, _healthy())
+    from harness import council as C
+    from harness import models as M
+    cfg = _cfg()
+    first, _ = C.build(tmp_path, cfg, topic="stand")
+    lead, peer, skeptic = [s["role"] for s in first["seats"]]
+    C.record(tmp_path, cfg, topic="stand",
+             votes=[f"{peer}>{lead}=loss", f"{skeptic}>{lead}=loss"])
+    book = M.standing()
+    pin = first["seats"][0]["pin"]
+    assert book[pin]["losses"] == 2
+    assert book[pin]["wins"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Blind judge pass: each seat scores the OTHER seats' anonymized answers
+# ---------------------------------------------------------------------------
+
+def _fake_judge(captured, fail_pin=""):
+    def ask(pin, prompt, cwd, timeout_s):
+        captured.append(prompt)
+        if fail_pin and pin == fail_pin:
+            return {"ok": False, "reason": "provider.quota: no credits",
+                    "cost": 0.0, "text": "", "error": "provider.quota"}
+        sections = {}
+        for chunk in prompt.split("### ")[1:]:
+            label, _, body = chunk.partition("\n")
+            sections[label.strip()] = body.strip()
+        scores = {label: (9 if "GOOD" in body else 1 if "BAD" in body else 5)
+                  for label, body in sections.items()}
+        return {"ok": True, "reason": "", "cost": 0.0,
+                "text": json.dumps(scores), "error": ""}
+    return ask
+
+
+def _answers():
+    return [{"role": "panel-lead", "text": "BAD plan"},
+            {"role": "panel-peer", "text": "GOOD plan"},
+            {"role": "panel-skeptic", "text": "MEH plan"}]
+
+
+def test_judge_scores_anonymized_answers_and_records_ballots(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch, _healthy())
+    from harness import council as C
+    from harness import models as M
+    cfg = _cfg()
+    C.build(tmp_path, cfg, topic="judge")
+    captured = []
+    monkeypatch.setattr(M, "ask_model", _fake_judge(captured))
+    doc, _ = C.judge(tmp_path, cfg, topic="judge", answers=_answers())
+    assert doc["round"] == 1, "a judge pass is a recorded round"
+    assert doc["verdict"]["role"] == "panel-peer" and doc["verdict"]["wins"] == 2
+    votes = doc["rounds"][-1]["votes"]
+    assert votes and all(v["source"] == "judge" for v in votes)
+    assert all(v["voter"] != v["role"] for v in votes), "no seat judges itself"
+    assert not any(v["role"] == "panel-lead" for v in votes), \
+        "the BAD answer was nobody's best"
+    # Blind: prompts arrive in seat order and each omits that judge's own
+    # answer, so no judge can see (or score) its own text.
+    assert len(captured) == 3
+    assert "BAD plan" not in captured[0] and "GOOD plan" in captured[0]
+    assert "GOOD plan" not in captured[1] and "BAD plan" in captured[1]
+    assert "MEH plan" not in captured[2] and "BAD plan" in captured[2]
+
+
+def test_judge_needs_two_answers_and_spends_no_request(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch, _healthy())
+    from harness import council as C
+    from harness import models as M
+    cfg = _cfg()
+    C.build(tmp_path, cfg, topic="thin")
+    monkeypatch.setattr(M, "ask_model", lambda *a: (_ for _ in ()).throw(
+        AssertionError("called without enough answers")))
+    doc, _ = C.judge(tmp_path, cfg, topic="thin",
+                     answers=[{"role": "panel-lead", "text": "only one"}])
+    assert doc["round"] == 0
+    assert any("at least two" in w for w in doc["warnings"])
+
+
+def test_a_failed_judge_warns_instead_of_inventing_a_vote(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch, _healthy())
+    from harness import council as C
+    from harness import models as M
+    cfg = _cfg()
+    first, _ = C.build(tmp_path, cfg, topic="fail")
+    lead_pin = first["seats"][0]["pin"]
+    monkeypatch.setattr(M, "ask_model", _fake_judge([], fail_pin=lead_pin))
+    doc, _ = C.judge(tmp_path, cfg, topic="fail", answers=_answers())
+    assert any("judge panel-lead failed" in w for w in doc["warnings"])
+    assert doc["round"] == 1, "the other judges still decide the round"
+    votes = doc["rounds"][-1]["votes"]
+    assert all(v["voter"] != "panel-lead" for v in votes)
+
+
+def test_judge_ballots_cannot_prove_collusion(tmp_path, monkeypatch):
+    """Independent blind scores are not a voting pact: mutual top picks in two
+    rounds must not retire a seat as colluders."""
+    from harness import council as C
+    rounds = [
+        {"round": n, "votes": [
+            {"voter": "panel-lead", "role": "panel-peer", "verdict": "win",
+             "source": "judge"},
+            {"voter": "panel-peer", "role": "panel-lead", "verdict": "win",
+             "source": "judge"},
+        ]} for n in (1, 2)
+    ]
+    assert C.detect_collusion(rounds) == []
+    manual = [
+        {"round": n, "votes": [
+            {"voter": "panel-lead", "role": "panel-peer", "verdict": "win"},
+            {"voter": "panel-peer", "role": "panel-lead", "verdict": "win"},
+        ]} for n in (1, 2)
+    ]
+    assert C.detect_collusion(manual), "manual mutual wins are still a bloc"
+
+
+def test_cli_judges_answers_from_a_file(tmp_path, monkeypatch, capsys):
+    _home(tmp_path, monkeypatch, _healthy())
+    from harness import models as M
+    from harness.cli import main
+    monkeypatch.setattr(M, "ask_model", _fake_judge([]))
+    path = tmp_path / "answers.json"
+    path.write_text(json.dumps(_answers()))
+    args = ["--root", str(tmp_path), "models", "council", "--topic", "cli-judge",
+            "--answers", str(path), "--json"]
+    assert main(args) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["round"] == 1 and doc["verdict"]["role"] == "panel-peer"

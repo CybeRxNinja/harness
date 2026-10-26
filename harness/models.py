@@ -103,6 +103,10 @@ def _health_path() -> Path:
     return user_dir() / "models-health.json"
 
 
+def _standing_path() -> Path:
+    return user_dir() / "model-standing.json"
+
+
 def _load_json(path: Path, default):
     try:
         return json.loads(path.read_text())
@@ -115,6 +119,55 @@ def _write_json(path: Path, data) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=1) + "\n")
     tmp.rename(path)
+
+
+def standing() -> dict[str, dict]:
+    """Per-pin council record: {pin: {wins, losses, ties, updated_at}}.
+
+    The council file is per topic; how a model fares across topics is evidence
+    about the model itself, so it is kept here beside the health ledger.
+    """
+    data = _load_json(_standing_path(), {})
+    pins = data.get("pins") if isinstance(data, dict) else None
+    return {str(k): dict(v) for k, v in (pins or {}).items()
+            if isinstance(v, dict)}
+
+
+def record_standing(pin: str, verdict: str) -> None:
+    """Count one council ballot against a pin; routing reads the tally back."""
+    key = str(pin or "").strip()
+    field = {"win": "wins", "loss": "losses", "tie": "ties"}.get(verdict)
+    if not key or not field:
+        return
+    data = _load_json(_standing_path(), {})
+    pins = data.get("pins") if isinstance(data, dict) else None
+    pins = dict(pins) if isinstance(pins, dict) else {}
+    row = pins.get(key) if isinstance(pins.get(key), dict) else {}
+    row = {"wins": int(row.get("wins") or 0),
+           "losses": int(row.get("losses") or 0),
+           "ties": int(row.get("ties") or 0)}
+    row[field] += 1
+    row["updated_at"] = int(time.time())
+    pins[key] = row
+    if len(pins) > 200:
+        pins = dict(sorted(pins.items(),
+                           key=lambda kv: int(kv[1].get("updated_at") or 0))[-200:])
+    _write_json(_standing_path(), {"version": 1, "pins": pins})
+
+
+def _standing_rank(stats: dict | None) -> tuple[int, int]:
+    """(demote, promote) bands from a pin's cross-topic council record.
+
+    Deliberately conservative: three decided ballots and a two-vote net lead.
+    One loss is noise, and a topic's own survival rule already handles streaks;
+    routing should not chase a single bad debate.
+    """
+    stats = stats or {}
+    wins = int(stats.get("wins") or 0)
+    losses = int(stats.get("losses") or 0)
+    demote = 1 if (losses >= 3 and losses >= wins + 2) else 0
+    promote = 0 if (wins >= 3 and wins >= losses + 2) else 1
+    return demote, promote
 
 
 def _age(data: dict) -> int:
@@ -624,16 +677,24 @@ def model_health(model_id: str, ttl_s: int = 1800,
     return ("failed", failed_reason) if failed_reason else ("unchecked", "")
 
 
-def _probe(pin: str, cwd: Path, timeout_s: int) -> dict:
-    cmd = ["opencode", "run", "--format", "json", "-m", pin, PROBE_MARK]
+def _run_model(pin: str, prompt: str, cwd: Path, timeout_s: int) -> dict:
+    """One request through opencode: {ok, reason, cost, text, error}.
+
+    `opencode run --format json` is the only supported call path, so a probe
+    and a judge score exactly what a dispatch would: auth, quota, model name
+    and variant. The prompt travels as argv (no shell), so answer text can
+    never be interpreted as a command.
+    """
+    cmd = ["opencode", "run", "--format", "json", "-m", pin, prompt]
     try:
         r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
                            timeout=timeout_s)
     except FileNotFoundError:
-        return {"ok": False, "reason": "opencode not on PATH", "cost": 0.0, "reply": ""}
+        return {"ok": False, "reason": "opencode not on PATH", "cost": 0.0,
+                "text": "", "error": ""}
     except subprocess.TimeoutExpired:
         return {"ok": False, "reason": f"timeout after {timeout_s}s", "cost": 0.0,
-                "reply": ""}
+                "text": "", "error": ""}
     text, cost, err = "", 0.0, ""
     for line in (r.stdout or "").splitlines():
         try:
@@ -653,7 +714,7 @@ def _probe(pin: str, cwd: Path, timeout_s: int) -> dict:
             # useful reason; the process exit code alone says nothing.
             e = ev.get("error") or {}
             err = f"{e.get('type') or 'error'}: {str(e.get('message') or '')[:140]}".strip()
-    ok = r.returncode == 0 and PROBE_OK in text.upper()
+    ok = r.returncode == 0
     reason = ""
     if not ok:
         tail = [ln for ln in (r.stderr or "").strip().splitlines() if ln.strip()]
@@ -661,7 +722,23 @@ def _probe(pin: str, cwd: Path, timeout_s: int) -> dict:
                          f"exit {r.returncode}, " +
                          ("no reply" if not text.strip() else "unexpected reply"))
     return {"ok": ok, "reason": reason, "cost": cost,
-            "reply": text.strip()[:40], "error": err}
+            "text": text.strip(), "error": err}
+
+
+def ask_model(pin: str, prompt: str, cwd: Path, timeout_s: int) -> dict:
+    """Ask one model a free-form question (the council's blind judge pass)."""
+    return _run_model(pin, prompt, cwd, timeout_s)
+
+
+def _probe(pin: str, cwd: Path, timeout_s: int) -> dict:
+    res = _run_model(pin, PROBE_MARK, cwd, timeout_s)
+    ok = res["ok"] and PROBE_OK in res["text"].upper()
+    reason = ""
+    if not ok:
+        reason = res["reason"] or ("exit 0, " + ("no reply" if not res["text"].strip()
+                                                else "unexpected reply"))
+    return {"ok": ok, "reason": reason, "cost": res["cost"],
+            "reply": res["text"][:40], "error": res["error"]}
 
 
 def check(pins: list[str], cfg: dict, project: str | Path = ".") -> list[dict]:
@@ -816,16 +893,23 @@ def _ranked(role: str, spec: dict, pool: list[dict], reg: dict,
         # the point of cheap); mid/strong work takes the most capable one and
         # price breaks ties. A verified model outranks all of it — see below.
         dist = _tier_distance(tier_wanted, str(m.get("tier") or "mid"))
+        # The council's cross-topic record: a proven debate loser drops behind
+        # every neutral peer of its tier (fit does not save it), while a proven
+        # winner only breaks a fit tie — capability and price still lead.
+        demote, promote = _standing_rank(m.get("standing"))
         # Release date is the LAST tiebreak: newer wins only when tier, fit,
         # price and context are equal. It never overrides capability.
         if tier_wanted == "cheap":
-            return (dist, 0 if (m["free"] and prefer_free) else 1, -fit, m["cost_out"],
-                    m["cost_in"], -int(m.get("context") or 0),
+            return (dist, demote, 0 if (m["free"] and prefer_free) else 1, -fit,
+                    promote, m["cost_out"], m["cost_in"],
+                    -int(m.get("context") or 0),
                     -_released_key(m.get("released")), m["model"])
-        return (dist, -fit, 0 if (m["free"] and prefer_free) else 1, m["cost_out"],
+        return (dist, demote, -fit, promote,
+                0 if (m["free"] and prefer_free) else 1, m["cost_out"],
                 m["cost_in"], -int(m.get("context") or 0),
                 -_released_key(m.get("released")), m["model"])
 
+    book = standing()
     ranked: list[tuple[dict, str, dict]] = []
     for cand in cands:
         variant = variant_for(cand["model"], wanted_variant, reg, trust=bool(explicit))
@@ -837,7 +921,8 @@ def _ranked(role: str, spec: dict, pool: list[dict], reg: dict,
         quota = quotas[prov]
         ranked.append(({**cand, "variant": variant, "pin": pin,
                         "provider": prov, "quota": quota,
-                        "quota_note": usage.quota_note(quota)}, hstate, hrow))
+                        "quota_note": usage.quota_note(quota),
+                        "standing": book.get(pin) or {}}, hstate, hrow))
     # Band by what the last probe said BEFORE rank order: ok first; a merely
     # stale or never-probed pin in the middle (it was never discredited); a
     # pin whose last known probe failed last. Selection overrides in route()
@@ -993,10 +1078,12 @@ def route(cfg: dict, roles: list[str] | None = None,
                      (f"no usable {wanted_tier} model within one tier — "
                       "agent inherits session model")})
         continue
+    book = standing()
     for row in rows:
         row.setdefault("provider", str(row.get("model") or "").partition("/")[0])
         row.setdefault("quota", {})
         row.setdefault("quota_note", "")
+        row["standing"] = book.get(str(row.get("pin") or "")) or {}
         if row.get("model"):
             cand = classify(row["model"], reg)
             row["released"] = cand.get("released") or ""
@@ -1013,7 +1100,8 @@ def route(cfg: dict, roles: list[str] | None = None,
                          "model": "", "variant": "", "pin": "", "free": False,
                          "cost_in": 0.0, "cost_out": 0.0, "context": 0,
                          "health": "unverified", "checked_at": 0, "reason": "",
-                         "strengths": [], "fallback": "", "fallback_pin": "",
+                         "strengths": [], "standing": {},
+                         "fallback": "", "fallback_pin": "",
                          "note": "unknown role — add it to models.routes"})
     return rows
 

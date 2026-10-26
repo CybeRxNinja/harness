@@ -1,7 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const { councilLines, councilArgs } = await import("../harness/plugin/harness.ts");
+const { councilLines, councilArgs, councilAnswers } = await import(
+  "../harness/plugin/harness.ts"
+);
 
 const DOC = {
   topic: "plan-auth",
@@ -43,6 +45,10 @@ const DOC = {
     { pair: ["panel-peer", "panel-skeptic"], rounds: [1, 2],
       retired: "opencode/beam-free#high" },
   ],
+  verdict: {
+    round: 2, role: "panel-lead", pin: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free#high",
+    wins: 2, ballots: 3, voters: 3,
+  },
   warnings: ["ignored vote 'x': no seat"],
 };
 
@@ -50,6 +56,7 @@ describe("council formatting", () => {
   it("shows strengths, release, record, retirement and swaps", () => {
     const text = councilLines(DOC);
     assert.match(text, /council plan-auth · round 2 · 2 seat\(s\)/);
+    assert.match(text, /round 2 verdict: panel-lead \(kilo\/nvidia\/nemotron-3-ultra-550b-a55b:free#high\) took 2\/3 win\(s\) from 3 voter\(s\)/);
     assert.match(text, /reasoning\+code/);
     assert.match(text, /released 2026-08-01/);
     assert.match(text, /W2\/L0 streak \+2/);
@@ -99,5 +106,30 @@ describe("council argv", () => {
   it("omits roles when none are asked for", () => {
     const args = councilArgs("/repo", { topic: "x" });
     assert.equal(args.includes("--roles"), false);
+  });
+
+  it("sends judge answers on stdin and keeps --roles last", () => {
+    const args = councilArgs("/repo", {
+      topic: "x",
+      answers: [{ role: "panel-lead", text: "a plan" }],
+      roles: ["panel-lead", "panel-peer"],
+    });
+    const at = args.indexOf("--answers");
+    assert.deepEqual(args.slice(at, at + 2), ["--answers", "-"]);
+    assert.ok(at < args.indexOf("--roles"), "--answers takes one value, roles last");
+    assert.deepEqual(args.slice(-3), ["--roles", "panel-lead", "panel-peer"]);
+  });
+
+  it("serializes only well-formed answers for the judge pass", () => {
+    const payload = councilAnswers({
+      answers: [
+        { role: "panel-lead", text: "a" },
+        { role: "", text: "no seat" },
+        { role: "panel-peer", text: "" },
+      ],
+    });
+    assert.deepEqual(JSON.parse(payload), [{ role: "panel-lead", text: "a" }]);
+    assert.equal(councilAnswers({}), "");
+    assert.equal(councilAnswers({ answers: [] }), "");
   });
 });

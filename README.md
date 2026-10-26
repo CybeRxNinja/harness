@@ -1,6 +1,6 @@
 [![ci](https://github.com/CybeRxNinja/harness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CybeRxNinja/harness/actions/workflows/ci.yml)
 [![release](https://github.com/CybeRxNinja/harness/actions/workflows/release.yml/badge.svg)](https://github.com/CybeRxNinja/harness/releases)
-[![tests](https://img.shields.io/badge/tests-201%20passing-brightgreen)](.github/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-402%20passing-brightgreen)](.github/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![release](https://img.shields.io/github/v/tag/CybeRxNinja/harness?filter=plugin-v*&label=plugin)](https://github.com/CybeRxNinja/harness/releases/latest)
 
@@ -40,7 +40,7 @@ and re-runnable locally (the former live smoke is removed):
 | worker rows reach a terminal state | `tests/test_rlm.py`: `is_terminal` / `worker_timeout` readers behind `harness doctor` (live routing is opencode's native `task` tool) |
 | entrypoints never break a boot | `tests/test_plugin.py` transpiles both files with `Bun.Transpiler`; bad `setup()` returns are pinned by tests |
 | the model's plan lands in the harness todo space | verified on a real server: `opencode run "…call todowrite…"` → rows landed in `<project>/.opencode/harness/sessions.db` under the run's session id, painted by the panel off a real pty capture |
-| 201 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
+| 402 tests, no third-party deps | `HARNESS_MOCK=1 python -m pytest -q` |
 
 Latest release: **[`plugin-v0.17`](https://github.com/CybeRxNinja/harness/releases/tag/plugin-v0.17)**
 — `--from-release` assets are byte-identical to the checkout, a path last verified
@@ -124,10 +124,11 @@ An agent asked to install the plugin should follow [`docs/install-for-agents.md`
 
 ## CLI (installer, doctor, and kept operators)
 
-The Python side is what installs and inspects the plugin. The headless
-brain (`harness chat`, `plan`, `checkpoint`, `mcp`) was retired (the stubs exit 2): live
+The Python side is what installs and inspects the plugin. The retired headless
+brain (`harness chat`, `plan`, `checkpoint`) is gone (the stubs exit 2): live
 sessions run inside opencode, where the plugin provides the same features
-natively (task routing, compaction brief, context memory, `wait`):
+natively (task routing, compaction brief, context memory, `wait`). MCP servers
+stay opencode-owned; harness wraps list/add/remove for agents and scripts:
 
 ```
 harness tui                  # config + plugin, then launch stock opencode
@@ -135,6 +136,7 @@ harness plugin install [--from-release latest]
 harness doctor [--verbose]   # plugin, memory, workers, permission policy
 harness skills list|view|pending|approve|reject
 harness memory search|save|refine|show|prune
+harness mcp list|add|remove  # servers in project/opencode.json (+ --global)
 harness config get|set|show [--scope user|project]
 ```
 

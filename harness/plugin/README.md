@@ -85,6 +85,14 @@ council({ topic: "auth-plan", votes: ["panel-lead>panel-peer=win",
 council({ topic: "auth-plan", roles: ["panel-skeptic", "panel-edge"] })
 ```
 
+Passing `answers: [{role, text}]` runs a **blind judge pass** instead: each
+seat scores the other seats' answers under neutral labels in one score-only
+request (its own answer is omitted, so it cannot self-vote), and the resulting
+ballots are recorded automatically. It costs one request per seat, runs at most
+two at a time, and reports a failed judge or a near-tie as a warning rather
+than inventing a vote. Blind ballots are exempt from collusion detection
+(independent scores cannot be a pact) but still count for win/loss survival.
+
 The tool refuses a seat's vote on its own answer and any voter that is not a
 seat. A seat that loses twice in a row is retired for that topic; two seats
 that award each other a win in two rounds are a collusion bloc, and the lower
@@ -96,6 +104,14 @@ other seats keep their pins and stay in the roster, so the same topic can
 change its active panel between phases. Release date is a last tiebreak,
 not a capability claim; profiles come from the synced model cache, and
 `models_route` prints strengths + release date beside every pin.
+
+Every round records a **verdict** — the seat the most ballots named, with
+ballot and voter counts — so the next phase can act on it; a round with fewer
+than two voters is reported as one voice. Votes also accumulate into a
+cross-topic per-pin record (`~/.harness/model-standing.json`), which
+`models_route` prints as `council Wn/Ln` and routing uses: a pin with a clear
+losing record drops behind a neutral peer of its tier, while a proven winner
+only breaks a fit tie.
 
 ## Secret Broker (`secret_exec`)
 

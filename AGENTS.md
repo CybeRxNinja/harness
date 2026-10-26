@@ -45,6 +45,9 @@ function you touch and fix it once where all callers route through.
 - Start a non-trivial plan or wave with `council({topic})`. It seats 2-4 **distinct upstreams**, each with tier, strengths, release date, context, health and win/loss record. Pass each seat's pin as the subagent `model`.
 - Ask every seat for an **independent** answer first (plan, competing implementation, test strategy); never show one seat another's answer before it has written its own. Then anonymize the answers and have each seat vote once per round with attributed ballots: `council({topic, votes:["panel-lead>panel-peer=win", ...]})`. The tool refuses self-votes (a seat never judges its own answer) and unknown voters.
 - **Two consecutive losses retire that pin** for the topic. Two seats that award each other a win in two rounds are a **collusion bloc** — the lower scorer is retired the same way. The next build seats a different model on a different upstream automatically; never re-seat a retired pin. If no replacement exists the seat is reported empty — say so; never invent a model.
+- Every round records a **verdict**: the seat the most ballots named, its pin, and how many seats actually voted. Act on that seat's answer; when the tool warns that fewer than two seats voted, the verdict is one voice — get the missing ballots before treating it as the council's decision.
+- `models_route` prints each pin's cross-topic `council W/L`. A pin with a clear losing record is routed behind a neutral peer of its tier (a proven winner only breaks a fit tie), so do not hand-pick a model the council has been voting out.
+- **No time to collect ballots?** Pass every seat's text as `answers` on the same `council` call: each seat scores the OTHER seats' anonymized answers in one request (its own omitted, so it cannot self-vote) and the ballots are recorded automatically. It costs one request per seat; a failed judge or a near-tie is reported as a warning, never invented as a vote. Blind judge ballots count for wins/losses but never for collusion — independent scores cannot be a pact.
 - Use the roster across phases, re-resolving only what a phase needs: `council({topic, roles:["panel-lead","panel-peer"]})` for planning, `["panel-peer","panel-edge"]` for execution, `["panel-skeptic","panel-edge"]` for tests; the other seats keep their pins. Lead drives the plan, peer proposes the implementation, skeptic attacks the tests. When a seat's answer is weak, ask the other seats for a competing answer and record that round's vote before retiring it.
 - `models_route` shows each pin's strengths, release date, context and quota; prefer a **verified** model whose strengths fit the role. Release date is only a tiebreak — newer is not automatically better. Never dispatch a `failed` pin.
 - The spawn cap still applies: at most 2 seats per wave; queue the third.
@@ -68,6 +71,11 @@ function you touch and fix it once where all callers route through.
 - L0 index only in context. `skill_view(name)` then `skill_view(name, references/x.md)` on demand.
 - Lessons-not-logs. Verification section = acceptance for ledger checkbox.
 - One system message per turn wins: history replays only the latest system note; never restate superseded directives.
+
+## MCP servers
+- opencode owns the MCP config. `harness mcp list [--json]` shows project and global servers (project wins) with env/header **keys** only.
+- Add or remove one only when the owner asked — a server is a host process: `harness mcp add NAME --command "npx -y <pkg>" [--env K=V]` (or `--url` for remote), `harness mcp remove NAME`; `--global` targets the user config.
+- A value passed via `--env`/`--header` is written to opencode.json (harness narrows that file to 0600). Prefer `opencode mcp auth` for OAuth, and never paste a secret into chat.
 
 ## Todo — one plan, kept current
 - Multi-step work starts with `todowrite`: the whole list up front, smallest verifiable task first, exactly ONE item `in_progress`.

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -30,6 +31,80 @@ def cmd_config(args) -> int:
         print(set_value(root, args.path, json.loads(args.value), args.scope))
     elif args.config_action == "show":
         print(json.dumps(redact(cfg), indent=2))
+    return 0
+
+
+def _pairs(rows) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for row in rows or []:
+        key, sep, value = str(row).partition("=")
+        if not sep or not key:
+            raise ValueError(f"expected KEY=VALUE, got {row!r}")
+        out.append((key, value))
+    return out
+
+
+def _mcp_reload(args, root: Path, MC) -> None:
+    if getattr(args, "no_reload", False):
+        return
+    res = MC.reload(root)
+    if not res["ok"]:
+        print(f"note: {res['out'] or 'opencode reload failed'} — restart opencode "
+              "to load the MCP change", file=sys.stderr)
+
+
+def cmd_mcp(args) -> int:
+    """List/add/remove MCP servers; opencode owns the config and the process."""
+    from . import mcp as MC
+    root = _root(args)
+    action = getattr(args, "mcp_action", "list") or "list"
+    if action == "list":
+        rows = MC.servers(root)
+        if getattr(args, "json", False):
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            print("no MCP servers configured — add one: harness mcp add NAME "
+                  "--command \"npx -y <server-package>\"")
+            return 0
+        for r in rows:
+            target = " ".join(r["command"]) if r["command"] else r["url"]
+            extra = ""
+            if r["environment"]:
+                extra += f"  env {', '.join(r['environment'])}"
+            if r["headers"]:
+                extra += f"  headers {', '.join(r['headers'])}"
+            state = "" if r["enabled"] else "  (disabled)"
+            print(f"{r['name']:24s} {r['type'] or '?':8s} {r['source']:7s} "
+                  f"{target}{extra}{state}")
+        return 0
+    name = str(getattr(args, "name", "") or "").strip()
+    if action == "remove":
+        path = MC.config_file(root, getattr(args, "global_", False))
+        if not name:
+            print("mcp remove needs a server name", file=sys.stderr)
+            return 2
+        if not MC.remove(root, name, global_=getattr(args, "global_", False)):
+            print(f"no MCP server {name!r} in {path}", file=sys.stderr)
+            return 1
+        print(f"removed {name} from {path}")
+        _mcp_reload(args, root, MC)
+        return 0
+    try:
+        env = _pairs(getattr(args, "env", []))
+        headers = _pairs(getattr(args, "header", []))
+    except ValueError as e:
+        print(f"mcp add: {e}", file=sys.stderr)
+        return 2
+    command = shlex.split(getattr(args, "command", "") or "")
+    res = MC.add(root, name, command=command, url=getattr(args, "url", ""),
+                 env=env, headers=headers,
+                 global_=getattr(args, "global_", False))
+    if res.get("out"):
+        print(res["out"])
+    if not res["ok"]:
+        return int(res.get("code") or 1)
+    _mcp_reload(args, root, MC)
     return 0
 
 
@@ -325,7 +400,21 @@ def cmd_models(args) -> int:
         topic = str(getattr(args, "topic", "") or "")
         size = int(getattr(args, "size", 0) or 0) or 3
         votes = [str(v) for v in (getattr(args, "vote", []) or []) if str(v).strip()]
-        if votes:
+        answers_path = str(getattr(args, "answers", "") or "").strip()
+        if answers_path:
+            if votes:
+                print("council: --answers judges the round automatically; "
+                      "--vote is ignored in this call", file=sys.stderr)
+            try:
+                payload = (sys.stdin.read() if answers_path == "-"
+                           else Path(answers_path).read_text())
+                answers = json.loads(payload)
+            except (OSError, ValueError) as e:
+                print(f"council: cannot read answers: {e}", file=sys.stderr)
+                return 2
+            doc, path = C.judge(root, cfg, topic=topic, answers=answers,
+                                size=size, roles=seats or None)
+        elif votes:
             doc, path = C.record(root, cfg, topic=topic, votes=votes,
                                  size=size, roles=seats or None)
         else:
@@ -336,6 +425,11 @@ def cmd_models(args) -> int:
             return 0
         print(f"council {doc['topic']} round {doc['round']}: {len(doc['seats'])} "
               f"seat(s) -> {path}")
+        verdict = doc.get("verdict") or {}
+        if verdict.get("role"):
+            print(f"  round {verdict['round']} verdict: {verdict['role']} "
+                  f"({verdict['pin']}) took {verdict['wins']}/"
+                  f"{verdict['ballots']} win(s) from {verdict['voters']} voter(s)")
         for s in doc["seats"]:
             strengths = "+".join(s.get("strengths") or []) or "-"
             free = ", free" if s.get("free") else ""
@@ -358,7 +452,9 @@ def cmd_models(args) -> int:
         for w in doc.get("warnings") or []:
             print(f"  warning: {w}")
         print("  ask each seat for an independent answer, then vote once per seat "
-              "(role=win|loss|tie); two straight losses retire the seat.")
+              "(role=win|loss|tie) — or pass --answers to have every seat score "
+              "the anonymized answers and record the ballots itself; two straight "
+              "losses retire the seat.")
         return 0
     if action == "panel":
         # accept both `--roles r1,r2` (spec) and the parser's listed form
@@ -463,11 +559,14 @@ def cmd_models(args) -> int:
         elif r["health"] in ("unverified", "stale"):
             warn = "  (unchecked)"
         quota = f"  quota {r['quota_note']}" if r.get("quota_note") else ""
+        record = r.get("standing") or {}
+        council = (f"  council W{record.get('wins', 0)}/L{record.get('losses', 0)}"
+                   if record.get("wins") or record.get("losses") else "")
         profile = "+".join(r.get("strengths") or [])
         released = f"released {r['released']}" if r.get("released") else ""
         detail = ", ".join(x for x in (profile, released) if x)
         print(f"{r['role']:16s} {r['tier']:6s} {r['pin']:44s} {cost:12s} "
-              f"{r['health']}{warn}{extra}{quota}"
+              f"{r['health']}{warn}{extra}{quota}{council}"
               f"{('  ' + detail) if detail else ''}"
               f"{('  ' + r['note']) if r['note'] else ''}")
     # The docs promise `route --check` exits 1 when a role has no working
@@ -1014,6 +1113,24 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("value", nargs="?", default="null")
     g.add_argument("--scope", default="user", choices=["user", "project"])
     g.set_defaults(fn=cmd_config)
+    mc = sub.add_parser("mcp", help="MCP servers: list/add/remove (opencode owns the config)")
+    mc.add_argument("mcp_action", nargs="?", default="list",
+                    choices=["list", "add", "remove"])
+    mc.add_argument("name", nargs="?", default="")
+    mc.add_argument("--command", default="",
+                    help="local server command line, shell-quoted "
+                         "(e.g. \"npx -y @modelcontextprotocol/server-github\")")
+    mc.add_argument("--url", default="", help="remote server URL")
+    mc.add_argument("--env", action="append", default=[], metavar="K=V",
+                    help="environment variable for a local server (repeatable)")
+    mc.add_argument("--header", action="append", default=[], metavar="K=V",
+                    help="HTTP header for a remote server (repeatable)")
+    mc.add_argument("--global", dest="global_", action="store_true",
+                    help="write ~/.config/opencode/opencode.json instead of the project file")
+    mc.add_argument("--no-reload", action="store_true",
+                    help="skip the best-effort `opencode reload` after a change")
+    mc.add_argument("--json", action="store_true")
+    mc.set_defaults(fn=cmd_mcp)
     k = sub.add_parser("skills")
     k.add_argument("skills_action",
                    choices=["list", "view", "pending", "approve", "reject",
@@ -1082,6 +1199,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="`panel`/`council`: topic the bundle is scoped to")
     mo.add_argument("--vote", action="append", default=[],
                     help="`council`: role=win|loss|tie[:note] (repeat once per seat)")
+    mo.add_argument("--answers", default="",
+                    help="`council`: judge these seat answers blind and record the "
+                         "ballots ({role: text} or [{role, text}] JSON; '-' reads stdin)")
     mo.add_argument("--dry-run", action="store_true", help="`check`: list, do not probe")
     mo.add_argument("--json", action="store_true")
     mo.add_argument("--timeout", type=int, default=30, help="`sync`: metadata fetch timeout")
@@ -1127,9 +1247,9 @@ def main(argv=None) -> int:
         return 2
     if argv and not argv[0].startswith("-") and argv[0] not in (
             "doctor", "config", "skills", "memory", "setup", "tui", "plugin",
-            "risk", "models", "usage", "secret"):
+            "risk", "models", "usage", "secret", "mcp"):
         print(f"harness: unknown command {argv[0]!r} (retired headless commands: "
-              f"chat, plan, checkpoint, mcp — live sessions run in opencode)",
+              f"chat, plan, checkpoint — live sessions run in opencode)",
               file=sys.stderr)
         return 2
     args = build_parser().parse_args(argv)

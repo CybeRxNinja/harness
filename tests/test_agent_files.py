@@ -159,3 +159,18 @@ def test_agent_files_carry_the_v2_identity_colour(tmp_path, monkeypatch):
         head = path.read_text().split("---", 2)[1]
         assert re.search(r'^color: "#[0-9a-f]{6}"$', head, re.M), f"{path.name} has no v2 colour"
         assert "permissions:" in head
+
+
+def test_a_broken_package_never_prunes_the_agent_directory(tmp_path, monkeypatch):
+    """expected_agent_files() is empty only when the bundled JSON is unreadable.
+    Installing in that state must not read "nothing expected" as "delete all",
+    and a normal install leaves no temp files behind."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "no-state"))
+    import harness.agents as A
+    install_managed_agents()
+    before = sorted(p.name for p in agents_dir().glob("harness-*.md"))
+    assert before and not list(agents_dir().glob("*.tmp"))
+    monkeypatch.setattr(A, "bundled_agents", lambda: {})
+    assert A.install_managed_agents() == []
+    assert sorted(p.name for p in agents_dir().glob("harness-*.md")) == before

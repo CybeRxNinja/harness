@@ -424,7 +424,8 @@ def test_retired_relay_subcommands_exit_2(env, capsys):
 
 
 def test_retired_headless_commands_exit_2(env, capsys):
-    for retired in ("chat", "plan", "checkpoint", "mcp"):
+    # `mcp` is live again as a wrapper over opencode's own MCP manager.
+    for retired in ("chat", "plan", "checkpoint"):
         assert cli(env, retired) == 2
         err = capsys.readouterr().err
         assert "retired" in err or "unknown command" in err, err

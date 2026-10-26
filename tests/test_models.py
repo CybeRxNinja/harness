@@ -592,3 +592,56 @@ def test_a_stale_failed_probe_disqualifies_a_new_panel_pick(tmp_path, monkeypatc
     assert M._latest_probe_failed("acme/x", {
         "acme/x#high": {"ok": True, "checked_at": old}}) is False
     assert M._latest_probe_failed("acme/x", {}) is False
+
+
+# ---------------------------------------------------------------------------
+# Council record feeds routing: a proven debate loser drops behind a neutral
+# peer of its tier; a proven winner breaks a fit tie — never the other way.
+# ---------------------------------------------------------------------------
+
+def _two_strong_home(tmp_path, monkeypatch, standing=None, second_cost=(10, 30)):
+    home = _home(tmp_path, monkeypatch)
+    now = int(time.time())
+    (home / "models-available.json").write_text(json.dumps(
+        {"refreshed_at": now,
+         "models": ["freeco/tiny-free", "acme/strong-one", "acme/strong-two"]}))
+    dev = json.loads((home / "models-dev.json").read_text())
+    dev["providers"]["acme"]["models"]["strong-two"] = _meta(*second_cost)
+    (home / "models-dev.json").write_text(json.dumps(dev))
+    if standing is not None:
+        (home / "model-standing.json").write_text(json.dumps(
+            {"version": 1, "pins": standing}))
+    return home
+
+
+def test_a_proven_council_loser_routes_behind_a_neutral_peer(tmp_path, monkeypatch):
+    home = _two_strong_home(tmp_path, monkeypatch)
+    from harness import models as M
+    before = {r["role"]: r for r in M.route(CFG)}["deep"]
+    assert before["pin"] == "acme/strong-one#high", "baseline is the name tiebreak"
+    assert before["standing"] == {}
+    (home / "model-standing.json").write_text(json.dumps(
+        {"version": 1, "pins": {"acme/strong-one#high": {"wins": 0, "losses": 3}}}))
+    deep = {r["role"]: r for r in M.route(CFG)}["deep"]
+    assert deep["pin"] == "acme/strong-two#high"
+    assert deep["standing"] == {}
+    assert M._standing_rank({"wins": 0, "losses": 3}) == (1, 1)
+
+
+def test_one_council_loss_is_noise_and_does_not_demote(tmp_path, monkeypatch):
+    _two_strong_home(tmp_path, monkeypatch,
+                     {"acme/strong-one#high": {"wins": 0, "losses": 1}})
+    from harness import models as M
+    deep = {r["role"]: r for r in M.route(CFG)}["deep"]
+    assert deep["pin"] == "acme/strong-one#high"
+
+
+def test_a_proven_council_winner_outranks_a_cheaper_neutral_peer(tmp_path, monkeypatch):
+    """Promotion only breaks a fit tie: tier distance and capability lead."""
+    _two_strong_home(tmp_path, monkeypatch,
+                     {"acme/strong-two#high": {"wins": 3, "losses": 0}},
+                     second_cost=(12, 40))
+    from harness import models as M
+    deep = {r["role"]: r for r in M.route(CFG)}["deep"]
+    assert deep["pin"] == "acme/strong-two#high"
+    assert deep["standing"]["wins"] == 3

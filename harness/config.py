@@ -52,6 +52,8 @@ DEFAULT_CONFIG: dict = {
         "health_ttl_s": 1800,
         "check_timeout_s": 90,
         "check_candidates": 3,
+        # one score-only request per council seat in a blind judge pass
+        "judge_timeout_s": 120,
         # the model panel re-syncs at most this often (6h) when one is built
         "sync_ttl_s": 21600,
         # usage ledger retention (tokens/cost only — never message text)
@@ -256,7 +258,7 @@ def _validate(cfg: dict) -> None:
         if model is not None and "/" not in str(model):
             raise ValueError(f"models.routes.{role}.model must be provider/model")
     for key in ("health_ttl_s", "check_timeout_s", "check_candidates", "sync_ttl_s",
-                "usage_days", "usage_ledger_cap"):
+                "judge_timeout_s", "usage_days", "usage_ledger_cap"):
         if key in models and not isinstance(models[key], int):
             raise ValueError(f"models.{key} must be an int")
 

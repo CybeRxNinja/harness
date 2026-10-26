@@ -493,8 +493,20 @@ async function run(cmd: string[]): Promise<{ ok: boolean; text: string }> {
  * shell-out (the panel probes models and may re-sync) can never wedge the
  * tool call. stdout up to the kill is still returned.
  */
-async function runBudget(cmd: string[], budgetMs: number): Promise<{ ok: boolean; text: string }> {
-  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" })
+async function runBudget(cmd: string[], budgetMs: number, feed?: string): Promise<{ ok: boolean; text: string }> {
+  const proc = Bun.spawn(cmd, {
+    stdout: "pipe",
+    stderr: "ignore",
+    ...(feed === undefined ? {} : { stdin: "pipe" }),
+  })
+  if (feed !== undefined) {
+    try {
+      proc.stdin.write(feed)
+      await proc.stdin.end()
+    } catch {
+      /* the child closed stdin early; its exit code still tells the story */
+    }
+  }
   const timer = setTimeout(() => {
     try { proc.kill(9) } catch {}
   }, budgetMs)
@@ -535,23 +547,66 @@ function shortenDesc(value: unknown): string {
   return `${(space > 120 ? cut.slice(0, space) : cut).trimEnd()}…`
 }
 
-function frontmatter(text: string): Rec {
+const SKILL_BLOCK_HEAD = new Set([">", "|", ">-", ">+", "|-", "|+"])
+
+/**
+ * Frontmatter keys -> scalars, one level deep, with YAML block scalars folded.
+ *
+ * A skill written as `description: >-` used to be indexed with the literal
+ * value ">-" — it listed and matched as gibberish. Indented continuation lines
+ * belong to the key above them, and a matching pair of quotes is stripped, the
+ * same rules as `_frontmatter()` in harness/skills.py. Exported for the node
+ * tests so behaviour, not just presence, is pinned.
+ */
+export function skillFrontmatter(text: string): Rec {
   const fm: Rec = {}
-  const m = text.match(/^---\s*\n([\s\S]*?)\n---/)
-  for (const line of (m?.[1] ?? "").split("\n")) {
-    const i = line.indexOf(":")
-    if (i > 0) fm[line.slice(0, i).trim()] = line.slice(i + 1).trim()
+  const m = String(text ?? "").match(/^---\s*\n([\s\S]*?)\n---/)
+  let key = ""
+  let parts: string[] = []
+  const flush = () => {
+    if (!key) return
+    let value = parts.join(" ").replace(/\s+/g, " ").trim()
+    const q = value[0]
+    if ((q === '"' || q === "'") && value.length >= 2 && value.at(-1) === q) {
+      value = value.slice(1, -1)
+    }
+    fm[key] = value
+    key = ""
+    parts = []
   }
+  for (const raw of (m?.[1] ?? "").split("\n")) {
+    const line = raw.trim()
+    if (key && (raw.startsWith(" ") || raw.startsWith("\t") || SKILL_BLOCK_HEAD.has(line))) {
+      if (!SKILL_BLOCK_HEAD.has(line)) parts.push(line)
+      continue
+    }
+    flush()
+    if (!line || line.startsWith("#")) continue
+    const i = line.indexOf(":")
+    if (i <= 0) continue
+    key = line.slice(0, i).trim()
+    const v = line.slice(i + 1).trim()
+    parts = SKILL_BLOCK_HEAD.has(v) ? [] : (v ? [v] : [])
+  }
+  flush()
   return fm
 }
 
 /** Directories that may hold bundled harness skills, best first: explicit
  * override, then the project overlay, then package data, then global. */
+let SKILL_ROOTS_CACHE: { key: string; roots: string[] } | null = null
+
 async function skillRoots(projectDir?: string): Promise<string[]> {
   // The host's own directories (`<project>/.opencode/skills`, imported packs)
   // are included so the fallback list sees exactly what opencode advertises.
   // Harness' private overlay stays first: a project can shadow one skill
   // without forking the pack.
+  //
+  // Memoized per project: resolving the package data path spawned a Python
+  // interpreter on every seed/fallback call (~100ms+). The root LIST is stable
+  // for a session; pack imports add files under an existing root, not a new one.
+  const cacheKey = projectDir ?? ""
+  if (SKILL_ROOTS_CACHE?.key === cacheKey) return SKILL_ROOTS_CACHE.roots
   const roots: string[] = []
   const home = process.env.HOME ?? ""
   const cfg = process.env.XDG_CONFIG_HOME || (home ? `${home}/.config` : "")
@@ -567,7 +622,33 @@ async function skillRoots(projectDir?: string): Promise<string[]> {
   if (py.ok && py.text.trim()) roots.push(py.text.trim())
   if (cfg) roots.push(`${cfg}/opencode/skills`)
   if (home) roots.push(`${home}/.harness/skills`)
-  return [...new Set(roots.filter((r) => r && r.length > 1))]
+  const out = [...new Set(roots.filter((r) => r && r.length > 1))]
+  SKILL_ROOTS_CACHE = { key: cacheKey, roots: out }
+  return out
+}
+
+/**
+ * A skill-relative file path, or "" when it escapes the skill directory.
+ *
+ * The old check was `target.startsWith(base)`, which accepted the SIBLING
+ * `/a/b/skill-evil` for base `/a/b/skill`. Normalizing segments and rejecting
+ * `..`/absolute paths is the actual boundary.
+ */
+export function skillTargetPath(base: string, subpath: string): string {
+  const raw = String(subpath ?? "").replace(/\\/g, "/")
+  const root = String(base ?? "").replace(/[\\/]+$/, "")
+  if (!root || !raw.trim() || raw.startsWith("/") || /^[A-Za-z]:/.test(raw)) return ""
+  const parts: string[] = []
+  for (const part of raw.split("/")) {
+    if (!part || part === ".") continue
+    if (part === "..") {
+      if (!parts.length) return ""
+      parts.pop()
+      continue
+    }
+    parts.push(part)
+  }
+  return parts.length ? `${root}/${parts.join("/")}` : ""
 }
 
 /**
@@ -634,11 +715,17 @@ export function routeLines(rows: Rec[]): string {
       "unchecked"
     const fb = r.fallback_pin ? `; fallback ${r.fallback_pin}` : ""
     const quotaNote = r.quota_note ? `; quota ${r.quota_note}` : ""
+    // A pin's cross-topic council record: the orchestrator should see that a
+    // model keeps losing debates before it dispatches it again.
+    const st = r.standing || {}
+    const wins = Number(st.wins ?? 0)
+    const losses = Number(st.losses ?? 0)
+    const record = wins + losses ? `; council W${wins}/L${losses}` : ""
     const strengths = Array.isArray(r.strengths) && r.strengths.length
       ? `, ${r.strengths.join("+")}` : ""
     const released = r.released ? `, released ${String(r.released)}` : ""
     const note = r.note ? ` (${r.note})` : ""
-    return `- ${r.role}: ${r.pin} [${r.tier}, ${price}${strengths}${released}, ${state}${fb}${quotaNote}]${note}`
+    return `- ${r.role}: ${r.pin} [${r.tier}, ${price}${strengths}${released}, ${state}${fb}${quotaNote}${record}]${note}`
   })
   const bad = rows.filter((r: Rec) => r.health === "failed").map((r: Rec) => r.role)
   const unchecked = rows
@@ -798,6 +885,11 @@ export function councilLines(doc: Rec): string {
     return "council has no seats — widen the model list or retire fewer upstreams"
   }
   const head = `council ${String(doc?.topic ?? "default")} · round ${Number(doc?.round ?? 0)} · ${seats.length} seat(s)`
+  const v = doc?.verdict ?? {}
+  const verdict = v && v.role
+    ? `round ${Number(v.round ?? 0)} verdict: ${String(v.role)} (${String(v.pin ?? "")}) ` +
+      `took ${Number(v.wins ?? 0)}/${Number(v.ballots ?? 0)} win(s) from ${Number(v.voters ?? 0)} voter(s)`
+    : ""
   const lines = seats.map((s: Rec) => {
     const strengths = Array.isArray(s.strengths) && s.strengths.length
       ? s.strengths.join("+") : "-"
@@ -828,12 +920,13 @@ export function councilLines(doc: Rec): string {
     `- warning: ${String(w).slice(0, 160)}`)
   return [
     head,
+    ...(verdict ? [verdict] : []),
     ...lines,
     ...blocs,
     ...retired,
     ...swaps,
     ...warnings,
-    "Ask every seat for an independent answer, anonymize the answers, then have each seat vote once per round as `voter>target=win|loss|tie` — a seat never judges its own answer. Two straight losses retire it; two rounds of seats voting for each other is a collusion bloc, and the lower scorer is retired. A retirement seats a different model on a different upstream automatically.",
+    "Ask every seat for an independent answer, anonymize the answers, then have each seat vote once per round as `voter>target=win|loss|tie` — a seat never judges its own answer. In a hurry, pass every seat's text as `answers` and the seats score each other blind (one request per seat, own answer omitted). Two straight losses retire it; two rounds of seats voting for each other is a collusion bloc, and the lower scorer is retired — blind judge ballots are exempt because independent scores cannot be a pact. A retirement seats a different model on a different upstream automatically.",
   ].join("\n")
 }
 
@@ -851,11 +944,25 @@ export function councilArgs(directory: string, input: Rec): string[] {
     const text = String(vote ?? "").trim()
     if (text) args.push("--vote", text)
   }
+  // Answers travel on stdin, never argv: a plan is too big for a safe argument
+  // and a shell is never involved.
+  if (Array.isArray(input?.answers) && input.answers.length) {
+    args.push("--answers", "-")
+  }
   const roles = (Array.isArray(input?.roles) ? input.roles : [])
     .map((r: any) => String(r ?? "").trim())
     .filter(Boolean)
   if (roles.length) args.push("--roles", ...roles)
   return args
+}
+
+/** The stdin payload for a blind judge pass: only well-formed seat answers. */
+export function councilAnswers(input: Rec): string {
+  const rows = (Array.isArray(input?.answers) ? input.answers : [])
+    .map((a: Rec) => ({ role: String(a?.role ?? "").trim(),
+                        text: String(a?.text ?? "") }))
+    .filter((a: Rec) => a.role && a.text)
+  return rows.length ? JSON.stringify(rows) : ""
 }
 
 /**
@@ -959,7 +1066,7 @@ async function seedSkills(projectDir?: string): Promise<Rec[]> {
       try {
         const full = join(root, rel)
         const text = await Bun.file(full).text()
-        const fm = frontmatter(text)
+        const fm = skillFrontmatter(text)
         const name = fm.name || basename(dirname(full))
         if (seen.has(name)) continue
         seen.add(name)
@@ -1003,11 +1110,11 @@ async function readSkill(skill: Rec, subpath?: string): Promise<string> {
   }
 
   if (subpath) {
-    const { join, dirname } = await import("node:path")
+    const { dirname } = await import("node:path")
     if (!skillPath) return `not found: ${subpath} (the ${label} skill has no directory to read from)`
     const base = dirname(skillPath)
-    const target = join(base, subpath)
-    if (!base || !target.startsWith(base)) return `cannot read ${subpath}: path escapes the ${label} skill directory`
+    const target = skillTargetPath(base, subpath)
+    if (!target) return `cannot read ${subpath}: path escapes the ${label} skill directory`
     const text = await readFile(target)
     if (text !== null) return text
     return `not found: ${subpath} (the ${label} skill has no such file under ${base})`
@@ -2822,7 +2929,9 @@ const HarnessPlugin = {
             "The model council for a topic: distinct-upstream seats with model strengths, release " +
             "date, context, health and a win/loss record. Call with just `topic` to seat the roster, " +
             "spawn each seat as a subagent with its pin, collect independent answers, then call again " +
-            "with one attributed vote per seat (`voter>target=win|loss|tie`). A seat that loses twice " +
+            "with one attributed vote per seat (`voter>target=win|loss|tie`). Or pass `answers` " +
+            "([{role,text}]) for a blind judge pass: every seat scores the OTHER seats' anonymized " +
+            "answers and the ballots are recorded automatically, one request per seat. A seat that loses twice " +
             "in a row is retired and the roster is rebuilt on a different upstream; two seats that " +
             "award each other a win in two rounds are a collusion bloc, and the lower scorer is " +
             "retired the same way. Retired pins are never re-seated for that role in this topic. " +
@@ -2843,6 +2952,18 @@ const HarnessPlugin = {
                 items: { type: "string" },
                 description: "Re-resolve only these panel roles (plan: panel-lead,panel-peer; test: panel-skeptic,panel-edge); other seats keep their pins.",
               },
+              answers: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    role: { type: "string", description: "The seat that wrote this answer" },
+                    text: { type: "string", description: "That seat's answer, verbatim" },
+                  },
+                  required: ["role", "text"],
+                },
+                description: "Blind judge pass: pass each seat's answer and every other seat scores them anonymously, then the ballots are recorded automatically. For when there is no time to collect votes; costs one request per seat.",
+              },
             },
             required: ["topic"],
             additionalProperties: false,
@@ -2852,8 +2973,11 @@ const HarnessPlugin = {
             const topic = String(input?.topic ?? "").trim()
             if (!topic) return { content: "council needs a topic" }
             const args = councilArgs(directory, { ...input, topic })
-            // cold build -> up to 3 real probes + two verification rounds
-            const res = await runBudget(args, 300000)
+            const feed = councilAnswers(input)
+            // cold build -> up to 3 real probes + two verification rounds;
+            // a judge pass adds one score-only request per seat on top, at most
+            // two in flight, so it gets a larger ceiling than a roster-only call
+            const res = await runBudget(args, feed ? 420000 : 300000, feed || undefined)
             const text = res.text.trim()
             if (!text) {
               return {

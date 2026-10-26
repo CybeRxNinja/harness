@@ -57,13 +57,19 @@ def scan(project_root: Path, cfg: dict) -> list[dict]:
     disabled = set((cfg.get("skills", {}) or {}).get("disabled", []))
     import fnmatch
     for tier, root, prec in skill_roots(project_root, cfg):
-        for skill_md in root.rglob("SKILL.md"):
-            name = _frontmatter(skill_md).get("name", skill_md.parent.name)
+        try:
+            found = list(root.rglob("SKILL.md"))
+        except OSError:
+            continue  # an unreadable root must not hide every other skill
+        for skill_md in found:
+            # One read per skill: the old code parsed frontmatter twice, which
+            # doubled the I/O of every list/view on a store with references.
+            fm = _frontmatter(skill_md)
+            name = fm.get("name") or skill_md.parent.name
             if any(fnmatch.fnmatch(name, pat) for pat in disabled):
                 continue
             if name in out:
                 continue  # higher precedence already won
-            fm = _frontmatter(skill_md)
             out[name] = {"name": name, "description": fm.get("description", "")[:120],
                          "tier": tier, "path": str(skill_md), "category": skill_md.parent.parent.name}
     return sorted(out.values(), key=lambda d: d["name"])
@@ -192,17 +198,30 @@ def match(items: list[dict], query: str, limit: int = 3, min_score: int = 2) -> 
     return scored[:limit]
 
 
+MAX_SKILL_CHARS = 12000
+
+
+def _body(target: Path) -> str:
+    text = target.read_text(errors="replace")
+    if len(text) <= MAX_SKILL_CHARS:
+        return text
+    return (text[:MAX_SKILL_CHARS] +
+            f"\n\n[harness: truncated at {MAX_SKILL_CHARS} chars — read {target} "
+            "for the rest]")
+
+
 def view(project_root: Path, cfg: dict, name: str, subpath: str = "") -> str:
-    for s in scan(project_root, cfg):
+    items = scan(project_root, cfg)
+    for s in items:
         if s["name"] == name:
             base = Path(s["path"]).parent
             target = (base / subpath) if subpath else base / "SKILL.md"
             target = target.resolve()
             if base.resolve() not in target.parents and target != base.resolve():
                 raise PermissionError("reference escapes skill dir")
-            return target.read_text(errors="replace")[:12000]
-    # did-you-mean
-    names = [s["name"] for s in scan(project_root, cfg)]
+            return _body(target)
+    # did-you-mean: reuse the scan above instead of walking every root twice
+    names = [s["name"] for s in items]
     sug = [n for n in names if name[:3].lower() in n.lower()][:3]
     raise FileNotFoundError(f"skill {name!r} not found. did-you-mean: {sug}")
 

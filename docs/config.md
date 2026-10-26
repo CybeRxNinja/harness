@@ -99,6 +99,7 @@ resolves it against what this install can actually reach.
 | `health_ttl_s` | `1800` | how long a probe verdict is trusted |
 | `check_timeout_s` | `90` | per-probe timeout |
 | `check_candidates` | `3` | probes per round, at most one candidate per tier |
+| `judge_timeout_s` | `120` | per-seat timeout for a council blind judge pass |
 | `routes` | tier + variant per role | the routing table |
 
 Commands (nothing spends a request unless it says so):
