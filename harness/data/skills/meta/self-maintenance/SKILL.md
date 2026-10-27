@@ -14,8 +14,8 @@ Non-Goals: no speculative refactors, no new deps for few-line fixes, ZERO person
 5. Verify with ONE canonical test command max once per wave (or parse/syntax + one structural check if no runner); never silence a failing gate.
 6. Capture durable decision without PII; tick todos only on evidence.
 ## Pitfalls
-- Speculative refactor or new dep for a few-line fix; installing packages (report missing tool instead).
-- Personal data in diff/logs/memory; scratch outside `.opencode/harness/tmp/`.
+- Speculative refactor or new dep for a few-line fix; installing packages system-wide (portable/project-local ok; report missing tool instead).
+- Personal data in diff/logs/memory; scratch outside `.opencode/temp/`.
 - Risk-gated asks only for destructive/irreversible actions; max 8 spawns / 4 waves.
 ## Verification
 Triggered only when asked or natural+genuine; failing->passing evidence or waiver+reason; no personal data in diff.
